@@ -16,6 +16,7 @@ from PyQt6.QtGui import QKeySequence, QAction
 from src.views.image_view import ImageView
 from src.views.tools_panel import ToolsPanel
 from src.views.export_dialog import ExportDialog
+from src.views.library_view import LibraryView
 from src.controllers.image_controller import ImageController
 
 
@@ -37,6 +38,7 @@ class MainWindow(QMainWindow):
         # Initialize components
         self._image_view = ImageView()
         self._tools_panel = ToolsPanel()
+        self._library_view = LibraryView()
         self._image_controller = ImageController(self._image_view)
         
         # Set up UI
@@ -59,14 +61,11 @@ class MainWindow(QMainWindow):
         # Add image view as central widget
         layout.addWidget(self._image_view)
         
-        # Left panel - Library (placeholder)
-        self.library_panel = QDockWidget("Library", self)
-        library_content = QLabel("Library Panel\n\nDrag & drop images\nor use File > Open")
-        library_content.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        library_content.setStyleSheet("background-color: #242424; color: #a0a0a0; padding: 20px;")
-        self.library_panel.setWidget(library_content)
-        self.library_panel.setMinimumWidth(200)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.library_panel)
+        # Left panel - Library
+        self.library_dock = QDockWidget("Library", self)
+        self.library_dock.setWidget(self._library_view)
+        self.library_dock.setMinimumWidth(200)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.library_dock)
         
         # Right panel - Tools
         self.tools_dock = QDockWidget("Adjustments", self)
@@ -148,6 +147,7 @@ class MainWindow(QMainWindow):
         self._image_view.image_loaded.connect(self._on_image_loaded)
         self._image_view.zoom_changed.connect(self._on_zoom_changed)
         self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
+        self._library_view.image_selected.connect(self._on_library_image_selected)
 
     def _on_image_loaded(self):
         """Handle image loaded event."""
@@ -167,14 +167,32 @@ class MainWindow(QMainWindow):
         """Handle adjustments changed from tools panel."""
         self._image_controller.on_adjustments_changed(adjustments)
 
+    def _on_library_image_selected(self, file_path: str):
+        """Handle image selection from library."""
+        self._image_controller.load_image(file_path, self)
+
     # Menu action handlers
     def _open_image(self):
         """Handle open image action."""
-        self._image_controller.open_image(self)
+        if self._image_controller.open_image(self):
+            # Add to library
+            file_path = self._image_controller.image_model.file_path
+            if file_path:
+                self._library_view.add_image(file_path)
 
     def _import_images(self):
         """Handle import images action."""
-        self._status_bar.showMessage("Import images (not yet implemented)", 2000)
+        from PyQt6.QtWidgets import QFileDialog
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Import Images",
+            "",
+            "Image Files (*.jpg *.jpeg *.png *.tiff *.tif *.bmp *.webp);;All Files (*)"
+        )
+        
+        if file_paths:
+            self._library_view.add_images(file_paths)
+            self._status_bar.showMessage(f"Imported {len(file_paths)} images", 2000)
 
     def _export_image(self):
         """Handle export image action."""
@@ -241,7 +259,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_library_panel(self):
         """Toggle library panel visibility."""
-        self.library_panel.setVisible(not self.library_panel.isVisible())
+        self.library_dock.setVisible(not self.library_dock.isVisible())
 
     def _toggle_tools_panel(self):
         """Toggle tools panel visibility."""
