@@ -15,6 +15,7 @@ from PyQt6.QtGui import QKeySequence, QAction
 
 from src.views.image_view import ImageView
 from src.views.tools_panel import ToolsPanel
+from src.views.export_dialog import ExportDialog
 from src.controllers.image_controller import ImageController
 
 
@@ -177,7 +178,28 @@ class MainWindow(QMainWindow):
 
     def _export_image(self):
         """Handle export image action."""
-        self._status_bar.showMessage("Export image (not yet implemented)", 2000)
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to export", 2000)
+            return
+        
+        # Get current image
+        image = self._image_controller.get_current_image()
+        if image is None:
+            self._status_bar.showMessage("No image to export", 2000)
+            return
+        
+        # Get default path from current file
+        default_path = self._image_controller.image_model.file_path or ""
+        if default_path:
+            from pathlib import Path
+            p = Path(default_path)
+            default_path = str(p.parent / f"{p.stem}_edited{p.suffix}")
+        
+        # Show export dialog
+        dialog = ExportDialog(image, default_path, self)
+        if dialog.exec():
+            export_path = dialog.get_export_path()
+            self._status_bar.showMessage(f"Exported to: {export_path}", 3000)
 
     def _undo(self):
         """Handle undo action."""
