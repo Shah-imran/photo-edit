@@ -1,0 +1,25 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+PyQt6 = "*"
+PyQt6-Qt6 = "*"
+Pillow = "*"
+numpy = "*"
+opencv-python = "*"
+rawpy = "*"
+piexif = "*"
+colorspacious = "*"
+
+[dev-packages]
+pytest = "*"
+pytest-qt = "*"
+pytest-cov = "*"
+pytest-mock = "*"
+hypothesis = "*"
+faker = "*"
+
+[requires]
+python_version = "3.10"
