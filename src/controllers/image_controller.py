@@ -2,6 +2,9 @@
 
 from typing import Optional, Dict
 from PyQt6.QtWidgets import QFileDialog, QWidget, QMessageBox
+from PyQt6.QtCore import QObject
+from PIL import Image
+
 from src.models.image_model import ImageModel
 from src.services.image_service import ImageService
 from src.services.history_service import HistoryService
@@ -9,13 +12,18 @@ from src.views.image_view import ImageView
 from src.processors.exposure_processor import ExposureProcessor
 from src.processors.color_processor import ColorProcessor
 from src.commands.adjustment_commands import CombinedAdjustmentCommand
+from src.processing.processing_worker import ProcessingWorker
+from src.utils.debouncer import Debouncer
 
 
-class ImageController:
+class ImageController(QObject):
     """Controller for managing image operations.
     
     This controller connects the image model, services, and view,
     handling user interactions and coordinating operations.
+    
+    The controller uses background threading for image processing
+    to keep the UI responsive during adjustments.
     """
 
     def __init__(
@@ -23,7 +31,8 @@ class ImageController:
         image_view: ImageView,
         image_model: Optional[ImageModel] = None,
         image_service: Optional[ImageService] = None,
-        history_service: Optional[HistoryService] = None
+        history_service: Optional[HistoryService] = None,
+        use_threading: bool = True
     ):
         """Initialize the ImageController.
         
@@ -32,13 +41,17 @@ class ImageController:
             image_model: Optional ImageModel (creates new if not provided)
             image_service: Optional ImageService (creates new if not provided)
             history_service: Optional HistoryService (creates new if not provided)
+            use_threading: Whether to use background threading for processing
         """
+        super().__init__()
+        
         self._image_view = image_view
         self._image_model = image_model or ImageModel()
         self._image_service = image_service or ImageService()
         self._history_service = history_service or HistoryService()
+        self._use_threading = use_threading
         
-        # Processors
+        # Processors (for synchronous fallback)
         self._exposure_processor = ExposureProcessor()
         self._color_processor = ColorProcessor()
         
@@ -46,12 +59,38 @@ class ImageController:
         self._exposure_params: Dict[str, float] = {}
         self._color_params: Dict[str, float] = {}
         
+        # Background processing
+        self._processing_worker: Optional[ProcessingWorker] = None
+        self._debouncer: Optional[Debouncer] = None
+        self._latest_request_id: int = -1
+        
+        if use_threading:
+            self._setup_async_processing()
+        
         # Connect signals
         self._connect_signals()
+
+    def _setup_async_processing(self) -> None:
+        """Set up asynchronous processing components."""
+        # Create and start processing worker
+        self._processing_worker = ProcessingWorker()
+        self._processing_worker.preview_ready.connect(self._on_preview_ready)
+        self._processing_worker.processing_complete.connect(self._on_processing_complete)
+        self._processing_worker.error_occurred.connect(self._on_processing_error)
+        self._processing_worker.start()
+        
+        # Create debouncer for slider input (50ms delay)
+        self._debouncer = Debouncer(delay_ms=50)
+        self._debouncer.triggered.connect(self._on_debounced_adjustment)
 
     def _connect_signals(self):
         """Connect view signals to controller methods."""
         pass  # Signals will be connected as needed
+
+    def cleanup(self) -> None:
+        """Clean up resources (call before destroying)."""
+        if self._processing_worker is not None:
+            self._processing_worker.stop()
 
     @property
     def image_model(self) -> ImageModel:
@@ -99,6 +138,15 @@ class ImageController:
             self._image_model.set_original_image(image)
             self._image_view.set_image(image)
             self._history_service.clear_history()
+            
+            # Reset adjustment params
+            self._exposure_params = {}
+            self._color_params = {}
+            
+            # Set image in processing worker for proxy generation
+            if self._processing_worker is not None:
+                self._processing_worker.set_image(image)
+            
             return True
         except FileNotFoundError:
             QMessageBox.warning(
@@ -135,12 +183,20 @@ class ImageController:
         """Refresh the image view with the current image state."""
         current_image = self._image_model.get_current_image()
         if current_image:
-            self._image_view.set_image(current_image)
+            # Don't emit image_loaded signal on refresh (only on initial load)
+            self._image_view.set_image(current_image, emit_loaded=False)
 
     def reset_to_original(self) -> None:
         """Reset the image to its original state."""
         self._image_model.reset_to_original()
         self._history_service.clear_history()
+        self._exposure_params = {}
+        self._color_params = {}
+        
+        # Cancel any pending processing
+        if self._processing_worker is not None:
+            self._processing_worker.cancel_pending()
+        
         self.refresh_view()
 
     def undo(self) -> bool:
@@ -211,7 +267,7 @@ class ImageController:
         color_params: Dict[str, float] = None,
         add_to_history: bool = False
     ) -> None:
-        """Apply adjustments to the image.
+        """Apply adjustments to the image (synchronous).
         
         Args:
             exposure_params: Exposure adjustment parameters
@@ -258,9 +314,15 @@ class ImageController:
     def on_adjustments_changed(self, adjustments: Dict[str, float]) -> None:
         """Handle adjustment changes from the tools panel.
         
+        This method is called frequently during slider movement.
+        Uses debouncing and background processing for smooth UI.
+        
         Args:
             adjustments: Dictionary of all adjustment values
         """
+        if not self.has_image():
+            return
+        
         exposure_params = {
             'exposure': adjustments.get('exposure', 0.0),
             'contrast': adjustments.get('contrast', 0.0),
@@ -271,8 +333,100 @@ class ImageController:
             'vibrance': adjustments.get('vibrance', 0.0)
         }
         
-        # Apply without adding to history (live preview)
-        self.apply_adjustments(exposure_params, color_params, add_to_history=False)
+        # Store params
+        self._exposure_params = exposure_params
+        self._color_params = color_params
+        
+        if self._use_threading and self._debouncer is not None:
+            # Use debounced async processing
+            self._debouncer.call({
+                'exposure': exposure_params,
+                'color': color_params
+            })
+        else:
+            # Fallback to synchronous processing
+            self.apply_adjustments(exposure_params, color_params, add_to_history=False)
+
+    def _on_debounced_adjustment(self, params: dict) -> None:
+        """Handle debounced adjustment (called after slider pause).
+        
+        Args:
+            params: Dictionary with 'exposure' and 'color' params
+        """
+        if not self.has_image() or self._processing_worker is None:
+            return
+        
+        exposure_params = params.get('exposure', {})
+        color_params = params.get('color', {})
+        
+        # Submit preview request to worker
+        self._latest_request_id = self._processing_worker.submit_preview_request(
+            exposure_params=exposure_params,
+            color_params=color_params
+        )
+
+    def _on_preview_ready(self, request_id: int, image: Image.Image) -> None:
+        """Handle preview image ready from worker.
+        
+        Args:
+            request_id: The request ID
+            image: Processed preview image
+        """
+        # Only update if this is still the latest request
+        if self._processing_worker is not None and \
+           self._processing_worker.is_latest_request(request_id):
+            # Upscale proxy to display size
+            proxy_manager = self._processing_worker.proxy_manager
+            if proxy_manager.needs_proxy():
+                display_image = proxy_manager.upscale_to_original_size(image)
+            else:
+                display_image = image
+            
+            self._image_model.current_image = display_image
+            self.refresh_view()
+
+    def _on_processing_complete(self, request_id: int, image: Image.Image) -> None:
+        """Handle full-resolution processing complete from worker.
+        
+        Args:
+            request_id: The request ID
+            image: Processed full-resolution image
+        """
+        self._image_model.current_image = image
+        self.refresh_view()
+
+    def _on_processing_error(self, request_id: int, error: str) -> None:
+        """Handle processing error from worker.
+        
+        Args:
+            request_id: The request ID
+            error: Error message
+        """
+        # Log error but don't show dialog for transient errors
+        print(f"Processing error (request {request_id}): {error}")
+
+    def on_slider_released(self) -> None:
+        """Handle slider release - trigger full-resolution processing.
+        
+        Call this when the user releases a slider to get the final
+        high-quality result.
+        """
+        if not self.has_image():
+            return
+        
+        if self._use_threading and self._processing_worker is not None:
+            # Flush any pending debounced calls
+            if self._debouncer is not None:
+                self._debouncer.flush()
+            
+            # Request full-resolution processing
+            self._processing_worker.submit_final_request(
+                exposure_params=self._exposure_params,
+                color_params=self._color_params
+            )
+        
+        # Commit to history
+        self.commit_adjustments()
 
     def commit_adjustments(self) -> None:
         """Commit current adjustments to history.
@@ -283,8 +437,10 @@ class ImageController:
             return
         
         # Only commit if there are actual changes
-        has_changes = any(v != 0 for v in self._exposure_params.values()) or \
-                      any(v != 0 for v in self._color_params.values())
+        has_changes = (
+            any(v != 0 for v in self._exposure_params.values()) or
+            any(v != 0 for v in self._color_params.values())
+        )
         
         if has_changes:
             command = CombinedAdjustmentCommand(

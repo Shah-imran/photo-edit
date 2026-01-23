@@ -717,6 +717,84 @@ For each new feature, ensure:
 
 ---
 
+## 12. Automated UI Testing (Implemented)
+
+The project includes comprehensive automated UI tests that simulate real user interactions using `pytest-qt`.
+
+### Current UI Test Coverage
+
+```
+tests/ui/
+├── __init__.py
+├── test_main_window.py           # 21 tests - Window, panels, controls
+└── test_adjustment_workflow.py   # 8 tests - End-to-end workflows
+```
+
+### Test Categories
+
+#### Main Window Tests (`test_main_window.py`)
+- **Window Lifecycle**: Opening, panels present, initial state
+- **Panel Toggling**: F5/F6 keyboard shortcuts
+- **Image Loading**: Enables tools, updates title, displays image
+- **Slider Interaction**: Movement, value changes, signal emission, reset
+- **Zoom Controls**: Keyboard shortcuts (Ctrl+=, Ctrl+-, 0, 1)
+- **Undo/Redo**: Keyboard shortcuts (Ctrl+Z, Ctrl+Shift+Z)
+- **Library Panel**: Add images, select, clear
+
+#### Workflow Tests (`test_adjustment_workflow.py`)
+- **Complete Workflow**: Load → Adjust → Verify image changes
+- **Multiple Adjustments**: Apply several adjustments in sequence
+- **Reset Workflow**: Adjust → Reset → Verify reset
+- **Slider Double-Click**: Reset individual slider
+- **Signal Flow**: Slider triggers processing
+- **Rapid Slider Movement**: Stress test for debouncing
+- **Panel State**: Hide/show preserves values
+- **Status Bar**: Zoom updates status bar
+
+### Running UI Tests
+
+```bash
+# Run only UI tests
+pytest tests/ui/ -v
+
+# Run with visible windows (useful for debugging)
+pytest tests/ui/ -v --no-qt-log
+
+# Run specific UI test
+pytest tests/ui/test_main_window.py::TestSliderInteraction -v
+```
+
+### Key pytest-qt Features Used
+
+```python
+# Wait for widget to be exposed
+qtbot.waitExposed(window)
+
+# Simulate keyboard input
+QTest.keyClick(window, Qt.Key.Key_F5)
+QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+# Simulate mouse clicks
+QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+QTest.mouseDClick(slider, Qt.MouseButton.LeftButton)
+
+# Wait for signals
+with qtbot.waitSignal(panel.adjustments_changed, timeout=1000):
+    slider.set_value(1.0)
+
+# Wait for async processing
+qtbot.wait(100)  # milliseconds
+```
+
+### Threading Considerations
+
+UI tests work with the threaded processing system. Key points:
+- Use `qtbot.wait()` after operations that trigger async processing
+- Tests verify both immediate UI response and eventual state
+- Windows COM warnings may appear but tests still pass
+
+---
+
 ## Notes
 
 - Tests should be written alongside code, not after

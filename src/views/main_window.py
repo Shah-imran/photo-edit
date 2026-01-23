@@ -147,6 +147,7 @@ class MainWindow(QMainWindow):
         self._image_view.image_loaded.connect(self._on_image_loaded)
         self._image_view.zoom_changed.connect(self._on_zoom_changed)
         self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
+        self._tools_panel.slider_released.connect(self._on_slider_released)
         self._library_view.image_selected.connect(self._on_library_image_selected)
 
     def _on_image_loaded(self):
@@ -166,6 +167,10 @@ class MainWindow(QMainWindow):
     def _on_adjustments_changed(self, adjustments: dict):
         """Handle adjustments changed from tools panel."""
         self._image_controller.on_adjustments_changed(adjustments)
+
+    def _on_slider_released(self):
+        """Handle slider released - trigger final processing."""
+        self._image_controller.on_slider_released()
 
     def _on_library_image_selected(self, file_path: str):
         """Handle image selection from library."""
@@ -264,3 +269,9 @@ class MainWindow(QMainWindow):
     def _toggle_tools_panel(self):
         """Toggle tools panel visibility."""
         self.tools_dock.setVisible(not self.tools_dock.isVisible())
+
+    def closeEvent(self, event):
+        """Handle window close event."""
+        # Clean up the image controller (stops background threads)
+        self._image_controller.cleanup()
+        super().closeEvent(event)

@@ -26,9 +26,10 @@ class ImageView(QWidget):
     zoom_changed = pyqtSignal(float)
 
     # Zoom constants
-    MIN_ZOOM = 0.1
+    MIN_ZOOM = 0.05
     MAX_ZOOM = 10.0
-    ZOOM_STEP = 0.1
+    ZOOM_STEP = 0.05  # 5% steps for smoother zoom
+    ZOOM_WHEEL_FACTOR = 1.1  # 10% per wheel notch
 
     def __init__(self, parent: Optional[QWidget] = None):
         """Initialize the ImageView widget.
@@ -68,16 +69,18 @@ class ImageView(QWidget):
         # Set mouse tracking for panning
         self._scroll_area.viewport().installEventFilter(self)
 
-    def set_image(self, image: Image.Image) -> None:
+    def set_image(self, image: Image.Image, emit_loaded: bool = True) -> None:
         """Set the image to display.
         
         Args:
             image: PIL Image to display
+            emit_loaded: Whether to emit the image_loaded signal (default True)
         """
         # Convert PIL Image to QPixmap
         self._pixmap = self._pil_to_pixmap(image)
         self._update_display()
-        self.image_loaded.emit()
+        if emit_loaded:
+            self.image_loaded.emit()
 
     def clear_image(self) -> None:
         """Clear the currently displayed image."""
@@ -116,11 +119,11 @@ class ImageView(QWidget):
 
     def zoom_in(self) -> None:
         """Zoom in by one step."""
-        self.set_zoom_factor(self._zoom_factor + self.ZOOM_STEP)
+        self.set_zoom_factor(self._zoom_factor * self.ZOOM_WHEEL_FACTOR)
 
     def zoom_out(self) -> None:
         """Zoom out by one step."""
-        self.set_zoom_factor(self._zoom_factor - self.ZOOM_STEP)
+        self.set_zoom_factor(self._zoom_factor / self.ZOOM_WHEEL_FACTOR)
 
     def fit_to_window(self) -> None:
         """Fit the image to the window size."""

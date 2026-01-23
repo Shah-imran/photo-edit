@@ -1,6 +1,6 @@
 """Tools panel for image adjustments."""
 
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -19,9 +19,11 @@ class ToolsPanel(QWidget):
     
     Signals:
         adjustments_changed: Emitted when any adjustment changes
+        slider_released: Emitted when any slider is released (for final processing)
     """
     
     adjustments_changed = pyqtSignal(dict)
+    slider_released = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         """Initialize the tools panel.
@@ -68,43 +70,37 @@ class ToolsPanel(QWidget):
         content_layout.setSpacing(16)
         
         # Light section
-        light_section = self._create_section("Light")
-        light_layout = QVBoxLayout(light_section)
-        light_layout.setContentsMargins(0, 8, 0, 0)
-        light_layout.setSpacing(8)
+        light_section, light_content_layout = self._create_section("Light")
         
         self._exposure_slider = AdjustmentSlider(
             "Exposure", min_value=-5.0, max_value=5.0, default_value=0.0, step=0.1
         )
-        light_layout.addWidget(self._exposure_slider)
+        light_content_layout.addWidget(self._exposure_slider)
         
         self._contrast_slider = AdjustmentSlider(
             "Contrast", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
         )
-        light_layout.addWidget(self._contrast_slider)
+        light_content_layout.addWidget(self._contrast_slider)
         
         self._brightness_slider = AdjustmentSlider(
             "Brightness", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
         )
-        light_layout.addWidget(self._brightness_slider)
+        light_content_layout.addWidget(self._brightness_slider)
         
         content_layout.addWidget(light_section)
         
         # Color section
-        color_section = self._create_section("Color")
-        color_layout = QVBoxLayout(color_section)
-        color_layout.setContentsMargins(0, 8, 0, 0)
-        color_layout.setSpacing(8)
+        color_section, color_content_layout = self._create_section("Color")
         
         self._saturation_slider = AdjustmentSlider(
             "Saturation", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
         )
-        color_layout.addWidget(self._saturation_slider)
+        color_content_layout.addWidget(self._saturation_slider)
         
         self._vibrance_slider = AdjustmentSlider(
             "Vibrance", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
         )
-        color_layout.addWidget(self._vibrance_slider)
+        color_content_layout.addWidget(self._vibrance_slider)
         
         content_layout.addWidget(color_section)
         
@@ -133,14 +129,14 @@ class ToolsPanel(QWidget):
         scroll_area.setWidget(content)
         main_layout.addWidget(scroll_area)
 
-    def _create_section(self, title: str) -> QFrame:
+    def _create_section(self, title: str) -> Tuple[QFrame, QVBoxLayout]:
         """Create a section frame with title.
         
         Args:
             title: Section title
             
         Returns:
-            QFrame containing the section
+            Tuple of (QFrame, QVBoxLayout for content)
         """
         section = QFrame()
         section.setStyleSheet("""
@@ -151,7 +147,7 @@ class ToolsPanel(QWidget):
         
         layout = QVBoxLayout(section)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(8)
         
         # Section title
         title_label = QLabel(title)
@@ -166,10 +162,12 @@ class ToolsPanel(QWidget):
         """)
         layout.addWidget(title_label)
         
-        return section
+        # Return both the section and the layout to add content to
+        return section, layout
 
     def _connect_signals(self):
         """Connect slider signals."""
+        # Value changed signals (during slider movement)
         self._exposure_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('exposure', v)
         )
@@ -185,7 +183,19 @@ class ToolsPanel(QWidget):
         self._vibrance_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('vibrance', v)
         )
+        
+        # Slider released signals (for final processing)
+        self._exposure_slider.slider_released.connect(self._on_slider_released)
+        self._contrast_slider.slider_released.connect(self._on_slider_released)
+        self._brightness_slider.slider_released.connect(self._on_slider_released)
+        self._saturation_slider.slider_released.connect(self._on_slider_released)
+        self._vibrance_slider.slider_released.connect(self._on_slider_released)
+        
         self._reset_button.clicked.connect(self.reset_all)
+    
+    def _on_slider_released(self, value: float):
+        """Handle any slider being released."""
+        self.slider_released.emit()
 
     def _on_adjustment_changed(self, name: str, value: float):
         """Handle adjustment value change.

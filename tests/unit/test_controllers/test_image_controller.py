@@ -26,9 +26,10 @@ class TestImageController:
     def test_controller_initialization(self, qapp):
         """Test ImageController can be initialized."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         assert controller is not None
         assert controller.has_image() is False
+        controller.cleanup()
 
     def test_controller_with_dependencies(self, qapp):
         """Test ImageController with injected dependencies."""
@@ -41,26 +42,29 @@ class TestImageController:
             view,
             image_model=model,
             image_service=image_service,
-            history_service=history_service
+            history_service=history_service,
+            use_threading=False
         )
         
         assert controller.image_model is model
         assert controller.history_service is history_service
+        controller.cleanup()
 
     def test_load_image_success(self, qapp, sample_image_path):
         """Test loading an image successfully."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         
         result = controller.load_image(sample_image_path)
         
         assert result is True
         assert controller.has_image() is True
+        controller.cleanup()
 
     def test_load_image_file_not_found(self, qapp):
         """Test loading a non-existent file."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         
         # Mock QMessageBox to avoid dialog
         with patch('src.controllers.image_controller.QMessageBox'):
@@ -68,69 +72,77 @@ class TestImageController:
         
         assert result is False
         assert controller.has_image() is False
+        controller.cleanup()
 
     def test_reset_to_original(self, qapp, sample_image_path):
         """Test resetting to original image."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         controller.load_image(sample_image_path)
         
         controller.reset_to_original()
         
         assert controller.has_image() is True
+        controller.cleanup()
 
     def test_zoom_in(self, qapp, sample_image_path):
         """Test zoom in."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         controller.load_image(sample_image_path)
         
         initial_zoom = controller.get_zoom_factor()
         controller.zoom_in()
         
         assert controller.get_zoom_factor() > initial_zoom
+        controller.cleanup()
 
     def test_zoom_out(self, qapp, sample_image_path):
         """Test zoom out."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         controller.load_image(sample_image_path)
         view.set_zoom_factor(2.0)
         
         controller.zoom_out()
         
         assert controller.get_zoom_factor() < 2.0
+        controller.cleanup()
 
     def test_fit_to_window(self, qapp, sample_image_path):
         """Test fit to window."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         controller.load_image(sample_image_path)
         
         # Should not raise
         controller.fit_to_window()
+        controller.cleanup()
 
     def test_view_100_percent(self, qapp, sample_image_path):
         """Test 100% view."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         controller.load_image(sample_image_path)
         view.set_zoom_factor(2.0)
         
         controller.view_100_percent()
         
         assert controller.get_zoom_factor() == 1.0
+        controller.cleanup()
 
     def test_can_undo_initially_false(self, qapp):
         """Test can_undo is False initially."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         
         assert controller.can_undo() is False
+        controller.cleanup()
 
     def test_can_redo_initially_false(self, qapp):
         """Test can_redo is False initially."""
         view = ImageView()
-        controller = ImageController(view)
+        controller = ImageController(view, use_threading=False)
         
         assert controller.can_redo() is False
+        controller.cleanup()

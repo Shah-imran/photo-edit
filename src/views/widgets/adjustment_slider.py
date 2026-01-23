@@ -23,9 +23,11 @@ class AdjustmentSlider(QWidget):
     
     Signals:
         value_changed: Emitted when value changes (float)
+        slider_released: Emitted when slider is released (float)
     """
     
     value_changed = pyqtSignal(float)
+    slider_released = pyqtSignal(float)
 
     def __init__(
         self,
@@ -131,6 +133,7 @@ class AdjustmentSlider(QWidget):
     def _connect_signals(self):
         """Connect internal signals."""
         self._slider.valueChanged.connect(self._on_slider_changed)
+        self._slider.sliderReleased.connect(self._on_slider_released)
         self._spin_box.valueChanged.connect(self._on_spinbox_changed)
 
     def _on_slider_changed(self, value: int):
@@ -149,6 +152,10 @@ class AdjustmentSlider(QWidget):
         self._slider.setValue(int(value * self._scale_factor))
         self._slider.blockSignals(False)
         self.value_changed.emit(value)
+
+    def _on_slider_released(self):
+        """Handle slider release."""
+        self.slider_released.emit(self.get_value())
 
     def get_value(self) -> float:
         """Get the current slider value.
