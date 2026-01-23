@@ -1,11 +1,14 @@
 """Controller for image operations."""
 
-from typing import Optional
+from typing import Optional, Dict
 from PyQt6.QtWidgets import QFileDialog, QWidget, QMessageBox
 from src.models.image_model import ImageModel
 from src.services.image_service import ImageService
 from src.services.history_service import HistoryService
 from src.views.image_view import ImageView
+from src.processors.exposure_processor import ExposureProcessor
+from src.processors.color_processor import ColorProcessor
+from src.commands.adjustment_commands import CombinedAdjustmentCommand
 
 
 class ImageController:
@@ -34,6 +37,14 @@ class ImageController:
         self._image_model = image_model or ImageModel()
         self._image_service = image_service or ImageService()
         self._history_service = history_service or HistoryService()
+        
+        # Processors
+        self._exposure_processor = ExposureProcessor()
+        self._color_processor = ColorProcessor()
+        
+        # Current adjustment values
+        self._exposure_params: Dict[str, float] = {}
+        self._color_params: Dict[str, float] = {}
         
         # Connect signals
         self._connect_signals()
@@ -193,3 +204,92 @@ class ImageController:
             Current zoom factor
         """
         return self._image_view.get_zoom_factor()
+
+    def apply_adjustments(
+        self,
+        exposure_params: Dict[str, float] = None,
+        color_params: Dict[str, float] = None,
+        add_to_history: bool = False
+    ) -> None:
+        """Apply adjustments to the image.
+        
+        Args:
+            exposure_params: Exposure adjustment parameters
+            color_params: Color adjustment parameters
+            add_to_history: If True, add command to history for undo
+        """
+        if not self.has_image():
+            return
+        
+        # Store current params
+        if exposure_params:
+            self._exposure_params = exposure_params
+        if color_params:
+            self._color_params = color_params
+        
+        if add_to_history:
+            # Create and execute command for undo/redo
+            command = CombinedAdjustmentCommand(
+                self._image_model,
+                exposure_params=self._exposure_params,
+                color_params=self._color_params
+            )
+            self._history_service.execute_command(command)
+        else:
+            # Apply directly without history (for live preview)
+            original = self._image_model.get_original_image()
+            if original is None:
+                return
+            
+            result = original.copy()
+            
+            # Apply exposure adjustments
+            if self._exposure_params:
+                result = self._exposure_processor.process(result, **self._exposure_params)
+            
+            # Apply color adjustments
+            if self._color_params:
+                result = self._color_processor.process(result, **self._color_params)
+            
+            self._image_model.current_image = result
+        
+        self.refresh_view()
+
+    def on_adjustments_changed(self, adjustments: Dict[str, float]) -> None:
+        """Handle adjustment changes from the tools panel.
+        
+        Args:
+            adjustments: Dictionary of all adjustment values
+        """
+        exposure_params = {
+            'exposure': adjustments.get('exposure', 0.0),
+            'contrast': adjustments.get('contrast', 0.0),
+            'brightness': adjustments.get('brightness', 0.0)
+        }
+        color_params = {
+            'saturation': adjustments.get('saturation', 0.0),
+            'vibrance': adjustments.get('vibrance', 0.0)
+        }
+        
+        # Apply without adding to history (live preview)
+        self.apply_adjustments(exposure_params, color_params, add_to_history=False)
+
+    def commit_adjustments(self) -> None:
+        """Commit current adjustments to history.
+        
+        Call this when user finishes adjusting (e.g., releases slider).
+        """
+        if not self.has_image():
+            return
+        
+        # Only commit if there are actual changes
+        has_changes = any(v != 0 for v in self._exposure_params.values()) or \
+                      any(v != 0 for v in self._color_params.values())
+        
+        if has_changes:
+            command = CombinedAdjustmentCommand(
+                self._image_model,
+                exposure_params=self._exposure_params.copy(),
+                color_params=self._color_params.copy()
+            )
+            self._history_service.execute_command(command)

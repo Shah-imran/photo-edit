@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QAction
 
 from src.views.image_view import ImageView
+from src.views.tools_panel import ToolsPanel
 from src.controllers.image_controller import ImageController
 
 
@@ -34,6 +35,7 @@ class MainWindow(QMainWindow):
         
         # Initialize components
         self._image_view = ImageView()
+        self._tools_panel = ToolsPanel()
         self._image_controller = ImageController(self._image_view)
         
         # Set up UI
@@ -65,14 +67,14 @@ class MainWindow(QMainWindow):
         self.library_panel.setMinimumWidth(200)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.library_panel)
         
-        # Right panel - Tools (placeholder)
-        self.tools_panel = QDockWidget("Adjustments", self)
-        tools_content = QLabel("Adjustments Panel\n\n(Coming soon)")
-        tools_content.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tools_content.setStyleSheet("background-color: #242424; color: #a0a0a0; padding: 20px;")
-        self.tools_panel.setWidget(tools_content)
-        self.tools_panel.setMinimumWidth(250)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.tools_panel)
+        # Right panel - Tools
+        self.tools_dock = QDockWidget("Adjustments", self)
+        self.tools_dock.setWidget(self._tools_panel)
+        self.tools_dock.setMinimumWidth(280)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.tools_dock)
+        
+        # Disable tools panel until image is loaded
+        self._tools_panel.set_enabled(False)
 
     def _create_action(self, text: str, callback, shortcut: str = None) -> QAction:
         """Create a QAction with text, callback, and optional shortcut.
@@ -144,6 +146,7 @@ class MainWindow(QMainWindow):
         """Connect signals to slots."""
         self._image_view.image_loaded.connect(self._on_image_loaded)
         self._image_view.zoom_changed.connect(self._on_zoom_changed)
+        self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
 
     def _on_image_loaded(self):
         """Handle image loaded event."""
@@ -151,10 +154,17 @@ class MainWindow(QMainWindow):
         if file_path:
             self.setWindowTitle(f"PhotoEdit - {file_path}")
             self._status_bar.showMessage(f"Loaded: {file_path}", 3000)
+            # Enable tools panel
+            self._tools_panel.set_enabled(True)
+            self._tools_panel.reset_all()
 
     def _on_zoom_changed(self, zoom_factor: float):
         """Handle zoom changed event."""
         self._zoom_label.setText(f"{int(zoom_factor * 100)}%")
+
+    def _on_adjustments_changed(self, adjustments: dict):
+        """Handle adjustments changed from tools panel."""
+        self._image_controller.on_adjustments_changed(adjustments)
 
     # Menu action handlers
     def _open_image(self):
@@ -213,4 +223,4 @@ class MainWindow(QMainWindow):
 
     def _toggle_tools_panel(self):
         """Toggle tools panel visibility."""
-        self.tools_panel.setVisible(not self.tools_panel.isVisible())
+        self.tools_dock.setVisible(not self.tools_dock.isVisible())
