@@ -7,10 +7,14 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QSplitter,
     QDockWidget,
-    QLabel
+    QLabel,
+    QStatusBar
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QAction
+
+from src.views.image_view import ImageView
+from src.controllers.image_controller import ImageController
 
 
 class MainWindow(QMainWindow):
@@ -28,15 +32,20 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PhotoEdit")
         self.setMinimumSize(1200, 800)
         
+        # Initialize components
+        self._image_view = ImageView()
+        self._image_controller = ImageController(self._image_view)
+        
         # Set up UI
         self._setup_ui()
         self._setup_menu_bar()
         self._setup_status_bar()
         self._setup_shortcuts()
+        self._connect_signals()
 
     def _setup_ui(self):
         """Set up the main UI components."""
-        # Central widget with splitter
+        # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
@@ -44,28 +53,26 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # Create main splitter
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(main_splitter)
+        # Add image view as central widget
+        layout.addWidget(self._image_view)
         
         # Left panel - Library (placeholder)
         self.library_panel = QDockWidget("Library", self)
-        self.library_panel.setWidget(QLabel("Library Panel\n(Image browsing will go here)"))
+        library_content = QLabel("Library Panel\n\nDrag & drop images\nor use File > Open")
+        library_content.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        library_content.setStyleSheet("background-color: #242424; color: #a0a0a0; padding: 20px;")
+        self.library_panel.setWidget(library_content)
+        self.library_panel.setMinimumWidth(200)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.library_panel)
-        
-        # Center - Image view (placeholder)
-        self.image_view = QLabel("Image View\n(Image display will go here)")
-        self.image_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_view.setStyleSheet("background-color: #1a1a1a; color: #e0e0e0;")
-        main_splitter.addWidget(self.image_view)
         
         # Right panel - Tools (placeholder)
         self.tools_panel = QDockWidget("Adjustments", self)
-        self.tools_panel.setWidget(QLabel("Adjustments Panel\n(Editing tools will go here)"))
+        tools_content = QLabel("Adjustments Panel\n\n(Coming soon)")
+        tools_content.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tools_content.setStyleSheet("background-color: #242424; color: #a0a0a0; padding: 20px;")
+        self.tools_panel.setWidget(tools_content)
+        self.tools_panel.setMinimumWidth(250)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.tools_panel)
-        
-        # Set splitter proportions (Library: 20%, Image: 60%, Tools: 20%)
-        main_splitter.setSizes([200, 600, 200])
 
     def _create_action(self, text: str, callback, shortcut: str = None) -> QAction:
         """Create a QAction with text, callback, and optional shortcut.
@@ -99,8 +106,10 @@ class MainWindow(QMainWindow):
         
         # Edit menu
         edit_menu = menubar.addMenu("&Edit")
-        edit_menu.addAction(self._create_action("&Undo", self._undo, "Ctrl+Z"))
-        edit_menu.addAction(self._create_action("&Redo", self._redo, "Ctrl+Shift+Z"))
+        self._undo_action = self._create_action("&Undo", self._undo, "Ctrl+Z")
+        self._redo_action = self._create_action("&Redo", self._redo, "Ctrl+Shift+Z")
+        edit_menu.addAction(self._undo_action)
+        edit_menu.addAction(self._redo_action)
         edit_menu.addSeparator()
         edit_menu.addAction(self._create_action("&Reset Adjustments", self._reset_adjustments, "Ctrl+R"))
         
@@ -108,51 +117,95 @@ class MainWindow(QMainWindow):
         view_menu = menubar.addMenu("&View")
         view_menu.addAction(self._create_action("&Fit to Window", self._fit_to_window, "0"))
         view_menu.addAction(self._create_action("&100%", self._view_100_percent, "1"))
+        view_menu.addAction(self._create_action("Zoom &In", self._zoom_in, "Ctrl+="))
+        view_menu.addAction(self._create_action("Zoom &Out", self._zoom_out, "Ctrl+-"))
         view_menu.addSeparator()
         view_menu.addAction(self._create_action("Toggle &Library Panel", self._toggle_library_panel, "F5"))
         view_menu.addAction(self._create_action("Toggle &Tools Panel", self._toggle_tools_panel, "F6"))
 
     def _setup_status_bar(self):
         """Set up the status bar."""
-        self.statusBar().showMessage("Ready")
+        self._status_bar = QStatusBar()
+        self.setStatusBar(self._status_bar)
+        
+        # Zoom label
+        self._zoom_label = QLabel("100%")
+        self._zoom_label.setStyleSheet("padding: 0 10px;")
+        self._status_bar.addPermanentWidget(self._zoom_label)
+        
+        self._status_bar.showMessage("Ready")
 
     def _setup_shortcuts(self):
         """Set up keyboard shortcuts."""
         # Additional shortcuts can be added here
         pass
 
-    # Menu action handlers (placeholders)
+    def _connect_signals(self):
+        """Connect signals to slots."""
+        self._image_view.image_loaded.connect(self._on_image_loaded)
+        self._image_view.zoom_changed.connect(self._on_zoom_changed)
+
+    def _on_image_loaded(self):
+        """Handle image loaded event."""
+        file_path = self._image_controller.image_model.file_path
+        if file_path:
+            self.setWindowTitle(f"PhotoEdit - {file_path}")
+            self._status_bar.showMessage(f"Loaded: {file_path}", 3000)
+
+    def _on_zoom_changed(self, zoom_factor: float):
+        """Handle zoom changed event."""
+        self._zoom_label.setText(f"{int(zoom_factor * 100)}%")
+
+    # Menu action handlers
     def _open_image(self):
         """Handle open image action."""
-        self.statusBar().showMessage("Open image (not yet implemented)", 2000)
+        self._image_controller.open_image(self)
 
     def _import_images(self):
         """Handle import images action."""
-        self.statusBar().showMessage("Import images (not yet implemented)", 2000)
+        self._status_bar.showMessage("Import images (not yet implemented)", 2000)
 
     def _export_image(self):
         """Handle export image action."""
-        self.statusBar().showMessage("Export image (not yet implemented)", 2000)
+        self._status_bar.showMessage("Export image (not yet implemented)", 2000)
 
     def _undo(self):
         """Handle undo action."""
-        self.statusBar().showMessage("Undo (not yet implemented)", 2000)
+        if self._image_controller.can_undo():
+            self._image_controller.undo()
+            self._status_bar.showMessage("Undo", 1000)
+        else:
+            self._status_bar.showMessage("Nothing to undo", 1000)
 
     def _redo(self):
         """Handle redo action."""
-        self.statusBar().showMessage("Redo (not yet implemented)", 2000)
+        if self._image_controller.can_redo():
+            self._image_controller.redo()
+            self._status_bar.showMessage("Redo", 1000)
+        else:
+            self._status_bar.showMessage("Nothing to redo", 1000)
 
     def _reset_adjustments(self):
         """Handle reset adjustments action."""
-        self.statusBar().showMessage("Reset adjustments (not yet implemented)", 2000)
+        if self._image_controller.has_image():
+            self._image_controller.reset_to_original()
+            self._status_bar.showMessage("Reset to original", 2000)
 
     def _fit_to_window(self):
         """Handle fit to window action."""
-        self.statusBar().showMessage("Fit to window (not yet implemented)", 2000)
+        self._image_controller.fit_to_window()
 
     def _view_100_percent(self):
         """Handle 100% view action."""
-        self.statusBar().showMessage("100% view (not yet implemented)", 2000)
+        self._image_controller.view_100_percent()
+
+    def _zoom_in(self):
+        """Handle zoom in action."""
+        self._image_controller.zoom_in()
+
+    def _zoom_out(self):
+        """Handle zoom out action."""
+        self._image_controller.zoom_out()
 
     def _toggle_library_panel(self):
         """Toggle library panel visibility."""
