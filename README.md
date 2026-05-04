@@ -4,15 +4,53 @@ A professional photo editing application built with Python and PyQt6, inspired b
 
 ## 📋 Project Status
 
-**Planning Phase** - Architecture and design documents are complete. Ready to begin implementation.
+**Active development** — Architecture and planning docs live under [`docs/`](docs/README.md).
 
 ## 📚 Documentation
 
-### Planning Documents
-- **[ARCHITECTURE_PLAN.md](ARCHITECTURE_PLAN.md)** - Complete architecture, design patterns, and project structure
-- **[FEATURES_PLAN.md](FEATURES_PLAN.md)** - Comprehensive feature list organized by priority
-- **[UI_UX_DESIGN.md](UI_UX_DESIGN.md)** - Professional Lightroom-like UI/UX design guidelines
-- **[TESTING_STRATEGY.md](TESTING_STRATEGY.md)** - Complete testing strategy with unit test plan for all features
+| Doc | Purpose |
+|-----|---------|
+| **[docs/README.md](docs/README.md)** | Index of all documentation |
+| **[docs/planning/PRODUCT_ROADMAP.md](docs/planning/PRODUCT_ROADMAP.md)** | Lightroom-aligned phases, full feature catalog, and delivery milestones (single merged roadmap) |
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | Architecture, patterns, project structure |
+| **[docs/UI_UX.md](docs/UI_UX.md)** | UI/UX guidelines |
+| **[docs/TESTING.md](docs/TESTING.md)** | Testing strategy |
+| **[docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md)** | Git and TDD workflow |
+| **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)** | Performance architecture notes |
+| **[docs/planning/INCREMENTAL_WORKFLOW.md](docs/planning/INCREMENTAL_WORKFLOW.md)** | Phase dependencies; **mandatory detailed pre-implementation plan (section 4)**; test gates; persistence (6); professional shell (6.1); logging |
+
+## Run the application
+
+From the **repository root** (`PhotoEdit/`), with dependencies installed:
+
+```bash
+pipenv run python -m src.main
+```
+
+If you already activated the virtual environment (`pipenv shell`):
+
+```bash
+python -m src.main
+```
+
+**Windows (PowerShell):** use the same commands from the project root. The Qt window must run on a machine with a display (not headless).
+
+**What you should see:** the main window with Library (left), image area (center), and Adjustments (right). Use **File → Open Image** to load a JPEG or PNG.
+
+---
+
+## First development steps (recommended order)
+
+Aligned with [docs/planning/INCREMENTAL_WORKFLOW.md](docs/planning/INCREMENTAL_WORKFLOW.md):
+
+1. **Smoke run** -- Run the app and open a sample image; confirm sliders and undo work.
+2. **Run tests** -- `pipenv run pytest` (fix any failures before new work).
+3. **Optional early slice:** **App settings** (`QSettings` + `SettingsService`) for last open/export paths and window state -- see [INCREMENTAL_WORKFLOW.md](docs/planning/INCREMENTAL_WORKFLOW.md) section 6; style and layout stay swappable per section 5.1 in that doc. **Write the full detailed plan (section 4) and approve it before coding.**
+4. **K0 (first real slice)** -- Add an **approved** implementation note under `docs/planning/implementation-notes/` for the **versioned adjustment / project JSON schema** (contract only, minimal code if any), following **section 4.1** depth in the workflow doc.
+5. **Validate K0** -- Review the note; agree on field names and `version` before **Phase B / K** persistence or copy-paste settings.
+6. **Next smallest feature** -- e.g. one library improvement from Phase A (sort by name) or RAW open dialog (Phase C), each with its own note + tests before merge.
+
+See [docs/planning/PRODUCT_ROADMAP.md](docs/planning/PRODUCT_ROADMAP.md) Part 1 for the full phase list.
 
 ## 🏗️ Architecture Overview
 
@@ -53,7 +91,7 @@ A professional photo editing application built with Python and PyQt6, inspired b
 - High DPI support for 4K displays
 - Customizable interface
 
-See [UI_UX_DESIGN.md](UI_UX_DESIGN.md) for complete design specifications.
+See [docs/UI_UX.md](docs/UI_UX.md) for complete design specifications.
 
 ## 🧪 Testing Strategy
 
@@ -73,7 +111,7 @@ See [UI_UX_DESIGN.md](UI_UX_DESIGN.md) for complete design specifications.
 - UI Components: 70%+
 - Utilities: 90%+
 
-See [TESTING_STRATEGY.md](TESTING_STRATEGY.md) for complete test plan.
+See [docs/TESTING.md](docs/TESTING.md) for complete test plan.
 
 ## 🚀 Planned Features
 
@@ -105,7 +143,7 @@ See [TESTING_STRATEGY.md](TESTING_STRATEGY.md) for complete test plan.
 - Customizable UI
 - Plugin system
 
-See [FEATURES_PLAN.md](FEATURES_PLAN.md) for complete feature list.
+See [docs/planning/PRODUCT_ROADMAP.md](docs/planning/PRODUCT_ROADMAP.md#part-2-feature-planning-catalog) for the full feature catalog.
 
 ## 📦 Installation
 
@@ -125,21 +163,25 @@ pipenv install --dev
 pipenv shell
 ```
 
+The **Run the application** section above describes how to start the GUI after this setup.
+
 ## 🧪 Running Tests
 
 ```bash
-# Run all tests
-pytest
+# Run all tests (from repo root; same environment as the app)
+pipenv run pytest
 
 # Run with coverage
-pytest --cov=src --cov-report=html
+pipenv run pytest --cov=src --cov-report=html
 
 # Run specific test file
-pytest tests/unit/test_image_service.py
+pipenv run pytest tests/unit/test_image_service.py
 
 # Run with verbose output
-pytest -v
+pipenv run pytest -v
 ```
+
+If you are already inside `pipenv shell`, you can run `pytest` without the `pipenv run` prefix.
 
 ## 📁 Project Structure
 
@@ -158,7 +200,13 @@ PhotoEdit/
 │   ├── integration/      # Integration tests
 │   └── ui/               # UI tests
 ├── resources/            # Resources (icons, styles, themes)
-└── docs/                 # Documentation
+└── docs/                 # All documentation (see docs/README.md)
+    ├── planning/         # Product roadmap (merged feature + Lightroom phases)
+    ├── ARCHITECTURE.md
+    ├── UI_UX.md
+    ├── TESTING.md
+    ├── DEVELOPMENT_WORKFLOW.md
+    └── PERFORMANCE.md
 ```
 
 ## 🛠️ Development Guidelines
@@ -181,7 +229,7 @@ PhotoEdit/
 - Follow conventional commits format
 - Include tests in commit message
 
-**See [DEVELOPMENT_WORKFLOW.md](DEVELOPMENT_WORKFLOW.md) for complete workflow guidelines.**
+**See [docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md) for complete workflow guidelines.**
 
 ## 📝 License
 
@@ -197,4 +245,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Note**: This project is in the planning phase. Implementation will begin after architecture and design review.
+**Note**: Planning and roadmap documents are under [`docs/`](docs/README.md); the app is under active development in `src/`.

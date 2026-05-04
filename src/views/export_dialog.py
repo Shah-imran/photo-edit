@@ -21,6 +21,7 @@ from PyQt6.QtCore import Qt
 from PIL import Image
 
 from src.services.export_service import ExportService
+from src.services.settings_service import SettingsService
 
 
 class ExportDialog(QDialog):
@@ -30,19 +31,25 @@ class ExportDialog(QDialog):
         self,
         image: Image.Image,
         default_path: str = "",
-        parent=None
+        parent=None,
+        settings_service: Optional[SettingsService] = None,
     ):
         """Initialize the export dialog.
         
         Args:
             image: PIL Image to export
-            default_path: Default file path
+            default_path: Default file path. When empty and a
+                ``settings_service`` is provided, the last-used export
+                directory is used as the dialog's starting location.
             parent: Parent widget
+            settings_service: Optional SettingsService for persisting the
+                last-used export directory.
         """
         super().__init__(parent)
         self._image = image
         self._default_path = default_path
         self._export_service = ExportService()
+        self._settings_service = settings_service
         
         self.setWindowTitle("Export Image")
         self.setMinimumWidth(450)
@@ -159,11 +166,17 @@ class ExportDialog(QDialog):
         format_data = self._format_combo.currentData()
         ext = format_data['extension'] if format_data else ".jpg"
         
+        # Decide the dialog's starting location: prefer the current text
+        # in the path edit; if empty, fall back to last-used export dir.
+        start = self._path_edit.text()
+        if not start and self._settings_service is not None:
+            start = self._settings_service.get_last_export_dir()
+        
         file_filter = f"Images (*{ext});;All Files (*)"
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Image",
-            self._path_edit.text(),
+            start,
             file_filter
         )
         
@@ -172,6 +185,8 @@ class ExportDialog(QDialog):
             if not path.lower().endswith(ext):
                 path += ext
             self._path_edit.setText(path)
+            if self._settings_service is not None:
+                self._settings_service.set_last_export_dir(path)
 
     def _on_format_changed(self, index: int):
         """Handle format selection change."""

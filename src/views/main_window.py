@@ -1,5 +1,8 @@
 """Main window for PhotoEdit application."""
 
+import logging
+from typing import Optional
+
 from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -8,16 +11,21 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QDockWidget,
     QLabel,
-    QStatusBar
+    QStatusBar,
+    QFileDialog,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QAction
+
+
+logger = logging.getLogger(__name__)
 
 from src.views.image_view import ImageView
 from src.views.tools_panel import ToolsPanel
 from src.views.export_dialog import ExportDialog
 from src.views.library_view import LibraryView
 from src.controllers.image_controller import ImageController
+from src.services.settings_service import SettingsService
 
 
 class MainWindow(QMainWindow):
@@ -29,17 +37,27 @@ class MainWindow(QMainWindow):
     - Right: Tools panel (for adjustments)
     """
 
-    def __init__(self):
-        """Initialize the main window."""
+    def __init__(self, settings_service: Optional[SettingsService] = None):
+        """Initialize the main window.
+
+        Args:
+            settings_service: Optional SettingsService instance. When ``None``,
+                a default one is created using the application's QSettings.
+        """
         super().__init__()
         self.setWindowTitle("PhotoEdit")
         self.setMinimumSize(1200, 800)
         
+        # One settings service shared by the window and its consumers.
+        self._settings_service = settings_service or SettingsService()
+        
         # Initialize components
         self._image_view = ImageView()
         self._tools_panel = ToolsPanel()
-        self._library_view = LibraryView()
-        self._image_controller = ImageController(self._image_view)
+        self._library_view = LibraryView(settings_service=self._settings_service)
+        self._image_controller = ImageController(
+            self._image_view, settings_service=self._settings_service
+        )
         
         # Set up UI
         self._setup_ui()
@@ -47,6 +65,7 @@ class MainWindow(QMainWindow):
         self._setup_status_bar()
         self._setup_shortcuts()
         self._connect_signals()
+        self._restore_window_geometry()
 
     def _setup_ui(self):
         """Set up the main UI components."""
@@ -187,15 +206,16 @@ class MainWindow(QMainWindow):
 
     def _import_images(self):
         """Handle import images action."""
-        from PyQt6.QtWidgets import QFileDialog
+        start_dir = self._settings_service.get_last_open_dir()
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Import Images",
-            "",
+            start_dir,
             "Image Files (*.jpg *.jpeg *.png *.tiff *.tif *.bmp *.webp);;All Files (*)"
         )
         
         if file_paths:
+            self._settings_service.set_last_open_dir(file_paths[0])
             self._library_view.add_images(file_paths)
             self._status_bar.showMessage(f"Imported {len(file_paths)} images", 2000)
 
@@ -218,10 +238,24 @@ class MainWindow(QMainWindow):
             p = Path(default_path)
             default_path = str(p.parent / f"{p.stem}_edited{p.suffix}")
         
+        # If we have no source path, seed default location with the
+        # last-used export directory so the dialog is not empty.
+        if not default_path:
+            from pathlib import Path
+
+            default_path = str(Path(self._settings_service.get_last_export_dir()))
+
         # Show export dialog
-        dialog = ExportDialog(image, default_path, self)
+        dialog = ExportDialog(
+            image,
+            default_path,
+            settings_service=self._settings_service,
+            parent=self,
+        )
         if dialog.exec():
             export_path = dialog.get_export_path()
+            if export_path:
+                self._settings_service.set_last_export_dir(export_path)
             self._status_bar.showMessage(f"Exported to: {export_path}", 3000)
 
     def _undo(self):
@@ -270,8 +304,34 @@ class MainWindow(QMainWindow):
         """Toggle tools panel visibility."""
         self.tools_dock.setVisible(not self.tools_dock.isVisible())
 
+    def _restore_window_geometry(self) -> None:
+        """Restore window size and position from settings (if any)."""
+        try:
+            blob = self._settings_service.get_window_geometry()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to read window geometry from settings")
+            return
+        if not blob:
+            return
+        try:
+            from PyQt6.QtCore import QByteArray
+
+            self.restoreGeometry(QByteArray(blob))
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to restore window geometry; using defaults")
+
+    def _save_window_geometry(self) -> None:
+        """Persist current window size and position to settings."""
+        try:
+            blob = bytes(self.saveGeometry())
+            self._settings_service.set_window_geometry(blob)
+            self._settings_service.sync()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to save window geometry")
+
     def closeEvent(self, event):
         """Handle window close event."""
+        self._save_window_geometry()
         # Clean up the image controller (stops background threads)
         self._image_controller.cleanup()
         super().closeEvent(event)

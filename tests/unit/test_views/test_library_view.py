@@ -1,7 +1,11 @@
 """Unit tests for LibraryView widget."""
 
+from unittest.mock import patch
+
 import pytest
+from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication
+from src.services.settings_service import SettingsService
 from src.views.library_view import LibraryView
 
 
@@ -97,3 +101,47 @@ class TestLibraryView:
         
         assert len(imported) == 3
         assert view.get_image_count() == 3
+
+
+class TestLibraryViewImportSettings:
+    """Wiring between ``_import_images`` and ``SettingsService``."""
+
+    @pytest.fixture
+    def isolated_settings(self, tmp_path):
+        ini_path = tmp_path / "photoedit-test.ini"
+        return SettingsService(QSettings(str(ini_path), QSettings.Format.IniFormat))
+
+    def test_import_seeds_dialog_with_last_open_dir(
+        self, qapp, sample_image_path, tmp_path, isolated_settings
+    ):
+        seeded = tmp_path / "previous_session"
+        seeded.mkdir()
+        isolated_settings.set_last_open_dir(str(seeded))
+
+        view = LibraryView(settings_service=isolated_settings)
+
+        with patch(
+            "src.views.library_view.QFileDialog.getOpenFileNames",
+            return_value=([sample_image_path], "Image Files"),
+        ) as dialog:
+            view._import_images()
+
+        args, _ = dialog.call_args
+        assert args[2] == str(seeded)
+
+    def test_import_persists_first_chosen_directory(
+        self, qapp, sample_image_path, isolated_settings
+    ):
+        view = LibraryView(settings_service=isolated_settings)
+
+        with patch(
+            "src.views.library_view.QFileDialog.getOpenFileNames",
+            return_value=([sample_image_path], "Image Files"),
+        ):
+            view._import_images()
+
+        from pathlib import Path
+
+        assert isolated_settings.get_last_open_dir() == str(
+            Path(sample_image_path).parent
+        )

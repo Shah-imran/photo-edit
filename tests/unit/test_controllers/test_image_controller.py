@@ -2,6 +2,7 @@
 
 import pytest
 from PIL import Image
+from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication
 from unittest.mock import Mock, patch
 from src.controllers.image_controller import ImageController
@@ -9,6 +10,7 @@ from src.views.image_view import ImageView
 from src.models.image_model import ImageModel
 from src.services.image_service import ImageService
 from src.services.history_service import HistoryService
+from src.services.settings_service import SettingsService
 
 
 @pytest.fixture(scope="module")
@@ -145,4 +147,73 @@ class TestImageController:
         controller = ImageController(view, use_threading=False)
         
         assert controller.can_redo() is False
+        controller.cleanup()
+
+
+class TestImageControllerOpenImageSettings:
+    """Wiring between ``open_image`` and ``SettingsService``."""
+
+    @pytest.fixture
+    def isolated_settings(self, tmp_path):
+        ini_path = tmp_path / "photoedit-test.ini"
+        return SettingsService(QSettings(str(ini_path), QSettings.Format.IniFormat))
+
+    def test_open_image_seeds_dialog_with_last_open_dir(
+        self, qapp, sample_image_path, tmp_path, isolated_settings
+    ):
+        """The dialog must start in the previously-stored open directory."""
+        seeded = tmp_path / "previously_used"
+        seeded.mkdir()
+        isolated_settings.set_last_open_dir(str(seeded))
+
+        view = ImageView()
+        controller = ImageController(
+            view, settings_service=isolated_settings, use_threading=False
+        )
+
+        with patch(
+            "src.controllers.image_controller.QFileDialog.getOpenFileName",
+            return_value=(sample_image_path, "Image Files"),
+        ) as dialog:
+            controller.open_image()
+
+        args, _ = dialog.call_args
+        assert args[2] == str(seeded)
+        controller.cleanup()
+
+    def test_open_image_persists_chosen_directory(
+        self, qapp, sample_image_path, isolated_settings
+    ):
+        """After picking a file, its parent directory must be stored."""
+        view = ImageView()
+        controller = ImageController(
+            view, settings_service=isolated_settings, use_threading=False
+        )
+
+        with patch(
+            "src.controllers.image_controller.QFileDialog.getOpenFileName",
+            return_value=(sample_image_path, "Image Files"),
+        ):
+            controller.open_image()
+
+        from pathlib import Path
+
+        assert isolated_settings.get_last_open_dir() == str(
+            Path(sample_image_path).parent
+        )
+        controller.cleanup()
+
+    def test_open_image_no_settings_uses_empty_default(self, qapp, sample_image_path):
+        """Backwards-compat: no SettingsService keeps the legacy empty default."""
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+
+        with patch(
+            "src.controllers.image_controller.QFileDialog.getOpenFileName",
+            return_value=(sample_image_path, "Image Files"),
+        ) as dialog:
+            controller.open_image()
+
+        args, _ = dialog.call_args
+        assert args[2] == ""
         controller.cleanup()

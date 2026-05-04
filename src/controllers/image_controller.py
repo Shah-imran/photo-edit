@@ -8,6 +8,7 @@ from PIL import Image
 from src.models.image_model import ImageModel
 from src.services.image_service import ImageService
 from src.services.history_service import HistoryService
+from src.services.settings_service import SettingsService
 from src.views.image_view import ImageView
 from src.processors.exposure_processor import ExposureProcessor
 from src.processors.color_processor import ColorProcessor
@@ -32,6 +33,7 @@ class ImageController(QObject):
         image_model: Optional[ImageModel] = None,
         image_service: Optional[ImageService] = None,
         history_service: Optional[HistoryService] = None,
+        settings_service: Optional[SettingsService] = None,
         use_threading: bool = True
     ):
         """Initialize the ImageController.
@@ -41,6 +43,9 @@ class ImageController(QObject):
             image_model: Optional ImageModel (creates new if not provided)
             image_service: Optional ImageService (creates new if not provided)
             history_service: Optional HistoryService (creates new if not provided)
+            settings_service: Optional SettingsService for persisting last-used
+                directories. When ``None`` the dialog uses an empty default,
+                preserving previous behavior.
             use_threading: Whether to use background threading for processing
         """
         super().__init__()
@@ -49,6 +54,7 @@ class ImageController(QObject):
         self._image_model = image_model or ImageModel()
         self._image_service = image_service or ImageService()
         self._history_service = history_service or HistoryService()
+        self._settings_service = settings_service
         self._use_threading = use_threading
         
         # Processors (for synchronous fallback)
@@ -111,14 +117,21 @@ class ImageController(QObject):
         Returns:
             True if an image was loaded successfully
         """
+        start_dir = (
+            self._settings_service.get_last_open_dir()
+            if self._settings_service is not None
+            else ""
+        )
         file_path, _ = QFileDialog.getOpenFileName(
             parent,
             "Open Image",
-            "",
+            start_dir,
             "Image Files (*.jpg *.jpeg *.png *.tiff *.tif *.bmp *.webp);;All Files (*)"
         )
         
         if file_path:
+            if self._settings_service is not None:
+                self._settings_service.set_last_open_dir(file_path)
             return self.load_image(file_path, parent)
         return False
 

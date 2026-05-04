@@ -18,6 +18,7 @@ from PyQt6.QtGui import QIcon, QPixmap
 
 from src.services.image_service import ImageService
 from src.services.file_service import FileService
+from src.services.settings_service import SettingsService
 
 
 class LibraryView(QWidget):
@@ -33,16 +34,23 @@ class LibraryView(QWidget):
 
     THUMBNAIL_SIZE = 80
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        settings_service: Optional[SettingsService] = None,
+    ):
         """Initialize the library view.
         
         Args:
             parent: Optional parent widget
+            settings_service: Optional SettingsService for persisting the
+                last-used import directory.
         """
         super().__init__(parent)
         
         self._image_service = ImageService()
         self._file_service = FileService()
+        self._settings_service = settings_service
         self._image_paths: List[str] = []
         
         self._setup_ui()
@@ -123,14 +131,21 @@ class LibraryView(QWidget):
 
     def _import_images(self):
         """Open file dialog to import images."""
+        start_dir = (
+            self._settings_service.get_last_open_dir()
+            if self._settings_service is not None
+            else ""
+        )
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Import Images",
-            "",
+            start_dir,
             "Image Files (*.jpg *.jpeg *.png *.tiff *.tif *.bmp *.webp);;All Files (*)"
         )
         
         if file_paths:
+            if self._settings_service is not None:
+                self._settings_service.set_last_open_dir(file_paths[0])
             self.add_images(file_paths)
             self.images_imported.emit(file_paths)
 

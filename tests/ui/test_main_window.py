@@ -4,9 +4,10 @@ import pytest
 from pathlib import Path
 from PIL import Image
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtTest import QTest
 
+from src.services.settings_service import SettingsService
 from src.views.main_window import MainWindow
 
 
@@ -295,3 +296,54 @@ class TestLibraryPanel:
         library.clear()
         
         assert library.get_image_count() == 0
+
+
+class TestMainWindowSettingsPersistence:
+    """Window-geometry round-trip via SettingsService."""
+
+    def test_close_persists_window_geometry(self, qapp, qtbot, tmp_path):
+        ini_path = tmp_path / "main-window.ini"
+        settings = SettingsService(
+            QSettings(str(ini_path), QSettings.Format.IniFormat)
+        )
+        assert settings.get_window_geometry() is None
+
+        window = MainWindow(settings_service=settings)
+        qtbot.addWidget(window)
+        window.show()
+        qtbot.waitExposed(window)
+        window.resize(1300, 850)
+        qtbot.wait(20)
+        window.close()
+
+        blob = settings.get_window_geometry()
+        assert blob is not None
+        assert isinstance(blob, bytes) and len(blob) > 0
+
+    def test_geometry_is_restored_on_next_launch(self, qapp, qtbot, tmp_path):
+        ini_path = tmp_path / "main-window-restore.ini"
+        first = MainWindow(
+            settings_service=SettingsService(
+                QSettings(str(ini_path), QSettings.Format.IniFormat)
+            )
+        )
+        qtbot.addWidget(first)
+        first.show()
+        qtbot.waitExposed(first)
+        first.resize(1320, 870)
+        qtbot.wait(20)
+        first.close()
+
+        second = MainWindow(
+            settings_service=SettingsService(
+                QSettings(str(ini_path), QSettings.Format.IniFormat)
+            )
+        )
+        qtbot.addWidget(second)
+        second.show()
+        qtbot.waitExposed(second)
+        # Allow the window manager to apply the restored geometry.
+        qtbot.wait(50)
+        assert second.size().width() == 1320
+        assert second.size().height() == 870
+        second.close()
