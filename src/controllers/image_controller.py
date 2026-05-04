@@ -15,6 +15,7 @@ from src.processors.color_processor import ColorProcessor
 from src.commands.adjustment_commands import CombinedAdjustmentCommand
 from src.processing.processing_worker import ProcessingWorker
 from src.utils.debouncer import Debouncer
+from src.utils.image_extensions import open_image_file_dialog_filter
 
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,7 @@ class ImageController(QObject):
             parent,
             "Open Image",
             start_dir,
-            "Image Files (*.jpg *.jpeg *.png *.tiff *.tif *.bmp *.webp);;All Files (*)"
+            open_image_file_dialog_filter()
         )
         
         if file_path:

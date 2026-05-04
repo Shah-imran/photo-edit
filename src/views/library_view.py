@@ -17,10 +17,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QIcon, QPixmap
 
-from src.services.image_service import ImageService
 from src.services.file_service import FileService
+from src.services.image_service import ImageService
 from src.services.settings_service import SettingsService
 from src.utils.color_pipeline import linear_to_qimage
+from src.utils.image_extensions import open_image_file_dialog_filter
 
 
 logger = logging.getLogger(__name__)
@@ -145,7 +146,7 @@ class LibraryView(QWidget):
             self,
             "Import Images",
             start_dir,
-            "Image Files (*.jpg *.jpeg *.png *.tiff *.tif *.bmp *.webp);;All Files (*)"
+            open_image_file_dialog_filter()
         )
         
         if file_paths:
@@ -182,9 +183,8 @@ class LibraryView(QWidget):
             file_path: Path to the image file
         """
         try:
-            image = self._image_service.load_image(file_path)
-            thumbnail = self._image_service.create_thumbnail(
-                image,
+            thumbnail = self._image_service.load_preview_thumbnail(
+                file_path,
                 (self.THUMBNAIL_SIZE, self.THUMBNAIL_SIZE),
             )
             pixmap = QPixmap.fromImage(linear_to_qimage(thumbnail))

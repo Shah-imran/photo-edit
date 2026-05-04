@@ -26,6 +26,7 @@ from src.views.export_dialog import ExportDialog
 from src.views.library_view import LibraryView
 from src.controllers.image_controller import ImageController
 from src.services.settings_service import SettingsService
+from src.utils.image_extensions import open_image_file_dialog_filter
 
 
 class MainWindow(QMainWindow):
@@ -211,7 +212,7 @@ class MainWindow(QMainWindow):
             self,
             "Import Images",
             start_dir,
-            "Image Files (*.jpg *.jpeg *.png *.tiff *.tif *.bmp *.webp);;All Files (*)"
+            open_image_file_dialog_filter()
         )
         
         if file_paths:

@@ -16,11 +16,13 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from src.services.raw_service import RawService
 from src.utils.color_pipeline import (
     LinearImage,
     linear_to_pil,
     pil_to_linear,
 )
+from src.utils.image_extensions import is_raw_path
 
 
 logger = logging.getLogger(__name__)
@@ -31,9 +33,14 @@ class ImageService:
 
     SUPPORTED_FORMATS = ["JPEG", "PNG", "TIFF", "BMP", "WEBP"]
 
-    def __init__(self):
-        """Initialize ImageService."""
-        pass
+    def __init__(self, raw_service: Optional[RawService] = None) -> None:
+        """Initialize ImageService.
+
+        Args:
+            raw_service: Optional :class:`RawService` for camera RAW load paths.
+                Tests can inject a mock. When ``None`` a default instance is used.
+        """
+        self._raw_service = raw_service if raw_service is not None else RawService()
 
     def load_image(self, file_path: str) -> LinearImage:
         """Load an image and return it in the canonical linear format.
@@ -52,12 +59,39 @@ class ImageService:
         if not path.exists():
             raise FileNotFoundError(f"Image file not found: {file_path}")
 
+        if is_raw_path(file_path):
+            try:
+                return self._raw_service.load_linear(str(path))
+            except Exception as e:
+                raise ValueError(f"Failed to load RAW image: {file_path}") from e
+
         try:
             with Image.open(file_path) as pil:
                 pil.load()
                 return pil_to_linear(pil)
         except Exception as e:
             raise ValueError(f"Failed to load image: {file_path}") from e
+
+    def load_preview_thumbnail(
+        self,
+        file_path: str,
+        size: Tuple[int, int],
+        maintain_aspect: bool = True,
+    ) -> LinearImage:
+        """Load a file and return a downscaled ``LinearImage`` for UI previews.
+
+        For camera RAW, uses an embedded preview when available and only
+        falls back to a half-resolution demosaic when needed, so the
+        library grid stays responsive. For non-RAW, this is
+        ``load_image`` + :meth:`create_thumbnail`.
+        """
+        if is_raw_path(file_path):
+            max_side = max(size)
+            return self._raw_service.thumbnail_linear(str(file_path), max_side)
+        image = self.load_image(file_path)
+        return self.create_thumbnail(
+            image, size, maintain_aspect=maintain_aspect
+        )
 
     def save_image(
         self,
@@ -146,8 +180,21 @@ class ImageService:
     def get_image_info(self, file_path: str) -> Dict[str, Any]:
         """Return basic metadata for an image file (size, format, mode).
 
-        Reads via PIL without loading pixels so this is cheap.
+        RAW files are queried via ``rawpy`` dimensions without a full demosaic.
         """
+        if is_raw_path(file_path):
+            try:
+                w, h = self._raw_service.get_raw_dimensions(file_path)
+                return {
+                    "width": w,
+                    "height": h,
+                    "format": "RAW",
+                    "mode": "RGB",
+                    "size": (w, h),
+                }
+            except Exception as e:
+                raise ValueError(f"Failed to get RAW image info: {file_path}") from e
+
         try:
             with Image.open(file_path) as img:
                 return {
