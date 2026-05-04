@@ -1,99 +1,77 @@
-"""Color processor for adjusting image saturation and color properties."""
+"""Color processor for saturation and vibrance in linear-light space."""
 
-from PIL import Image, ImageEnhance
+from __future__ import annotations
+
+import cv2
 import numpy as np
+
 from src.processors.base_processor import BaseProcessor
+from src.utils.color_pipeline import LinearImage
 
 
 class ColorProcessor(BaseProcessor):
-    """Processor for color-related adjustments.
-    
-    Handles saturation, vibrance, and color adjustments.
+    """Processor for saturation and vibrance.
+
+    Operates on ``LinearImage`` (float32, linear-light). Internally uses
+    OpenCV's HSV conversion which accepts float32 RGB in ``[0, 1]`` and
+    returns ``(H in [0, 360], S in [0, 1], V in [0, 1])``.
     """
 
     def process(
         self,
-        image: Image.Image,
+        image: LinearImage,
         saturation: float = 0.0,
-        vibrance: float = 0.0
-    ) -> Image.Image:
-        """Apply color adjustments to an image.
-        
+        vibrance: float = 0.0,
+    ) -> LinearImage:
+        """Apply color adjustments.
+
         Args:
-            image: PIL Image to process
-            saturation: Saturation adjustment (-100 to +100)
-            vibrance: Vibrance adjustment (-100 to +100)
-            
+            image: Input ``LinearImage``.
+            saturation: Saturation adjustment (-100 .. +100).
+            vibrance: Vibrance adjustment (-100 .. +100).
+
         Returns:
-            Processed PIL Image
+            New ``LinearImage`` with adjustments applied.
         """
-        result = image.copy()
-        
-        # Apply vibrance first (affects less saturated colors more)
+        result = np.asarray(image, dtype=np.float32).copy()
+
+        # Vibrance first so subsequent saturation acts on the boosted
+        # values, matching the previous ordering.
         if vibrance != 0.0:
             result = self._adjust_vibrance(result, vibrance)
-        
-        # Apply saturation adjustment
         if saturation != 0.0:
             result = self._adjust_saturation(result, saturation)
-        
         return result
 
-    def _adjust_saturation(self, image: Image.Image, value: float) -> Image.Image:
-        """Adjust saturation.
-        
-        Args:
-            image: PIL Image to adjust
-            value: Saturation adjustment (-100 to +100)
-            
-        Returns:
-            Adjusted PIL Image
-        """
-        # Convert value to enhancer factor (0.0 = grayscale, 1.0 = original, 2.0 = max)
-        factor = 1.0 + (value / 100.0)
-        factor = max(0.0, min(2.0, factor))
-        
-        enhancer = ImageEnhance.Color(image)
-        return enhancer.enhance(factor)
+    def _adjust_saturation(self, image: LinearImage, value: float) -> LinearImage:
+        """Uniform saturation scale in linear HSV.
 
-    def _adjust_vibrance(self, image: Image.Image, value: float) -> Image.Image:
-        """Adjust vibrance (smart saturation that preserves skin tones).
-        
-        Vibrance increases saturation of less saturated colors more than
-        already saturated colors, giving a more natural look.
-        
-        Args:
-            image: PIL Image to adjust
-            value: Vibrance adjustment (-100 to +100)
-            
-        Returns:
-            Adjusted PIL Image
+        At -100 the result is a luminance-preserving grayscale (per
+        OpenCV's HSV V == max(R, G, B)); at +100 saturation is doubled
+        (clipped to 1.0).
+        """
+        factor = float(np.clip(1.0 + (value / 100.0), 0.0, 2.0))
+        clipped = np.clip(image, 0.0, 1.0)
+        hsv = cv2.cvtColor(clipped, cv2.COLOR_RGB2HSV)
+        hsv[..., 1] = np.clip(hsv[..., 1] * factor, 0.0, 1.0)
+        rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+        return rgb.astype(np.float32, copy=False)
+
+    def _adjust_vibrance(self, image: LinearImage, value: float) -> LinearImage:
+        """Vibrance: stronger boost on low-saturation pixels.
+
+        Formula: ``new_S = S + adjustment * (1 - S) * 0.5``. Negative
+        values reduce S the same way (more on already-saturated pixels)
+        which matches Lightroom's qualitative behavior.
         """
         if value == 0.0:
             return image
-        
-        # Convert to HSV for smarter saturation adjustment
-        hsv = image.convert('HSV')
-        arr = np.array(hsv, dtype=np.float32)
-        
-        # Get saturation channel
-        saturation_channel = arr[:, :, 1]
-        
-        # Calculate adjustment factor based on current saturation
-        # Less saturated pixels get more boost
-        max_sat = 255.0
-        sat_normalized = saturation_channel / max_sat
-        
-        # Adjustment is stronger for less saturated pixels
-        adjustment_factor = value / 100.0
-        
-        # Apply vibrance formula: boost = adjustment * (1 - current_saturation)
-        boost = adjustment_factor * (1.0 - sat_normalized)
-        new_saturation = saturation_channel + (boost * max_sat * 0.5)
-        
-        # Clip to valid range
-        arr[:, :, 1] = np.clip(new_saturation, 0, 255)
-        
-        # Convert back to RGB
-        result_hsv = Image.fromarray(arr.astype(np.uint8), mode='HSV')
-        return result_hsv.convert(image.mode)
+
+        adjustment = float(value) / 100.0
+        clipped = np.clip(image, 0.0, 1.0)
+        hsv = cv2.cvtColor(clipped, cv2.COLOR_RGB2HSV)
+        s = hsv[..., 1]
+        boost = adjustment * (1.0 - s) * 0.5
+        hsv[..., 1] = np.clip(s + boost, 0.0, 1.0)
+        rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+        return rgb.astype(np.float32, copy=False)

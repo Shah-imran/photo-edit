@@ -1,13 +1,19 @@
-"""Background processing worker using QThread."""
+"""Background processing worker using QThread.
 
-from typing import Optional, Dict
-from PyQt6.QtCore import QObject, QThread, pyqtSignal, QMutex, QWaitCondition
-from PIL import Image
+Operates on the canonical pipeline format
+(:data:`src.utils.color_pipeline.LinearImage`). Qt signals carry the
+arrays as ``object`` payloads (Qt cannot statically type ndarrays).
+"""
 
-from src.processing.processing_queue import ProcessingRequest, ProcessingQueue
+from typing import Dict, Optional
+
+from PyQt6.QtCore import QMutex, QObject, QThread, QWaitCondition, pyqtSignal
+
+from src.processing.processing_queue import ProcessingQueue, ProcessingRequest
 from src.processing.proxy_manager import ProxyManager
-from src.processors.exposure_processor import ExposureProcessor
 from src.processors.color_processor import ColorProcessor
+from src.processors.exposure_processor import ExposureProcessor
+from src.utils.color_pipeline import LinearImage
 
 
 class ProcessingWorker(QObject):
@@ -25,8 +31,8 @@ class ProcessingWorker(QObject):
     """
     
     processing_started = pyqtSignal(int)
-    preview_ready = pyqtSignal(int, object)  # request_id, PIL Image
-    processing_complete = pyqtSignal(int, object)  # request_id, PIL Image
+    preview_ready = pyqtSignal(int, object)  # request_id, LinearImage
+    processing_complete = pyqtSignal(int, object)  # request_id, LinearImage
     error_occurred = pyqtSignal(int, str)
     
     def __init__(self, parent: Optional[QObject] = None):
@@ -88,13 +94,10 @@ class ProcessingWorker(QObject):
         """
         return self._thread is not None and self._thread.isRunning()
     
-    def set_image(self, image: Image.Image) -> None:
-        """Set the source image for processing.
-        
-        This should be called from the main thread when a new image is loaded.
-        
-        Args:
-            image: The source PIL Image
+    def set_image(self, image: LinearImage) -> None:
+        """Set the source ``LinearImage`` for processing.
+
+        Should be called from the main thread when a new image is loaded.
         """
         self._proxy_manager.set_image(image)
     
@@ -248,30 +251,19 @@ class ProcessingWorker(QObject):
     
     def _apply_adjustments(
         self,
-        image: Image.Image,
+        image: LinearImage,
         exposure_params: Dict[str, float],
-        color_params: Dict[str, float]
-    ) -> Image.Image:
-        """Apply all adjustments to an image.
-        
-        Args:
-            image: Source image
-            exposure_params: Exposure parameters
-            color_params: Color parameters
-            
-        Returns:
-            Processed image
-        """
+        color_params: Dict[str, float],
+    ) -> LinearImage:
+        """Apply exposure and color adjustments to a ``LinearImage``."""
         result = image.copy()
-        
-        # Apply exposure adjustments if any non-zero values
+
         if exposure_params and any(v != 0 for v in exposure_params.values()):
             result = self._exposure_processor.process(result, **exposure_params)
-        
-        # Apply color adjustments if any non-zero values
+
         if color_params and any(v != 0 for v in color_params.values()):
             result = self._color_processor.process(result, **color_params)
-        
+
         return result
 
 
@@ -301,12 +293,8 @@ class ProcessingController:
         """Stop the processing system."""
         self._worker.stop()
     
-    def set_image(self, image: Image.Image) -> None:
-        """Set the source image.
-        
-        Args:
-            image: Source PIL Image
-        """
+    def set_image(self, image: LinearImage) -> None:
+        """Set the source ``LinearImage``."""
         self._worker.set_image(image)
         self._current_exposure_params = {}
         self._current_color_params = {}

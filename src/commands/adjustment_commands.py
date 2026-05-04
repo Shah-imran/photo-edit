@@ -1,11 +1,12 @@
 """Adjustment commands for undo/redo functionality."""
 
-from typing import Dict, Any, Optional
-from PIL import Image
+from typing import Any, Dict, Optional
+
 from src.commands.base_command import BaseCommand
 from src.models.image_model import ImageModel
-from src.processors.exposure_processor import ExposureProcessor
 from src.processors.color_processor import ColorProcessor
+from src.processors.exposure_processor import ExposureProcessor
+from src.utils.color_pipeline import LinearImage
 
 
 class AdjustmentCommand(BaseCommand):
@@ -20,59 +21,56 @@ class AdjustmentCommand(BaseCommand):
         image_model: ImageModel,
         adjustment_type: str,
         parameters: Dict[str, float],
-        previous_image: Optional[Image.Image] = None
+        previous_image: Optional[LinearImage] = None,
     ):
         """Initialize the adjustment command.
-        
+
         Args:
-            image_model: The image model to modify
-            adjustment_type: Type of adjustment ('exposure', 'color')
-            parameters: Dictionary of adjustment parameters
-            previous_image: The image state before adjustment (for undo)
+            image_model: The image model to modify.
+            adjustment_type: Type of adjustment ('exposure', 'color').
+            parameters: Dictionary of adjustment parameters.
+            previous_image: The ``LinearImage`` state before adjustment (for undo).
         """
         super().__init__()
         self._image_model = image_model
         self._adjustment_type = adjustment_type
         self._parameters = parameters
-        self._previous_image = previous_image or image_model.get_current_image()
-        self._new_image: Optional[Image.Image] = None
-        
-        # Processors
+        self._previous_image = (
+            previous_image
+            if previous_image is not None
+            else image_model.get_current_image()
+        )
+        self._new_image: Optional[LinearImage] = None
+
         self._exposure_processor = ExposureProcessor()
         self._color_processor = ColorProcessor()
 
     def execute(self) -> None:
         """Execute the adjustment command."""
         super().execute()
-        
-        # Get the original image to apply adjustments to
+
         original = self._image_model.get_original_image()
         if original is None:
             return
-        
-        # Apply all accumulated adjustments
-        if self._adjustment_type == 'exposure':
+
+        if self._adjustment_type == "exposure":
             self._new_image = self._exposure_processor.process(
-                original,
-                **self._parameters
+                original, **self._parameters
             )
-        elif self._adjustment_type == 'color':
+        elif self._adjustment_type == "color":
             self._new_image = self._color_processor.process(
-                original,
-                **self._parameters
+                original, **self._parameters
             )
-        
-        # Update the model
-        if self._new_image:
+
+        if self._new_image is not None:
             self._image_model.current_image = self._new_image
             self._image_model.set_modified(True)
 
     def undo(self) -> None:
         """Undo the adjustment command."""
         super().undo()
-        
-        # Restore the previous image
-        if self._previous_image:
+
+        if self._previous_image is not None:
             self._image_model.current_image = self._previous_image
 
     def get_parameters(self) -> Dict[str, float]:
@@ -109,30 +107,27 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._exposure_params = exposure_params or {}
         self._color_params = color_params or {}
         self._previous_image = image_model.get_current_image()
-        self._new_image: Optional[Image.Image] = None
-        
-        # Processors
+        self._new_image: Optional[LinearImage] = None
+
         self._exposure_processor = ExposureProcessor()
         self._color_processor = ColorProcessor()
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
         super().execute()
-        
+
         original = self._image_model.get_original_image()
         if original is None:
             return
-        
+
         result = original.copy()
-        
-        # Apply exposure adjustments
+
         if self._exposure_params:
             result = self._exposure_processor.process(result, **self._exposure_params)
-        
-        # Apply color adjustments
+
         if self._color_params:
             result = self._color_processor.process(result, **self._color_params)
-        
+
         self._new_image = result
         self._image_model.current_image = result
         self._image_model.set_modified(True)
@@ -140,6 +135,6 @@ class CombinedAdjustmentCommand(BaseCommand):
     def undo(self) -> None:
         """Undo the combined adjustment command."""
         super().undo()
-        
-        if self._previous_image:
+
+        if self._previous_image is not None:
             self._image_model.current_image = self._previous_image

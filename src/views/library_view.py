@@ -1,5 +1,6 @@
 """Library view for browsing and selecting images."""
 
+import logging
 from typing import Optional, List
 from pathlib import Path
 from PyQt6.QtWidgets import (
@@ -19,6 +20,10 @@ from PyQt6.QtGui import QIcon, QPixmap
 from src.services.image_service import ImageService
 from src.services.file_service import FileService
 from src.services.settings_service import SettingsService
+from src.utils.color_pipeline import linear_to_qimage
+
+
+logger = logging.getLogger(__name__)
 
 
 class LibraryView(QWidget):
@@ -177,31 +182,25 @@ class LibraryView(QWidget):
             file_path: Path to the image file
         """
         try:
-            # Load and create thumbnail
             image = self._image_service.load_image(file_path)
             thumbnail = self._image_service.create_thumbnail(
                 image,
-                (self.THUMBNAIL_SIZE, self.THUMBNAIL_SIZE)
+                (self.THUMBNAIL_SIZE, self.THUMBNAIL_SIZE),
             )
-            
-            # Convert to QPixmap
-            from src.views.image_view import ImageView
-            temp_view = ImageView()
-            pixmap = temp_view._pil_to_pixmap(thumbnail)
-            
-            # Create list item
+            pixmap = QPixmap.fromImage(linear_to_qimage(thumbnail))
+
             item = QListWidgetItem()
             item.setIcon(QIcon(pixmap))
             item.setData(Qt.ItemDataRole.UserRole, file_path)
             item.setToolTip(Path(file_path).name)
             item.setSizeHint(QSize(
                 self.THUMBNAIL_SIZE + 16,
-                self.THUMBNAIL_SIZE + 16
+                self.THUMBNAIL_SIZE + 16,
             ))
-            
+
             self._list_widget.addItem(item)
         except Exception as e:
-            print(f"Failed to load thumbnail for {file_path}: {e}")
+            logger.warning("Failed to load thumbnail for %s: %s", file_path, e)
 
     def _on_item_clicked(self, item: QListWidgetItem):
         """Handle item click."""

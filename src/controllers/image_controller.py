@@ -1,9 +1,9 @@
 """Controller for image operations."""
 
+import logging
 from typing import Optional, Dict
 from PyQt6.QtWidgets import QFileDialog, QWidget, QMessageBox
 from PyQt6.QtCore import QObject
-from PIL import Image
 
 from src.models.image_model import ImageModel
 from src.services.image_service import ImageService
@@ -15,6 +15,9 @@ from src.processors.color_processor import ColorProcessor
 from src.commands.adjustment_commands import CombinedAdjustmentCommand
 from src.processing.processing_worker import ProcessingWorker
 from src.utils.debouncer import Debouncer
+
+
+logger = logging.getLogger(__name__)
 
 
 class ImageController(QObject):
@@ -195,7 +198,7 @@ class ImageController(QObject):
     def refresh_view(self) -> None:
         """Refresh the image view with the current image state."""
         current_image = self._image_model.get_current_image()
-        if current_image:
+        if current_image is not None:
             # Don't emit image_loaded signal on refresh (only on initial load)
             self._image_view.set_image(current_image, emit_loaded=False)
 
@@ -378,33 +381,21 @@ class ImageController(QObject):
             color_params=color_params
         )
 
-    def _on_preview_ready(self, request_id: int, image: Image.Image) -> None:
-        """Handle preview image ready from worker.
-        
-        Args:
-            request_id: The request ID
-            image: Processed preview image
-        """
-        # Only update if this is still the latest request
+    def _on_preview_ready(self, request_id: int, image) -> None:
+        """Handle preview ``LinearImage`` ready from worker."""
         if self._processing_worker is not None and \
            self._processing_worker.is_latest_request(request_id):
-            # Upscale proxy to display size
             proxy_manager = self._processing_worker.proxy_manager
             if proxy_manager.needs_proxy():
                 display_image = proxy_manager.upscale_to_original_size(image)
             else:
                 display_image = image
-            
+
             self._image_model.current_image = display_image
             self.refresh_view()
 
-    def _on_processing_complete(self, request_id: int, image: Image.Image) -> None:
-        """Handle full-resolution processing complete from worker.
-        
-        Args:
-            request_id: The request ID
-            image: Processed full-resolution image
-        """
+    def _on_processing_complete(self, request_id: int, image) -> None:
+        """Handle full-resolution processing complete from worker."""
         self._image_model.current_image = image
         self.refresh_view()
 
@@ -415,8 +406,8 @@ class ImageController(QObject):
             request_id: The request ID
             error: Error message
         """
-        # Log error but don't show dialog for transient errors
-        print(f"Processing error (request {request_id}): {error}")
+        # Log error but don't show dialog for transient errors.
+        logger.error("Processing error (request %s): %s", request_id, error)
 
     def on_slider_released(self) -> None:
         """Handle slider release - trigger full-resolution processing.

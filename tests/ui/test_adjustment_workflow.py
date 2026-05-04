@@ -62,10 +62,13 @@ class TestCompleteAdjustmentWorkflow:
         current_image = main_window._image_controller.get_current_image()
         assert current_image is not None
         
-        # Get pixel value - should be brighter than original
-        pixel = current_image.getpixel((100, 100))
-        # Original was (128, 128, 128), with +50 brightness should be brighter
-        assert pixel[0] > 128  # R channel should be higher
+        # Pixel value at (100, 100) should be brighter than the
+        # original mid-grey (image is now a LinearImage; indexing is
+        # ``[row, col]`` and channels are ``[R, G, B]``).
+        pixel_r = float(current_image[100, 100, 0])
+        # Original mid-grey (linear) is ~0.2159; brightness +50 must
+        # produce a strictly larger value.
+        assert pixel_r > 0.22
 
     def test_multiple_adjustments_workflow(self, main_window, gray_image_file, qtbot):
         """Test applying multiple adjustments."""
@@ -136,16 +139,15 @@ class TestAdjustmentSignalFlow:
         
         # Get original image
         original = main_window._image_controller.image_model.get_original_image()
-        original_pixel = original.getpixel((100, 100))
-        
+        original_pixel = float(original[100, 100, 0])
+
         # Make significant adjustment
         main_window._tools_panel._brightness_slider.set_value(100.0)
         qtbot.wait(300)  # Wait for debounced processing
-        
-        # Check current image is different
+
         current = main_window._image_controller.get_current_image()
-        current_pixel = current.getpixel((100, 100))
-        
+        current_pixel = float(current[100, 100, 0])
+
         # Pixels should be different (brighter)
         assert current_pixel != original_pixel
 

@@ -1,17 +1,20 @@
 """Image view widget for displaying and manipulating images."""
 
-from typing import Optional
+from typing import Optional, Union
+
+import numpy as np
+from PIL import Image
+from PyQt6.QtCore import QPoint, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QImage, QMouseEvent, QPainter, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
     QLabel,
     QScrollArea,
-    QSizePolicy
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QSize
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QWheelEvent, QMouseEvent
-from PIL import Image
-import numpy as np
+
+from src.utils.color_pipeline import LinearImage, linear_to_qimage, to_linear
 
 
 class ImageView(QWidget):
@@ -69,18 +72,27 @@ class ImageView(QWidget):
         # Set mouse tracking for panning
         self._scroll_area.viewport().installEventFilter(self)
 
-    def set_image(self, image: Image.Image, emit_loaded: bool = True) -> None:
+    def set_image(
+        self,
+        image: Union[LinearImage, Image.Image],
+        emit_loaded: bool = True,
+    ) -> None:
         """Set the image to display.
-        
-        Args:
-            image: PIL Image to display
-            emit_loaded: Whether to emit the image_loaded signal (default True)
+
+        Accepts either a ``LinearImage`` (canonical pipeline format) or
+        a ``PIL.Image`` (transitional convenience for callers that have
+        not yet been migrated). Future code should pass arrays directly.
         """
-        # Convert PIL Image to QPixmap
-        self._pixmap = self._pil_to_pixmap(image)
-        self._update_display()
+        arr = to_linear(image)
+        self._set_array(arr)
         if emit_loaded:
             self.image_loaded.emit()
+
+    def _set_array(self, arr: LinearImage) -> None:
+        """Build a QPixmap from a ``LinearImage`` and update the display."""
+        qimage = linear_to_qimage(arr)
+        self._pixmap = QPixmap.fromImage(qimage)
+        self._update_display()
 
     def clear_image(self) -> None:
         """Clear the currently displayed image."""
@@ -164,41 +176,6 @@ class ImageView(QWidget):
         self._image_label.setPixmap(scaled_pixmap)
         self._image_label.resize(scaled_pixmap.size())
 
-    def _pil_to_pixmap(self, image: Image.Image) -> QPixmap:
-        """Convert a PIL Image to a QPixmap.
-        
-        Args:
-            image: PIL Image to convert
-            
-        Returns:
-            QPixmap representation of the image
-        """
-        # Ensure image is in RGB or RGBA mode
-        if image.mode == "RGB":
-            format = QImage.Format.Format_RGB888
-        elif image.mode == "RGBA":
-            format = QImage.Format.Format_RGBA8888
-        elif image.mode == "L":
-            format = QImage.Format.Format_Grayscale8
-        else:
-            # Convert to RGB for other modes
-            image = image.convert("RGB")
-            format = QImage.Format.Format_RGB888
-        
-        # Convert to numpy array
-        data = np.array(image)
-        
-        # Create QImage
-        height, width = data.shape[:2]
-        if len(data.shape) == 2:
-            bytes_per_line = width
-        else:
-            bytes_per_line = data.shape[2] * width
-        
-        qimage = QImage(data.data, width, height, bytes_per_line, format)
-        
-        # Must copy the data as numpy array may be garbage collected
-        return QPixmap.fromImage(qimage.copy())
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """Handle mouse wheel events for zooming.
