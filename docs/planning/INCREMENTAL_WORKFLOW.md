@@ -11,6 +11,7 @@ This document complements [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) Part 1. It an
 3. **Run the app:** `pipenv run python -m src.main` (see root [README.md](../../README.md#run-the-application)).
 4. **Run tests:** `pipenv run pytest`.
 5. **Pick the next slice** using section 2 (ordering); write and **approve** a detailed implementation note per **section 4** in [implementation-notes/](implementation-notes/) **before** any implementation.
+6. **After a slice is done:** commit with a focused message per [section 4.4](#44-git-commit-after-each-slice).
 
 ---
 
@@ -132,7 +133,16 @@ Length guideline: **roughly two to four screens** of prose for a non-trivial sli
 3. **Manual smoke** per plan checklist where UI is involved.
 4. **Merge**; link the implementation note in the PR description.
 
-**Gate:** Do not start the **next** slice until this slice’s tests pass, acceptance criteria are met, and the implementation note is complete (including a short **“Implementation summary”** subsection added after merge: what landed vs what was deferred).
+### 4.4 Git commit (after each slice)
+
+When automated tests pass and any manual smoke from the plan is done, **commit** with a message that matches one slice (or one logical commit per slice if several land on the same branch).
+
+- **One slice = one commit** when practical. If a branch contains multiple completed slices (for example logging baseline and pipeline migration), use **separate commits** in dependency order so `git revert` can undo one slice without the other.
+- **Subject line:** short imperative summary; prefix with `feat`, `fix`, or `docs` and an optional scope, consistent with recent history (for example `feat(logging): ...`, `feat(pipeline): ...`).
+- **Body (optional):** two to six lines covering what changed, why it matters, and test outcome if helpful; reference the implementation note filename under `docs/planning/implementation-notes/`.
+- **Do not** commit unrelated drive-by changes in the same commit as a slice.
+
+**Gate:** Do not start the **next** slice until this slice’s tests pass, acceptance criteria are met, the implementation note is complete (including a short **“Implementation summary”** subsection added after merge: what landed vs what was deferred), and the **git commit** for the slice is recorded (local or pushed per team practice).
 
 ---
 
