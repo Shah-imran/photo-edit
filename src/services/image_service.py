@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from src.services.raw_service import RawService
 from src.utils.color_pipeline import (
@@ -67,6 +67,7 @@ class ImageService:
 
         try:
             with Image.open(file_path) as pil:
+                pil = ImageOps.exif_transpose(pil)
                 pil.load()
                 return pil_to_linear(pil)
         except Exception as e:

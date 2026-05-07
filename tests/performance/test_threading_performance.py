@@ -2,11 +2,15 @@
 
 import pytest
 import time
-from PIL import Image
+import numpy as np
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QThread
 from src.processing.processing_worker import ProcessingWorker
 from src.processing.processing_queue import ProcessingQueue
+
+
+def linear_image(width: int, height: int, value: float = 0.25) -> np.ndarray:
+    return np.full((height, width, 3), value, dtype=np.float32)
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +31,7 @@ class TestThreadingPerformance:
         worker.start()
         
         # Create test image
-        test_image = Image.new('RGB', (2000, 1500), color='red')
+        test_image = linear_image(2000, 1500)
         worker.set_image(test_image)
         
         # Measure time to submit request (should be instant)
@@ -50,7 +54,7 @@ class TestThreadingPerformance:
         worker = ProcessingWorker()
         worker.start()
         
-        test_image = Image.new('RGB', (3000, 2000), color='blue')
+        test_image = linear_image(3000, 2000)
         worker.set_image(test_image)
         
         # Submit multiple rapid requests
@@ -101,7 +105,7 @@ class TestThreadingPerformance:
         worker = ProcessingWorker()
         worker.start()
         
-        test_image = Image.new('RGB', (4000, 3000), color='green')
+        test_image = linear_image(4000, 3000)
         worker.set_image(test_image)
         
         # Submit processing request

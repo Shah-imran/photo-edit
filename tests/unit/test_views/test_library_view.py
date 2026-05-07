@@ -1,5 +1,6 @@
 """Unit tests for LibraryView widget."""
 
+import time
 from unittest.mock import patch
 
 import pytest
@@ -88,7 +89,7 @@ class TestLibraryView:
         assert len(signal_received) == 1
         assert sample_image_path in signal_received[0]
 
-    def test_import_folder(self, qapp, tmp_path):
+    def test_import_folder(self, qapp, tmp_path, qtbot):
         """Test importing from folder."""
         # Create test images in folder
         from PIL import Image
@@ -100,7 +101,35 @@ class TestLibraryView:
         imported = view.import_folder(str(tmp_path))
         
         assert len(imported) == 3
+        qtbot.waitUntil(lambda: view.get_image_count() == 3, timeout=5000)
         assert view.get_image_count() == 3
+
+    def test_cancel_thumbnail_batch(self, qapp, tmp_path, qtbot):
+        """Cancelling stops the worker and clears the loader for a new batch."""
+        from PIL import Image
+
+        from src.services.image_service import ImageService
+
+        paths = []
+        for i in range(20):
+            p = tmp_path / f"cancel_test_{i}.jpg"
+            Image.new("RGB", (8, 8), color=(i, 0, 0)).save(p)
+            paths.append(str(p))
+
+        _real_thumb = ImageService.load_preview_thumbnail
+
+        def _slow_thumb(self, file_path, size):
+            time.sleep(0.04)
+            return _real_thumb(self, file_path, size)
+
+        view = LibraryView()
+        with patch.object(ImageService, "load_preview_thumbnail", _slow_thumb):
+            view.add_images_async(paths)
+            view.cancel_thumbnail_batch()
+
+        qtbot.waitUntil(lambda: view._thumbnail_thread is None, timeout=8000)
+        assert view._thumbnail_worker is None
+        assert view.get_image_count() < len(paths)
 
 
 class TestLibraryViewImportSettings:

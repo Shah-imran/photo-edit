@@ -138,3 +138,34 @@ class CombinedAdjustmentCommand(BaseCommand):
 
         if self._previous_image is not None:
             self._image_model.current_image = self._previous_image
+
+
+class ImageStateChangeCommand(BaseCommand):
+    """Command that records an already-rendered image state.
+
+    This is used by the threaded adjustment path: the worker has already
+    performed the expensive processing, so history must not re-run the
+    processors on the UI thread.
+    """
+
+    def __init__(
+        self,
+        image_model: ImageModel,
+        previous_image: LinearImage,
+        new_image: LinearImage,
+    ):
+        super().__init__()
+        self._image_model = image_model
+        self._previous_image = previous_image
+        self._new_image = new_image
+
+    def execute(self) -> None:
+        """Apply the already-rendered new image."""
+        super().execute()
+        self._image_model.current_image = self._new_image
+        self._image_model.set_modified(True)
+
+    def undo(self) -> None:
+        """Restore the image state from before this adjustment gesture."""
+        super().undo()
+        self._image_model.current_image = self._previous_image

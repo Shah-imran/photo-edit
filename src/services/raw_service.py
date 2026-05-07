@@ -18,7 +18,7 @@ from typing import Optional
 import cv2
 import numpy as np
 import rawpy
-from PIL import Image
+from PIL import Image, ImageOps
 
 from src.utils.color_pipeline import LinearImage, pil_to_linear, srgb_to_linear
 
@@ -79,7 +79,7 @@ class RawService:
 
     def _decode_thumbnail_object(self, thumb: rawpy.Thumbnail) -> Optional[LinearImage]:
         if thumb.format == rawpy.ThumbFormat.JPEG:
-            pil = Image.open(BytesIO(thumb.data)).convert("RGB")
+            pil = ImageOps.exif_transpose(Image.open(BytesIO(thumb.data))).convert("RGB")
             return pil_to_linear(pil)
 
         if thumb.format == rawpy.ThumbFormat.BITMAP:

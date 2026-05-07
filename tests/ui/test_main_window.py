@@ -281,11 +281,14 @@ class TestLibraryPanel:
         """Test selecting an image from library loads it."""
         library = main_window._library_view
         library.add_image(sample_image_file)
-        
+
         # Emit selection signal
-        library.image_selected.emit(sample_image_file)
-        qtbot.wait(100)
-        
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            library.image_selected.emit(sample_image_file)
+
         assert main_window._image_controller.has_image() is True
 
     def test_clear_library(self, main_window, sample_image_file, qtbot):

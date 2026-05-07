@@ -13,8 +13,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QStatusBar,
     QFileDialog,
+    QProgressBar,
+    QPushButton,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QAction
 
 
@@ -59,6 +61,7 @@ class MainWindow(QMainWindow):
         self._image_controller = ImageController(
             self._image_view, settings_service=self._settings_service
         )
+        self._pending_library_add_path: Optional[str] = None
         
         # Set up UI
         self._setup_ui()
@@ -150,6 +153,54 @@ class MainWindow(QMainWindow):
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         
+        # Thumbnail import progress (non-modal; hidden when idle)
+        self._thumb_import_label = QLabel("Thumbnails")
+        self._thumb_import_label.setStyleSheet("color: #a0a0a0; padding: 0 4px;")
+        self._thumb_import_progress = QProgressBar()
+        self._thumb_import_progress.setFixedWidth(120)
+        self._thumb_import_progress.setMinimum(0)
+        self._thumb_import_progress.setMaximum(1)
+        self._thumb_import_progress.setTextVisible(False)
+        self._thumb_import_count_label = QLabel("0 / 0")
+        self._thumb_import_count_label.setStyleSheet(
+            "color: #a0a0a0; font-size: 11px; padding: 0 2px;"
+        )
+        self._thumb_import_container = QWidget()
+        _im_lay = QHBoxLayout(self._thumb_import_container)
+        _im_lay.setContentsMargins(0, 0, 8, 0)
+        _im_lay.setSpacing(6)
+        _im_lay.addStretch(1)
+        _im_lay.addWidget(self._thumb_import_label)
+        _im_lay.addWidget(self._thumb_import_progress)
+        _im_lay.addWidget(self._thumb_import_count_label)
+        self._thumb_import_cancel = QPushButton("Cancel")
+        self._thumb_import_cancel.setFlat(True)
+        self._thumb_import_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._thumb_import_cancel.setStyleSheet(
+            """
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #0086f0;
+                font-size: 11px;
+                padding: 0 2px;
+                text-decoration: underline;
+            }
+            QPushButton:hover {
+                color: #4db2ff;
+            }
+            QPushButton:disabled {
+                color: #606060;
+                text-decoration: none;
+            }
+            """
+        )
+        self._thumb_import_cancel.setToolTip("Stop generating remaining thumbnails")
+        self._thumb_import_cancel.clicked.connect(self._on_thumbnail_import_cancel)
+        _im_lay.addWidget(self._thumb_import_cancel)
+        self._thumb_import_container.setVisible(False)
+        self._status_bar.addPermanentWidget(self._thumb_import_container, 1)
+
         # Zoom label
         self._zoom_label = QLabel("100%")
         self._zoom_label.setStyleSheet("padding: 0 10px;")
@@ -169,6 +220,18 @@ class MainWindow(QMainWindow):
         self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
         self._tools_panel.slider_released.connect(self._on_slider_released)
         self._library_view.image_selected.connect(self._on_library_image_selected)
+        self._library_view.thumbnail_batch_started.connect(
+            self._on_thumbnail_batch_started
+        )
+        self._library_view.thumbnail_batch_progress.connect(
+            self._on_thumbnail_batch_progress
+        )
+        self._library_view.thumbnail_batch_finished.connect(
+            self._on_thumbnail_batch_finished
+        )
+        self._image_controller.image_load_started.connect(self._on_image_load_started)
+        self._image_controller.image_preview_ready.connect(self._on_image_preview_ready)
+        self._image_controller.image_load_finished.connect(self._on_image_load_finished)
 
     def _on_image_loaded(self):
         """Handle image loaded event."""
@@ -179,6 +242,9 @@ class MainWindow(QMainWindow):
             # Enable tools panel
             self._tools_panel.set_enabled(True)
             self._tools_panel.reset_all()
+            # Defer fit until the event loop has laid out the viewport (avoids
+            # inconsistent fit when width/height were still stale on first paint).
+            QTimer.singleShot(0, self._image_view.fit_to_window)
 
     def _on_zoom_changed(self, zoom_factor: float):
         """Handle zoom changed event."""
@@ -194,16 +260,78 @@ class MainWindow(QMainWindow):
 
     def _on_library_image_selected(self, file_path: str):
         """Handle image selection from library."""
-        self._image_controller.load_image(file_path, self)
+        self._image_controller.load_image_async(file_path, self)
+
+    def _on_thumbnail_batch_started(self, total: int) -> None:
+        """Show status-bar progress while library thumbnails load."""
+        self._thumb_import_progress.setMaximum(max(1, total))
+        self._thumb_import_progress.setValue(0)
+        self._thumb_import_count_label.setText(f"0 / {total}")
+        self._thumb_import_cancel.setEnabled(True)
+        self._thumb_import_container.setVisible(True)
+
+    def _on_thumbnail_import_cancel(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Cancel Thumbnail Import?",
+            "Stop generating thumbnails for the remaining images?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        self._library_view.cancel_thumbnail_batch()
+        self._thumb_import_cancel.setEnabled(False)
+
+    def _on_thumbnail_batch_progress(self, current: int, total: int) -> None:
+        self._thumb_import_progress.setMaximum(max(1, total))
+        self._thumb_import_progress.setValue(current)
+        self._thumb_import_count_label.setText(f"{current} / {total}")
+
+    def _on_thumbnail_batch_finished(self) -> None:
+        self._thumb_import_container.setVisible(False)
+        self._thumb_import_progress.setValue(0)
+        self._thumb_import_count_label.setText("0 / 0")
+        self._status_bar.showMessage("Ready", 2000)
+
+    def _on_image_load_started(self, file_path: str) -> None:
+        """Show loading feedback while the image decodes."""
+        self._status_bar.showMessage(f"Loading: {file_path}")
+        self._tools_panel.set_enabled(False)
+
+    def _on_image_preview_ready(self, file_path: str) -> None:
+        """Show that a fast preview is visible while full decode continues."""
+        self._status_bar.showMessage(f"Preview loaded; decoding full image: {file_path}")
+
+    def _on_image_load_finished(self, file_path: str, success: bool) -> None:
+        """Handle completion of asynchronous image loading."""
+        if not success:
+            self._status_bar.showMessage(f"Failed to load: {file_path}", 4000)
+            if self._pending_library_add_path == file_path:
+                self._pending_library_add_path = None
+            return
+
+        if self._pending_library_add_path == file_path:
+            self._library_view.add_image(file_path)
+            self._pending_library_add_path = None
 
     # Menu action handlers
     def _open_image(self):
         """Handle open image action."""
-        if self._image_controller.open_image(self):
-            # Add to library
-            file_path = self._image_controller.image_model.file_path
-            if file_path:
-                self._library_view.add_image(file_path)
+        start_dir = self._settings_service.get_last_open_dir()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Image",
+            start_dir,
+            open_image_file_dialog_filter()
+        )
+        if not file_path:
+            return
+
+        self._settings_service.set_last_open_dir(file_path)
+        self._pending_library_add_path = file_path
+        self._image_controller.load_image_async(file_path, self)
 
     def _import_images(self):
         """Handle import images action."""
@@ -217,8 +345,10 @@ class MainWindow(QMainWindow):
         
         if file_paths:
             self._settings_service.set_last_open_dir(file_paths[0])
-            self._library_view.add_images(file_paths)
-            self._status_bar.showMessage(f"Imported {len(file_paths)} images", 2000)
+            self._library_view.add_images_async(file_paths)
+            self._status_bar.showMessage(
+                f"Importing {len(file_paths)} images…", 5000
+            )
 
     def _export_image(self):
         """Handle export image action."""

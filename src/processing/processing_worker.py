@@ -5,15 +5,35 @@ Operates on the canonical pipeline format
 arrays as ``object`` payloads (Qt cannot statically type ndarrays).
 """
 
-from typing import Dict, Optional
+from collections import OrderedDict
+from dataclasses import dataclass
+import logging
+from time import perf_counter
+from typing import Dict, Optional, Tuple
 
 from PyQt6.QtCore import QMutex, QObject, QThread, QWaitCondition, pyqtSignal
 
+from src.processing.display_frame import DisplayFrame
 from src.processing.processing_queue import ProcessingQueue, ProcessingRequest
 from src.processing.proxy_manager import ProxyManager
 from src.processors.color_processor import ColorProcessor
 from src.processors.exposure_processor import ExposureProcessor
 from src.utils.color_pipeline import LinearImage
+
+
+logger = logging.getLogger(__name__)
+
+
+def _elapsed_ms(start: float) -> float:
+    return (perf_counter() - start) * 1000.0
+
+
+@dataclass
+class _CachedPreview:
+    """Cached preview image and its already-converted display buffer."""
+
+    linear_image: LinearImage
+    rgb: object
 
 
 class ProcessingWorker(QObject):
@@ -25,13 +45,13 @@ class ProcessingWorker(QObject):
     
     Signals:
         processing_started: Emitted when processing begins (request_id)
-        preview_ready: Emitted when proxy preview is ready (request_id, image)
+        preview_ready: Emitted when proxy preview is ready (request_id, DisplayFrame)
         processing_complete: Emitted when full processing is done (request_id, image)
         error_occurred: Emitted on processing error (request_id, error_message)
     """
     
     processing_started = pyqtSignal(int)
-    preview_ready = pyqtSignal(int, object)  # request_id, LinearImage
+    preview_ready = pyqtSignal(int, object)  # request_id, DisplayFrame
     processing_complete = pyqtSignal(int, object)  # request_id, LinearImage
     error_occurred = pyqtSignal(int, str)
     
@@ -45,6 +65,8 @@ class ProcessingWorker(QObject):
         
         self._queue = ProcessingQueue()
         self._proxy_manager = ProxyManager()
+        self._result_cache: OrderedDict[Tuple, _CachedPreview] = OrderedDict()
+        self._max_cache_entries = 16
         
         # Processors
         self._exposure_processor = ExposureProcessor()
@@ -100,17 +122,20 @@ class ProcessingWorker(QObject):
         Should be called from the main thread when a new image is loaded.
         """
         self._proxy_manager.set_image(image)
+        self._result_cache.clear()
     
     def clear_image(self) -> None:
         """Clear the current image."""
         self._proxy_manager.clear()
         self._queue.clear()
+        self._result_cache.clear()
     
     def submit_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
-        use_proxy: bool = True
+        use_proxy: bool = True,
+        interactive_preview: bool = True,
     ) -> int:
         """Submit a processing request.
         
@@ -118,6 +143,7 @@ class ProcessingWorker(QObject):
             exposure_params: Exposure adjustment parameters
             color_params: Color adjustment parameters
             use_proxy: Whether to process proxy (fast) or full image
+            interactive_preview: Whether to use the lower-cost interactive proxy
             
         Returns:
             Request ID for tracking
@@ -125,7 +151,8 @@ class ProcessingWorker(QObject):
         request = self._queue.create_request(
             exposure_params=exposure_params,
             color_params=color_params,
-            use_proxy=use_proxy
+            use_proxy=use_proxy,
+            interactive_preview=interactive_preview,
         )
         self._queue.enqueue(request)
         
@@ -137,7 +164,8 @@ class ProcessingWorker(QObject):
     def submit_preview_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
-        color_params: Optional[Dict[str, float]] = None
+        color_params: Optional[Dict[str, float]] = None,
+        interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
         
@@ -146,11 +174,17 @@ class ProcessingWorker(QObject):
         Args:
             exposure_params: Exposure adjustment parameters
             color_params: Color adjustment parameters
+            interactive_preview: Use smaller interactive proxy for drag updates.
             
         Returns:
             Request ID
         """
-        return self.submit_request(exposure_params, color_params, use_proxy=True)
+        return self.submit_request(
+            exposure_params,
+            color_params,
+            use_proxy=True,
+            interactive_preview=interactive_preview,
+        )
     
     def submit_final_request(
         self,
@@ -212,14 +246,20 @@ class ProcessingWorker(QObject):
         Args:
             request: The request to process
         """
+        total_start = perf_counter()
+        tier = self._request_tier(request)
         try:
             self.processing_started.emit(request.request_id)
             
             # Get source image (proxy or full)
+            source_start = perf_counter()
             if request.use_proxy:
-                source = self._proxy_manager.get_proxy()
+                source = self._proxy_manager.get_proxy(
+                    interactive=request.interactive_preview
+                )
             else:
                 source = self._proxy_manager.get_original()
+            source_ms = _elapsed_ms(source_start)
             
             if source is None:
                 self.error_occurred.emit(request.request_id, "No image available")
@@ -228,13 +268,67 @@ class ProcessingWorker(QObject):
             # Check if still valid before heavy processing
             if not request.should_process():
                 return
+
+            cache_key = self._cache_key(request, source)
+            if cache_key is not None and cache_key in self._result_cache:
+                cache_start = perf_counter()
+                cached = self._result_cache[cache_key]
+                result = cached.linear_image.copy()
+                frame = DisplayFrame(
+                    request_id=request.request_id,
+                    tier=tier,
+                    adjustment_signature=self._adjustment_signature(request),
+                    rgb=cached.rgb.copy(),
+                    linear_image=result,
+                )
+                self._result_cache.move_to_end(cache_key)
+                cache_ms = _elapsed_ms(cache_start)
+                self.preview_ready.emit(request.request_id, frame)
+                logger.info(
+                    "PERF worker request=%s tier=%s cache=hit "
+                    "source_ms=%.2f cache_copy_ms=%.2f total_ms=%.2f shape=%s",
+                    request.request_id,
+                    tier,
+                    source_ms,
+                    cache_ms,
+                    _elapsed_ms(total_start),
+                    source.shape,
+                )
+                return
             
             # Apply adjustments
+            apply_start = perf_counter()
             result = self._apply_adjustments(
                 source,
                 request.exposure_params,
                 request.color_params
             )
+            apply_ms = _elapsed_ms(apply_start)
+
+            frame = None
+            display_ms = 0.0
+            if request.use_proxy:
+                display_start = perf_counter()
+                frame = DisplayFrame.from_linear(
+                    request.request_id,
+                    tier,
+                    self._adjustment_signature(request),
+                    result,
+                )
+                display_ms = _elapsed_ms(display_start)
+
+            if cache_key is not None:
+                cache_store_start = perf_counter()
+                self._result_cache[cache_key] = _CachedPreview(
+                    linear_image=result.copy(),
+                    rgb=frame.rgb.copy() if frame is not None else None,
+                )
+                self._result_cache.move_to_end(cache_key)
+                while len(self._result_cache) > self._max_cache_entries:
+                    self._result_cache.popitem(last=False)
+                cache_store_ms = _elapsed_ms(cache_store_start)
+            else:
+                cache_store_ms = 0.0
             
             # Check again after processing
             if not request.should_process():
@@ -242,12 +336,47 @@ class ProcessingWorker(QObject):
             
             # Emit appropriate signal
             if request.use_proxy:
-                self.preview_ready.emit(request.request_id, result)
+                self.preview_ready.emit(request.request_id, frame)
             else:
                 self.processing_complete.emit(request.request_id, result)
+
+            logger.info(
+                "PERF worker request=%s tier=%s cache=miss source_ms=%.2f "
+                "apply_ms=%.2f display_ms=%.2f cache_store_ms=%.2f "
+                "total_ms=%.2f shape=%s",
+                request.request_id,
+                tier,
+                source_ms,
+                apply_ms,
+                display_ms,
+                cache_store_ms,
+                _elapsed_ms(total_start),
+                source.shape,
+            )
                 
         except Exception as e:
             self.error_occurred.emit(request.request_id, str(e))
+
+    def _cache_key(
+        self, request: ProcessingRequest, source: LinearImage
+    ) -> Optional[Tuple]:
+        """Return a small preview-cache key, or None for full-res renders."""
+        if not request.use_proxy:
+            return None
+        return (
+            bool(request.interactive_preview),
+            tuple(source.shape),
+            tuple(sorted(request.exposure_params.items())),
+            tuple(sorted(request.color_params.items())),
+        )
+
+    @staticmethod
+    def _adjustment_signature(request: ProcessingRequest) -> Tuple:
+        """Return a stable signature for request parameters."""
+        return (
+            tuple(sorted(request.exposure_params.items())),
+            tuple(sorted(request.color_params.items())),
+        )
     
     def _apply_adjustments(
         self,
@@ -256,15 +385,40 @@ class ProcessingWorker(QObject):
         color_params: Dict[str, float],
     ) -> LinearImage:
         """Apply exposure and color adjustments to a ``LinearImage``."""
+        total_start = perf_counter()
+        copy_start = perf_counter()
         result = image.copy()
+        copy_ms = _elapsed_ms(copy_start)
+        exposure_ms = 0.0
+        color_ms = 0.0
 
         if exposure_params and any(v != 0 for v in exposure_params.values()):
+            exposure_start = perf_counter()
             result = self._exposure_processor.process(result, **exposure_params)
+            exposure_ms = _elapsed_ms(exposure_start)
 
         if color_params and any(v != 0 for v in color_params.values()):
+            color_start = perf_counter()
             result = self._color_processor.process(result, **color_params)
+            color_ms = _elapsed_ms(color_start)
+
+        logger.info(
+            "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
+            "color_ms=%.2f total_ms=%.2f",
+            image.shape,
+            copy_ms,
+            exposure_ms,
+            color_ms,
+            _elapsed_ms(total_start),
+        )
 
         return result
+
+    @staticmethod
+    def _request_tier(request: ProcessingRequest) -> str:
+        if not request.use_proxy:
+            return "full"
+        return "interactive" if request.interactive_preview else "quality"
 
 
 class ProcessingController:

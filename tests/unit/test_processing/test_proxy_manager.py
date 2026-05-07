@@ -73,6 +73,19 @@ class TestProxyManager:
         assert w <= 500
         assert proxy.dtype == np.float32
 
+    def test_get_interactive_proxy_is_smaller_or_equal(self):
+        pm = ProxyManager(max_size=1200, interactive_max_size=700)
+        image = _flat_linear(4000, 3000)
+        pm.set_image(image)
+
+        quality = pm.get_proxy(interactive=False)
+        interactive = pm.get_proxy(interactive=True)
+        assert quality is not None and interactive is not None
+        q_h, q_w = quality.shape[:2]
+        i_h, i_w = interactive.shape[:2]
+        assert i_w <= q_w
+        assert i_h <= q_h
+
     def test_clear(self):
         pm = ProxyManager()
         image = _flat_linear(100, 100)

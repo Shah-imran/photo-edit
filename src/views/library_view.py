@@ -12,9 +12,8 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QFileDialog,
-    QSizePolicy
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QObject, QThread
 from PyQt6.QtGui import QIcon, QPixmap
 
 from src.services.file_service import FileService
@@ -27,6 +26,40 @@ from src.utils.image_extensions import open_image_file_dialog_filter
 logger = logging.getLogger(__name__)
 
 
+class _ThumbnailBatchWorker(QObject):
+    """Generate thumbnails in a background thread."""
+
+    thumbnail_ready = pyqtSignal(str, object)
+    progress = pyqtSignal(int, int)
+    finished = pyqtSignal()
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, file_paths: List[str], size: int):
+        super().__init__()
+        self._file_paths = list(file_paths)
+        self._size = int(size)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        service = ImageService()
+        total = len(self._file_paths)
+        for idx, file_path in enumerate(self._file_paths, start=1):
+            if self._cancelled:
+                break
+            try:
+                thumbnail = service.load_preview_thumbnail(
+                    file_path, (self._size, self._size)
+                )
+                self.thumbnail_ready.emit(file_path, thumbnail)
+            except Exception as e:
+                self.failed.emit(file_path, str(e))
+            self.progress.emit(idx, total)
+        self.finished.emit()
+
+
 class LibraryView(QWidget):
     """Widget for browsing and selecting images from a library.
     
@@ -37,8 +70,14 @@ class LibraryView(QWidget):
     
     image_selected = pyqtSignal(str)
     images_imported = pyqtSignal(list)
+    thumbnail_batch_started = pyqtSignal(int)
+    thumbnail_batch_progress = pyqtSignal(int, int)
+    thumbnail_batch_finished = pyqtSignal()
 
     THUMBNAIL_SIZE = 80
+    # Icon area + one line of filename under the thumbnail.
+    THUMB_CELL_WIDTH = 112
+    THUMB_CELL_HEIGHT = 118
 
     def __init__(
         self,
@@ -58,6 +97,8 @@ class LibraryView(QWidget):
         self._file_service = FileService()
         self._settings_service = settings_service
         self._image_paths: List[str] = []
+        self._thumbnail_thread: Optional[QThread] = None
+        self._thumbnail_worker: Optional[_ThumbnailBatchWorker] = None
         
         self._setup_ui()
         self._connect_signals()
@@ -103,6 +144,10 @@ class LibraryView(QWidget):
         self._list_widget.setSpacing(8)
         self._list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
         self._list_widget.setWrapping(True)
+        self._list_widget.setWordWrap(True)
+        self._list_widget.setGridSize(
+            QSize(self.THUMB_CELL_WIDTH, self.THUMB_CELL_HEIGHT)
+        )
         self._list_widget.setStyleSheet("""
             QListWidget {
                 background-color: #1a1a1a;
@@ -152,7 +197,7 @@ class LibraryView(QWidget):
         if file_paths:
             if self._settings_service is not None:
                 self._settings_service.set_last_open_dir(file_paths[0])
-            self.add_images(file_paths)
+            self.add_images_async(file_paths)
             self.images_imported.emit(file_paths)
 
     def add_images(self, file_paths: List[str]) -> None:
@@ -176,6 +221,77 @@ class LibraryView(QWidget):
         """
         self.add_images([file_path])
 
+    def add_images_async(self, file_paths: List[str]) -> None:
+        """Add images using background thumbnail generation.
+
+        This keeps the UI responsive for large imports.
+        Emits ``thumbnail_batch_*`` signals for status-bar progress UI.
+        """
+        new_paths = [p for p in file_paths if p not in self._image_paths]
+        if not new_paths:
+            return
+
+        if self._thumbnail_thread is not None:
+            # Avoid overlapping batch loaders.
+            return
+
+        self.thumbnail_batch_started.emit(len(new_paths))
+
+        self._thumbnail_thread = QThread(self)
+        self._thumbnail_worker = _ThumbnailBatchWorker(new_paths, self.THUMBNAIL_SIZE)
+        self._thumbnail_worker.moveToThread(self._thumbnail_thread)
+
+        self._thumbnail_thread.started.connect(self._thumbnail_worker.run)
+        self._thumbnail_worker.thumbnail_ready.connect(self._on_thumbnail_ready)
+        self._thumbnail_worker.progress.connect(self._on_thumbnail_progress)
+        self._thumbnail_worker.failed.connect(self._on_thumbnail_failed)
+        self._thumbnail_worker.finished.connect(self._on_thumbnail_batch_finished)
+        self._thumbnail_worker.finished.connect(self._thumbnail_thread.quit)
+        self._thumbnail_thread.finished.connect(self._thumbnail_worker.deleteLater)
+        self._thumbnail_thread.finished.connect(self._thumbnail_thread.deleteLater)
+        self._thumbnail_thread.finished.connect(self._clear_thumbnail_loader)
+
+        self._thumbnail_thread.start()
+
+    def _on_thumbnail_ready(self, file_path: str, thumbnail) -> None:
+        if file_path in self._image_paths:
+            return
+        pixmap = QPixmap.fromImage(linear_to_qimage(thumbnail))
+        name = Path(file_path).name
+        item = QListWidgetItem()
+        item.setIcon(QIcon(pixmap))
+        item.setText(name)
+        item.setTextAlignment(
+            int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        )
+        item.setData(Qt.ItemDataRole.UserRole, file_path)
+        item.setToolTip(name)
+        item.setSizeHint(
+            QSize(self.THUMB_CELL_WIDTH, self.THUMB_CELL_HEIGHT)
+        )
+        self._list_widget.addItem(item)
+        self._image_paths.append(file_path)
+        self._update_info_label()
+
+    def _on_thumbnail_progress(self, current: int, total: int) -> None:
+        self.thumbnail_batch_progress.emit(current, total)
+
+    def _on_thumbnail_failed(self, file_path: str, error: str) -> None:
+        logger.warning("Failed to load thumbnail for %s: %s", file_path, error)
+
+    def _on_thumbnail_batch_finished(self) -> None:
+        self._update_info_label()
+        self.thumbnail_batch_finished.emit()
+
+    def _clear_thumbnail_loader(self) -> None:
+        self._thumbnail_worker = None
+        self._thumbnail_thread = None
+
+    def cancel_thumbnail_batch(self) -> None:
+        """Ask the background thumbnail worker to stop after the current file."""
+        if self._thumbnail_worker is not None:
+            self._thumbnail_worker.cancel()
+
     def _add_image_item(self, file_path: str):
         """Add an image item to the list widget.
         
@@ -189,14 +305,18 @@ class LibraryView(QWidget):
             )
             pixmap = QPixmap.fromImage(linear_to_qimage(thumbnail))
 
+            name = Path(file_path).name
             item = QListWidgetItem()
             item.setIcon(QIcon(pixmap))
+            item.setText(name)
+            item.setTextAlignment(
+                int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+            )
             item.setData(Qt.ItemDataRole.UserRole, file_path)
-            item.setToolTip(Path(file_path).name)
-            item.setSizeHint(QSize(
-                self.THUMBNAIL_SIZE + 16,
-                self.THUMBNAIL_SIZE + 16,
-            ))
+            item.setToolTip(name)
+            item.setSizeHint(
+                QSize(self.THUMB_CELL_WIDTH, self.THUMB_CELL_HEIGHT)
+            )
 
             self._list_widget.addItem(item)
         except Exception as e:
@@ -264,7 +384,7 @@ class LibraryView(QWidget):
         )
         
         if image_files:
-            self.add_images(image_files)
+            self.add_images_async(image_files)
             self.images_imported.emit(image_files)
         
         return image_files

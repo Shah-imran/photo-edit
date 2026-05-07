@@ -2,6 +2,7 @@
 
 import logging
 import sys
+from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
 
@@ -16,10 +17,13 @@ def main():
     app.setApplicationName("PhotoEdit")
     app.setOrganizationName("PhotoEdit")
 
-    # Configure logging *after* org/app names are set (so QStandardPaths
-    # resolves correctly) and *before* MainWindow is constructed (so
-    # first-launch INFO lines from views/services are captured).
-    log_dir = configure_logging()
+    # Keep logs project-local during active development so performance traces
+    # are easy to inspect after a slider interaction.
+    project_root = Path(__file__).resolve().parents[1]
+    log_dir = configure_logging(
+        log_dir=project_root / "logs",
+        file_level=logging.DEBUG,
+    )
     logging.getLogger(__name__).info(
         "PhotoEdit starting; logs at %s", log_dir
     )

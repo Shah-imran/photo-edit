@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from src.processors.exposure_processor import ExposureProcessor
-from src.utils.color_pipeline import linear_to_srgb, pil_to_linear
+from src.utils.color_pipeline import linear_to_srgb, pil_to_linear, srgb_to_linear
 
 
 @pytest.fixture
@@ -64,6 +64,19 @@ class TestExposureProcessor:
         processor = ExposureProcessor()
         result = processor.process(sample_linear_image, contrast=-50.0)
         assert result.shape == sample_linear_image.shape
+
+    def test_contrast_lut_matches_reference_curve(self):
+        """Fast contrast should stay visually equivalent to the reference math."""
+        processor = ExposureProcessor()
+        rng = np.random.default_rng(seed=17)
+        image = rng.random((64, 64, 3), dtype=np.float32)
+        value = 40.0
+        factor = 1.0 + (value / 100.0)
+
+        result = processor.process(image, contrast=value)
+        reference = srgb_to_linear((linear_to_srgb(image) - 0.5) * factor + 0.5)
+
+        np.testing.assert_allclose(result, reference, atol=1e-4, rtol=1e-4)
 
     def test_brightness_increase(self, flat_grey_linear):
         processor = ExposureProcessor()

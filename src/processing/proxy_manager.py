@@ -19,19 +19,27 @@ from src.utils.color_pipeline import LinearImage
 class ProxyManager:
     """Maintain a downscaled proxy alongside the original ``LinearImage``."""
 
-    DEFAULT_PROXY_SIZE = 1200  # Maximum dimension in pixels
+    DEFAULT_PROXY_SIZE = 1400  # Quality preview maximum dimension
+    DEFAULT_INTERACTIVE_PROXY_SIZE = 600  # Drag preview maximum dimension
 
-    def __init__(self, max_size: int = DEFAULT_PROXY_SIZE):
+    def __init__(
+        self,
+        max_size: int = DEFAULT_PROXY_SIZE,
+        interactive_max_size: int = DEFAULT_INTERACTIVE_PROXY_SIZE,
+    ):
         """Initialize the proxy manager.
 
         Args:
             max_size: Maximum width or height of the proxy.
         """
         self._max_size = max_size
+        self._interactive_max_size = interactive_max_size
         self._original_image: Optional[LinearImage] = None
         self._proxy_image: Optional[LinearImage] = None
+        self._interactive_proxy_image: Optional[LinearImage] = None
         self._original_size: Tuple[int, int] = (0, 0)
         self._proxy_size: Tuple[int, int] = (0, 0)
+        self._interactive_proxy_size: Tuple[int, int] = (0, 0)
         self._scale_factor: float = 1.0
 
     @property
@@ -44,6 +52,10 @@ class ProxyManager:
             self._max_size = max(100, value)
             if self._original_image is not None:
                 self._generate_proxy()
+
+    @property
+    def interactive_max_size(self) -> int:
+        return self._interactive_max_size
 
     @property
     def scale_factor(self) -> float:
@@ -74,8 +86,12 @@ class ProxyManager:
             return None
         return self._original_image.copy()
 
-    def get_proxy(self) -> Optional[LinearImage]:
+    def get_proxy(self, interactive: bool = False) -> Optional[LinearImage]:
         """Return a copy of the proxy image, or ``None``."""
+        if interactive:
+            if self._interactive_proxy_image is None:
+                return None
+            return self._interactive_proxy_image.copy()
         if self._proxy_image is None:
             return None
         return self._proxy_image.copy()
@@ -92,8 +108,10 @@ class ProxyManager:
     def clear(self) -> None:
         self._original_image = None
         self._proxy_image = None
+        self._interactive_proxy_image = None
         self._original_size = (0, 0)
         self._proxy_size = (0, 0)
+        self._interactive_proxy_size = (0, 0)
         self._scale_factor = 1.0
 
     def get_pixel_count_ratio(self) -> float:
@@ -107,28 +125,29 @@ class ProxyManager:
         if self._original_image is None:
             return
 
-        width, height = self._original_size
-        if width <= self._max_size and height <= self._max_size:
-            self._proxy_image = self._original_image.copy()
-            self._proxy_size = self._original_size
-            self._scale_factor = 1.0
-            return
-
-        if width > height:
-            new_width = self._max_size
-            new_height = max(1, int(round(height * (self._max_size / width))))
-        else:
-            new_height = self._max_size
-            new_width = max(1, int(round(width * (self._max_size / height))))
-
-        resized = cv2.resize(
-            self._original_image,
-            (new_width, new_height),
-            interpolation=cv2.INTER_AREA,
+        quality = self._resize_max_side(self._original_image, self._max_size)
+        interactive = self._resize_max_side(
+            self._original_image, self._interactive_max_size
         )
-        self._proxy_image = resized.astype(np.float32, copy=False)
-        self._proxy_size = (new_width, new_height)
-        self._scale_factor = width / new_width
+        self._proxy_image = quality
+        self._interactive_proxy_image = interactive
+        self._proxy_size = (quality.shape[1], quality.shape[0])
+        self._interactive_proxy_size = (interactive.shape[1], interactive.shape[0])
+        self._scale_factor = self._original_size[0] / float(self._proxy_size[0])
+
+    @staticmethod
+    def _resize_max_side(image: LinearImage, max_size: int) -> LinearImage:
+        h, w = image.shape[:2]
+        if w <= max_size and h <= max_size:
+            return image.copy()
+        if w > h:
+            new_w = max_size
+            new_h = max(1, int(round(h * (max_size / w))))
+        else:
+            new_h = max_size
+            new_w = max(1, int(round(w * (max_size / h))))
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return resized.astype(np.float32, copy=False)
 
     def upscale_to_original_size(self, processed_proxy: LinearImage) -> LinearImage:
         """Upscale a processed proxy back to original dimensions.
