@@ -6,8 +6,8 @@ from typing import Optional, Union
 
 import numpy as np
 from PIL import Image
-from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPixmap, QWheelEvent
+from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
@@ -77,6 +77,46 @@ class _ImageCanvas(QWidget):
         painter.drawPixmap(self.rect(), self._pixmap, self._pixmap.rect())
 
 
+class _LoadingOverlay(QWidget):
+    """Simple centered spinner overlay for image transitions."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._angle = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(50)
+        self._timer.timeout.connect(self._advance)
+        self.hide()
+
+    def set_loading(self, loading: bool) -> None:
+        if loading:
+            self._angle = 0
+            self.show()
+            self.raise_()
+            self._timer.start()
+            self.update()
+            return
+        self._timer.stop()
+        self.hide()
+
+    def _advance(self) -> None:
+        self._angle = (self._angle + 30) % 360
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 55))
+
+        spinner_rect = QRect(0, 0, 44, 44)
+        spinner_rect.moveCenter(self.rect().center())
+        pen = QPen(QColor("#d8ecff"), 4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawArc(spinner_rect, self._angle * 16, 220 * 16)
+
+
 class ImageView(QWidget):
     """Widget for displaying images with zoom and pan functionality.
     
@@ -108,6 +148,7 @@ class ImageView(QWidget):
         self._pan_start: Optional[QPoint] = None
         self._is_panning: bool = False
         self._pan_button: Optional[Qt.MouseButton] = None
+        self._loading_overlay: Optional[_LoadingOverlay] = None
         
         self._setup_ui()
 
@@ -125,6 +166,8 @@ class ImageView(QWidget):
         self._image_canvas = _ImageCanvas()
         self._scroll_area.setWidget(self._image_canvas)
         layout.addWidget(self._scroll_area)
+        self._loading_overlay = _LoadingOverlay(self)
+        self._loading_overlay.resize(self.size())
         
         # Set mouse tracking for panning
         self._scroll_area.viewport().installEventFilter(self)
@@ -248,6 +291,22 @@ class ImageView(QWidget):
         self._scroll_area.verticalScrollBar().setValue(0)
         self._image_canvas.clear()
 
+    def set_cached_preview_image(
+        self,
+        image: QImage,
+        zoom_factor: Optional[float] = None,
+    ) -> None:
+        """Show a cached preview image immediately during navigation."""
+        self._display_frame = None
+        self._pixmap = QPixmap.fromImage(image)
+        self._scroll_area.horizontalScrollBar().setValue(0)
+        self._scroll_area.verticalScrollBar().setValue(0)
+        if zoom_factor is None:
+            self._zoom_factor = 1.0
+        else:
+            self._zoom_factor = max(self.MIN_ZOOM, min(self.MAX_ZOOM, zoom_factor))
+        self._update_display()
+
     def has_image(self) -> bool:
         """Check if an image is currently loaded.
         
@@ -255,6 +314,16 @@ class ImageView(QWidget):
             True if an image is loaded
         """
         return self._pixmap is not None
+
+    def set_loading(self, loading: bool) -> None:
+        """Show or hide the transition loading overlay."""
+        if self._loading_overlay is None:
+            return
+        self._loading_overlay.set_loading(loading)
+
+    def is_loading(self) -> bool:
+        """Whether the loading overlay is currently visible."""
+        return bool(self._loading_overlay is not None and self._loading_overlay.isVisible())
 
     def get_zoom_factor(self) -> float:
         """Get the current zoom factor.
@@ -426,3 +495,8 @@ class ImageView(QWidget):
                 self.mouseReleaseEvent(event)
                 return True
         return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._loading_overlay is not None:
+            self._loading_overlay.resize(self.size())

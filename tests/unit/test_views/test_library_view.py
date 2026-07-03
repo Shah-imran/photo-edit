@@ -1,176 +1,253 @@
 """Unit tests for LibraryView widget."""
 
-import time
-from unittest.mock import patch
+from __future__ import annotations
 
 import pytest
-from PyQt6.QtCore import QSettings
-from PyQt6.QtWidgets import QApplication
-from src.services.settings_service import SettingsService
+from PIL import Image
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QSizePolicy
+
 from src.views.library_view import LibraryView
 
 
 @pytest.fixture(scope="module")
 def qapp():
-    """Create QApplication for Qt tests."""
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
     yield app
 
 
-class TestLibraryView:
-    """Test cases for LibraryView widget."""
+@pytest.fixture
+def view(qapp, qtbot):
+    widget = LibraryView()
+    qtbot.addWidget(widget)
+    yield widget
+    widget.close()
 
-    def test_library_view_initialization(self, qapp):
-        """Test LibraryView can be initialized."""
-        view = LibraryView()
+
+class TestLibraryView:
+    def test_library_view_initialization(self, view):
         assert view is not None
         assert view.get_image_count() == 0
+        assert view.get_library_count() == 0
+        assert view.is_library_section_expanded() is False
 
-    def test_add_single_image(self, qapp, sample_image_path):
-        """Test adding a single image."""
-        view = LibraryView()
-        view.add_image(sample_image_path)
+    def test_set_libraries_renders_sections_and_current_selection(self, view):
+        view.set_libraries(
+            [
+                {"id": "one", "name": "Library 1"},
+                {"id": "two", "name": "Travel"},
+            ],
+            current_library_id="two",
+        )
+
+        assert view.get_library_count() == 2
+        assert view.get_current_library_id() == "two"
+        assert set(view._library_sections.keys()) == {"one", "two"}
+        assert view._library_sections["two"].is_expanded() is True
+        assert view._library_sections["one"].is_expanded() is False
+        assert (
+            view._library_sections["two"].sizePolicy().verticalPolicy()
+            == QSizePolicy.Policy.Expanding
+        )
+
+    def test_set_entries_renders_grid(self, view, sample_image_path):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
+        view.set_entries(
+            [
+                {
+                    "path": sample_image_path,
+                    "filename": "test_image.jpg",
+                    "status": "available",
+                    "text": "test_image.jpg",
+                    "tooltip": "test_image.jpg",
+                    "thumbnail": None,
+                    "placeholder": "loading",
+                }
+            ]
+        )
+
         assert view.get_image_count() == 1
 
-    def test_add_multiple_images(self, qapp, sample_image_path, sample_png_path):
-        """Test adding multiple images."""
-        view = LibraryView()
-        view.add_images([sample_image_path, sample_png_path])
-        assert view.get_image_count() == 2
+    def test_grid_cells_expand_to_fill_available_width(self, view, sample_image_path, qtbot):
+        view.resize(340, 640)
+        view.show()
+        qtbot.waitExposed(view)
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
+        view.set_entries(
+            [
+                {
+                    "path": sample_image_path,
+                    "filename": "test_image.jpg",
+                    "status": "available",
+                    "text": "test_image.jpg",
+                    "tooltip": "test_image.jpg",
+                    "thumbnail": None,
+                    "placeholder": "loading",
+                }
+            ]
+        )
 
-    def test_add_duplicate_image(self, qapp, sample_image_path):
-        """Test adding duplicate image doesn't increase count."""
-        view = LibraryView()
-        view.add_image(sample_image_path)
-        view.add_image(sample_image_path)
-        assert view.get_image_count() == 1
+        grid = view._grid_by_library_id["one"]
 
-    def test_clear_images(self, qapp, sample_image_path):
-        """Test clearing all images."""
-        view = LibraryView()
-        view.add_image(sample_image_path)
-        view.clear()
-        assert view.get_image_count() == 0
+        def has_responsive_width() -> bool:
+            viewport_width = grid.viewport().width()
+            spacing = grid.spacing()
+            column_count = max(
+                1,
+                (viewport_width + spacing)
+                // (view.THUMB_CELL_WIDTH + spacing),
+            )
+            expected_width = max(
+                view.THUMB_CELL_WIDTH,
+                (viewport_width - spacing * (column_count - 1)) // column_count,
+            )
+            return grid.gridSize().width() == expected_width
 
-    def test_get_selected_path_no_selection(self, qapp):
-        """Test get_selected_path with no selection."""
-        view = LibraryView()
+        qtbot.waitUntil(has_responsive_width, timeout=1000)
+        assert grid.gridSize().width() > view.THUMB_CELL_WIDTH
+
+    def test_get_selected_path_no_selection(self, view):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
         assert view.get_selected_path() is None
 
-    def test_image_selected_signal(self, qapp, sample_image_path):
-        """Test image_selected signal is emitted."""
-        view = LibraryView()
-        view.add_image(sample_image_path)
-        
+    def test_image_selected_signal(self, view, sample_image_path):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
+        view.set_entries(
+            [
+                {
+                    "path": sample_image_path,
+                    "filename": "test_image.jpg",
+                    "status": "available",
+                    "text": "test_image.jpg",
+                    "tooltip": "test_image.jpg",
+                    "thumbnail": None,
+                    "placeholder": "loading",
+                }
+            ]
+        )
         signal_received = []
         view.image_selected.connect(lambda p: signal_received.append(p))
-        
-        # Simulate click by selecting item
-        item = view._list_widget.item(0)
-        view._list_widget.setCurrentItem(item)
+
+        grid = view._grid_by_library_id["one"]
+        item = grid.item(0)
+        grid.setCurrentItem(item)
         view._on_item_clicked(item)
-        
-        assert len(signal_received) == 1
-        assert signal_received[0] == sample_image_path
 
-    def test_images_imported_signal(self, qapp, sample_image_path):
-        """Test images_imported signal is emitted."""
-        view = LibraryView()
-        
-        signal_received = []
-        view.images_imported.connect(lambda paths: signal_received.append(paths))
-        
-        # Manually trigger import (without dialog)
-        view.add_images([sample_image_path])
-        view.images_imported.emit([sample_image_path])
-        
-        assert len(signal_received) == 1
-        assert sample_image_path in signal_received[0]
+        assert signal_received == [sample_image_path]
 
-    def test_import_folder(self, qapp, tmp_path, qtbot):
-        """Test importing from folder."""
-        # Create test images in folder
-        from PIL import Image
-        for i in range(3):
-            img = Image.new('RGB', (50, 50), color='blue')
-            img.save(tmp_path / f"test_{i}.jpg")
-        
-        view = LibraryView()
-        imported = view.import_folder(str(tmp_path))
-        
-        assert len(imported) == 3
-        qtbot.waitUntil(lambda: view.get_image_count() == 3, timeout=5000)
-        assert view.get_image_count() == 3
-
-    def test_cancel_thumbnail_batch(self, qapp, tmp_path, qtbot):
-        """Cancelling stops the worker and clears the loader for a new batch."""
-        from PIL import Image
-
-        from src.services.image_service import ImageService
-
-        paths = []
-        for i in range(20):
-            p = tmp_path / f"cancel_test_{i}.jpg"
-            Image.new("RGB", (8, 8), color=(i, 0, 0)).save(p)
-            paths.append(str(p))
-
-        _real_thumb = ImageService.load_preview_thumbnail
-
-        def _slow_thumb(self, file_path, size):
-            time.sleep(0.04)
-            return _real_thumb(self, file_path, size)
-
-        view = LibraryView()
-        with patch.object(ImageService, "load_preview_thumbnail", _slow_thumb):
-            view.add_images_async(paths)
-            view.cancel_thumbnail_batch()
-
-        qtbot.waitUntil(lambda: view._thumbnail_thread is None, timeout=8000)
-        assert view._thumbnail_worker is None
-        assert view.get_image_count() < len(paths)
-
-
-class TestLibraryViewImportSettings:
-    """Wiring between ``_import_images`` and ``SettingsService``."""
-
-    @pytest.fixture
-    def isolated_settings(self, tmp_path):
-        ini_path = tmp_path / "photoedit-test.ini"
-        return SettingsService(QSettings(str(ini_path), QSettings.Format.IniFormat))
-
-    def test_import_seeds_dialog_with_last_open_dir(
-        self, qapp, sample_image_path, tmp_path, isolated_settings
-    ):
-        seeded = tmp_path / "previous_session"
-        seeded.mkdir()
-        isolated_settings.set_last_open_dir(str(seeded))
-
-        view = LibraryView(settings_service=isolated_settings)
-
-        with patch(
-            "src.views.library_view.QFileDialog.getOpenFileNames",
-            return_value=([sample_image_path], "Image Files"),
-        ) as dialog:
-            view._import_images()
-
-        args, _ = dialog.call_args
-        assert args[2] == str(seeded)
-
-    def test_import_persists_first_chosen_directory(
-        self, qapp, sample_image_path, isolated_settings
-    ):
-        view = LibraryView(settings_service=isolated_settings)
-
-        with patch(
-            "src.views.library_view.QFileDialog.getOpenFileNames",
-            return_value=([sample_image_path], "Image Files"),
-        ):
-            view._import_images()
-
-        from pathlib import Path
-
-        assert isolated_settings.get_last_open_dir() == str(
-            Path(sample_image_path).parent
+    def test_missing_entry_does_not_emit_image_selected(self, view, sample_image_path):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
         )
+        view.set_entries(
+            [
+                {
+                    "path": sample_image_path,
+                    "filename": "test_image.jpg",
+                    "status": "missing",
+                    "text": "test_image.jpg\nMissing",
+                    "tooltip": sample_image_path,
+                    "thumbnail": None,
+                    "placeholder": "missing",
+                }
+            ]
+        )
+        signal_received = []
+        view.image_selected.connect(lambda p: signal_received.append(p))
+
+        item = view._grid_by_library_id["one"].item(0)
+        view._on_item_clicked(item)
+
+        assert signal_received == []
+
+    def test_import_button_emits_signal(self, view, qtbot):
+        with qtbot.waitSignal(view.import_requested, timeout=1000):
+            view._import_button.click()
+
+    def test_library_selected_signal(self, view, qtbot):
+        view.set_libraries(
+            [
+                {"id": "one", "name": "Library 1"},
+                {"id": "two", "name": "Travel"},
+            ],
+            current_library_id="one",
+        )
+
+        with qtbot.waitSignal(view.library_selected, timeout=1000) as catcher:
+            view._library_sections["two"].set_expanded(True)
+
+        assert catcher.args == ["two"]
+        assert view._library_sections["one"].is_expanded() is False
+        assert view._library_sections["two"].is_expanded() is True
+
+    def test_current_library_can_be_collapsed(self, view):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
+
+        view._library_sections["one"].set_expanded(False)
+
+        assert view.get_current_library_id() == "one"
+        assert view.is_library_section_expanded() is False
+
+    def test_create_library_button_emits_default_name(self, view, qtbot):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
+
+        with qtbot.waitSignal(view.create_library_requested, timeout=1000) as catcher:
+            view._add_library_button.click()
+
+        assert catcher.args == ["Library 2"]
+
+    def test_inline_remove_library_button_emits_row_id(self, view, qtbot):
+        view.set_libraries(
+            [
+                {"id": "one", "name": "Library 1"},
+                {"id": "two", "name": "Travel"},
+            ],
+            current_library_id="one",
+        )
+        assert view._delete_button_by_library_id["two"].text() == "−"
+
+        with qtbot.waitSignal(view.remove_library_requested, timeout=1000) as catcher:
+            view._delete_button_by_library_id["two"].click()
+
+        assert catcher.args == ["two"]
+
+    def test_libraries_section_can_be_collapsed(self, view):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
+        view.set_library_section_expanded(False)
+        assert view.is_library_section_expanded() is False
+        assert view._grid_by_library_id["one"].isVisible() is False
+
+        view.set_library_section_expanded(True)
+        assert view.is_library_section_expanded() is True
+
+    def test_import_folder(self, view, tmp_path):
+        for i in range(3):
+            Image.new("RGB", (50, 50), color="blue").save(tmp_path / f"test_{i}.jpg")
+
+        imported = view.import_folder(str(tmp_path))
+
+        assert len(imported) == 3

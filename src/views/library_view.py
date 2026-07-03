@@ -1,125 +1,110 @@
-"""Library view for browsing and selecting images."""
+"""Thin library view for browsing named libraries in an accordion."""
 
-import logging
-from typing import Optional, List
-from pathlib import Path
+from __future__ import annotations
+
+from typing import Optional
+
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
     QHBoxLayout,
+    QLabel,
     QListWidget,
     QListWidgetItem,
-    QLabel,
     QPushButton,
-    QFileDialog,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QObject, QThread
-from PyQt6.QtGui import QIcon, QPixmap
 
 from src.services.file_service import FileService
-from src.services.image_service import ImageService
-from src.services.settings_service import SettingsService
-from src.utils.color_pipeline import linear_to_qimage
-from src.utils.image_extensions import open_image_file_dialog_filter
+from src.views.widgets.collapsible_section import CollapsibleSection
 
 
-logger = logging.getLogger(__name__)
-
-
-class _ThumbnailBatchWorker(QObject):
-    """Generate thumbnails in a background thread."""
-
-    thumbnail_ready = pyqtSignal(str, object)
-    progress = pyqtSignal(int, int)
-    finished = pyqtSignal()
-    failed = pyqtSignal(str, str)
-
-    def __init__(self, file_paths: List[str], size: int):
-        super().__init__()
-        self._file_paths = list(file_paths)
-        self._size = int(size)
-        self._cancelled = False
-
-    def cancel(self) -> None:
-        self._cancelled = True
-
-    def run(self) -> None:
-        service = ImageService()
-        total = len(self._file_paths)
-        for idx, file_path in enumerate(self._file_paths, start=1):
-            if self._cancelled:
-                break
-            try:
-                thumbnail = service.load_preview_thumbnail(
-                    file_path, (self._size, self._size)
-                )
-                self.thumbnail_ready.emit(file_path, thumbnail)
-            except Exception as e:
-                self.failed.emit(file_path, str(e))
-            self.progress.emit(idx, total)
-        self.finished.emit()
-
-
-class LibraryView(QWidget):
-    """Widget for browsing and selecting images from a library.
-    
-    Signals:
-        image_selected: Emitted when an image is selected (file_path)
-        images_imported: Emitted when images are imported (list of paths)
-    """
-    
-    image_selected = pyqtSignal(str)
-    images_imported = pyqtSignal(list)
-    thumbnail_batch_started = pyqtSignal(int)
-    thumbnail_batch_progress = pyqtSignal(int, int)
-    thumbnail_batch_finished = pyqtSignal()
-
-    THUMBNAIL_SIZE = 80
-    # Icon area + one line of filename under the thumbnail.
-    THUMB_CELL_WIDTH = 112
-    THUMB_CELL_HEIGHT = 118
+class ResponsiveLibraryGrid(QListWidget):
+    """Thumbnail grid that stretches its cells to fill the viewport width."""
 
     def __init__(
         self,
+        min_cell_width: int,
+        cell_height: int,
         parent: Optional[QWidget] = None,
-        settings_service: Optional[SettingsService] = None,
-    ):
-        """Initialize the library view.
-        
-        Args:
-            parent: Optional parent widget
-            settings_service: Optional SettingsService for persisting the
-                last-used import directory.
-        """
+    ) -> None:
         super().__init__(parent)
-        
-        self._image_service = ImageService()
+        self._min_cell_width = min_cell_width
+        self._cell_height = cell_height
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self.refresh_layout_metrics()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self.refresh_layout_metrics()
+
+    def refresh_layout_metrics(self) -> None:
+        """Resize cells so the current column count fills the viewport width."""
+        available_width = self.viewport().width()
+        if available_width <= 0:
+            return
+
+        spacing = max(0, self.spacing())
+        min_column_span = max(1, self._min_cell_width + spacing)
+        column_count = max(1, (available_width + spacing) // min_column_span)
+        cell_width = max(
+            self._min_cell_width,
+            (available_width - spacing * (column_count - 1)) // column_count,
+        )
+        grid_size = QSize(cell_width, self._cell_height)
+        if self.gridSize() == grid_size:
+            return
+
+        self.setGridSize(grid_size)
+        for index in range(self.count()):
+            self.item(index).setSizeHint(grid_size)
+
+
+class LibraryView(QWidget):
+    """Presentation-only accordion library dock UI."""
+
+    image_selected = pyqtSignal(str)
+    import_requested = pyqtSignal()
+    library_selected = pyqtSignal(str)
+    create_library_requested = pyqtSignal(str)
+    remove_library_requested = pyqtSignal(str)
+
+    THUMBNAIL_SIZE = 80
+    THUMB_CELL_WIDTH = 112
+    THUMB_CELL_HEIGHT = 118
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
         self._file_service = FileService()
-        self._settings_service = settings_service
-        self._image_paths: List[str] = []
-        self._thumbnail_thread: Optional[QThread] = None
-        self._thumbnail_worker: Optional[_ThumbnailBatchWorker] = None
-        
+        self._item_by_path: dict[str, QListWidgetItem] = {}
+        self._current_library_id = ""
+        self._library_sections: dict[str, CollapsibleSection] = {}
+        self._grid_by_library_id: dict[str, QListWidget] = {}
+        self._delete_button_by_library_id: dict[str, QPushButton] = {}
+        self._suppress_section_signal = False
+
         self._setup_ui()
         self._connect_signals()
 
-    def _setup_ui(self):
-        """Set up the UI components."""
+    def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(8, 8, 0, 8)
         layout.setSpacing(8)
-        
-        # Header with import button
+
         header_layout = QHBoxLayout()
-        
         title = QLabel("Library")
         title.setStyleSheet("color: #a0a0a0; font-weight: bold; font-size: 12px;")
         header_layout.addWidget(title)
-        
         header_layout.addStretch()
-        
-        import_button = QPushButton("+ Import")
-        import_button.setStyleSheet("""
+
+        self._import_button = QPushButton("+ Import")
+        self._import_button.setStyleSheet(
+            """
             QPushButton {
                 background-color: #0078d4;
                 color: white;
@@ -131,24 +116,145 @@ class LibraryView(QWidget):
             QPushButton:hover {
                 background-color: #0086f0;
             }
-        """)
-        import_button.clicked.connect(self._import_images)
-        header_layout.addWidget(import_button)
-        
-        layout.addLayout(header_layout)
-        
-        # Image list
-        self._list_widget = QListWidget()
-        self._list_widget.setViewMode(QListWidget.ViewMode.IconMode)
-        self._list_widget.setIconSize(QSize(self.THUMBNAIL_SIZE, self.THUMBNAIL_SIZE))
-        self._list_widget.setSpacing(8)
-        self._list_widget.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self._list_widget.setWrapping(True)
-        self._list_widget.setWordWrap(True)
-        self._list_widget.setGridSize(
-            QSize(self.THUMB_CELL_WIDTH, self.THUMB_CELL_HEIGHT)
+            """
         )
-        self._list_widget.setStyleSheet("""
+        header_layout.addWidget(self._import_button)
+
+        self._add_library_button = QPushButton("+ Library")
+        self._add_library_button.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #e0e0e0;
+                border: none;
+                border-radius: 3px;
+                padding: 4px 10px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+            }
+            """
+        )
+        header_layout.addWidget(self._add_library_button)
+        layout.addLayout(header_layout)
+
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._scroll_area.setStyleSheet(
+            """
+            QScrollArea {
+                background-color: transparent;
+                border: none;
+            }
+            """
+        )
+        self._content_widget = QWidget()
+        self._content_layout = QVBoxLayout(self._content_widget)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(10)
+        self._scroll_area.setWidget(self._content_widget)
+        layout.addWidget(self._scroll_area, 1)
+
+        self._info_label = QLabel("No images")
+        self._info_label.setStyleSheet("color: #606060; font-size: 10px;")
+        self._info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._info_label)
+
+    def _connect_signals(self) -> None:
+        self._import_button.clicked.connect(self.import_requested)
+        self._add_library_button.clicked.connect(self._on_create_library_clicked)
+
+    def set_libraries(self, libraries: list[dict], current_library_id: str) -> None:
+        self._current_library_id = current_library_id
+        self._suppress_section_signal = True
+        try:
+            self._clear_library_sections()
+            for index, library in enumerate(libraries):
+                library_id = str(library["id"])
+                section = CollapsibleSection(
+                    str(library["name"]),
+                    expanded=(library_id == current_library_id),
+                )
+                delete_button = QPushButton("−")
+                delete_button.setFlat(True)
+                delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
+                delete_button.setToolTip("Remove library")
+                delete_button.setStyleSheet(
+                    """
+                    QPushButton {
+                        background: transparent;
+                        border: none;
+                        color: #7faed6;
+                        font-size: 16px;
+                        font-weight: bold;
+                        padding: 0 4px 4px 4px;
+                    }
+                    QPushButton:hover {
+                        color: #b7d9f7;
+                    }
+                    """
+                )
+                delete_button.clicked.connect(
+                    lambda _checked=False, lid=library_id: self._on_remove_library_clicked(
+                        lid
+                    )
+                )
+                section.add_header_widget(delete_button)
+                grid = self._create_image_grid()
+                section.set_content_widget(grid)
+                section.toggled.connect(
+                    lambda expanded, lid=library_id: self._on_library_section_toggled(
+                        lid, expanded
+                    )
+                )
+                self._library_sections[library_id] = section
+                self._grid_by_library_id[library_id] = grid
+                self._delete_button_by_library_id[library_id] = delete_button
+                self._content_layout.insertWidget(index, section)
+            self._apply_active_section_layout()
+        finally:
+            self._suppress_section_signal = False
+
+    def set_entries(self, entries: list[dict]) -> None:
+        self._item_by_path.clear()
+        grid = self._grid_by_library_id.get(self._current_library_id)
+        if grid is None:
+            self._update_info_label()
+            return
+        grid.clear()
+        for payload in entries:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, payload["path"])
+            item.setData(Qt.ItemDataRole.UserRole + 1, payload["status"])
+            item.setSizeHint(grid.gridSize())
+            self._apply_entry_payload(item, payload)
+            grid.addItem(item)
+            self._item_by_path[payload["path"]] = item
+        grid.refresh_layout_metrics()
+        self._update_info_label()
+
+    def _create_image_grid(self) -> ResponsiveLibraryGrid:
+        grid = ResponsiveLibraryGrid(
+            min_cell_width=self.THUMB_CELL_WIDTH,
+            cell_height=self.THUMB_CELL_HEIGHT,
+        )
+        grid.setViewMode(QListWidget.ViewMode.IconMode)
+        grid.setIconSize(QSize(self.THUMBNAIL_SIZE, self.THUMBNAIL_SIZE))
+        grid.setSpacing(8)
+        grid.setResizeMode(QListWidget.ResizeMode.Adjust)
+        grid.setWrapping(True)
+        grid.setWordWrap(True)
+        grid.setGridSize(QSize(self.THUMB_CELL_WIDTH, self.THUMB_CELL_HEIGHT))
+        grid.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Expanding,
+        )
+        grid.setStyleSheet(
+            """
             QListWidget {
                 background-color: #1a1a1a;
                 border: none;
@@ -166,176 +272,110 @@ class LibraryView(QWidget):
             QListWidget::item:hover {
                 background-color: #3a3a3a;
             }
-        """)
-        layout.addWidget(self._list_widget)
-        
-        # Info label
-        self._info_label = QLabel("No images")
-        self._info_label.setStyleSheet("color: #606060; font-size: 10px;")
-        self._info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._info_label)
-
-    def _connect_signals(self):
-        """Connect widget signals."""
-        self._list_widget.itemClicked.connect(self._on_item_clicked)
-        self._list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
-
-    def _import_images(self):
-        """Open file dialog to import images."""
-        start_dir = (
-            self._settings_service.get_last_open_dir()
-            if self._settings_service is not None
-            else ""
+            """
         )
-        file_paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Import Images",
-            start_dir,
-            open_image_file_dialog_filter()
-        )
-        
-        if file_paths:
-            if self._settings_service is not None:
-                self._settings_service.set_last_open_dir(file_paths[0])
-            self.add_images_async(file_paths)
-            self.images_imported.emit(file_paths)
+        grid.itemClicked.connect(self._on_item_clicked)
+        grid.itemDoubleClicked.connect(self._on_item_double_clicked)
+        return grid
 
-    def add_images(self, file_paths: List[str]) -> None:
-        """Add images to the library.
-        
-        Args:
-            file_paths: List of image file paths
-        """
-        for path in file_paths:
-            if path not in self._image_paths:
-                self._add_image_item(path)
-                self._image_paths.append(path)
-        
-        self._update_info_label()
+    def _clear_library_sections(self) -> None:
+        for section in self._library_sections.values():
+            section.setParent(None)
+        self._library_sections.clear()
+        self._grid_by_library_id.clear()
+        self._delete_button_by_library_id.clear()
 
-    def add_image(self, file_path: str) -> None:
-        """Add a single image to the library.
-        
-        Args:
-            file_path: Path to the image file
-        """
-        self.add_images([file_path])
-
-    def add_images_async(self, file_paths: List[str]) -> None:
-        """Add images using background thumbnail generation.
-
-        This keeps the UI responsive for large imports.
-        Emits ``thumbnail_batch_*`` signals for status-bar progress UI.
-        """
-        new_paths = [p for p in file_paths if p not in self._image_paths]
-        if not new_paths:
+    def _on_library_section_toggled(self, library_id: str, expanded: bool) -> None:
+        if self._suppress_section_signal:
+            return
+        if expanded:
+            self._suppress_section_signal = True
+            try:
+                for other_id, other_section in self._library_sections.items():
+                    if other_id != library_id and other_section.is_expanded():
+                        other_section.set_expanded(False)
+            finally:
+                self._suppress_section_signal = False
+            self._current_library_id = library_id
+            self._apply_active_section_layout()
+            self.library_selected.emit(library_id)
             return
 
-        if self._thumbnail_thread is not None:
-            # Avoid overlapping batch loaders.
+        if library_id == self._current_library_id:
+            self._apply_active_section_layout()
+
+    def update_entry_thumbnail(self, path: str, payload: dict) -> None:
+        item = self._item_by_path.get(path)
+        if item is None:
             return
+        self._apply_entry_payload(item, payload)
 
-        self.thumbnail_batch_started.emit(len(new_paths))
+    def _apply_entry_payload(self, item: QListWidgetItem, payload: dict) -> None:
+        pixmap = None
+        thumbnail = payload.get("thumbnail")
+        if thumbnail is not None:
+            pixmap = QPixmap.fromImage(thumbnail)
+        else:
+            placeholder = payload.get("placeholder")
+            if placeholder == "missing":
+                pixmap = self._build_state_pixmap("Missing", "#5a2d2d", "#d46a6a")
+            else:
+                pixmap = self._build_state_pixmap("Loading", "#243544", "#84b9e6")
 
-        self._thumbnail_thread = QThread(self)
-        self._thumbnail_worker = _ThumbnailBatchWorker(new_paths, self.THUMBNAIL_SIZE)
-        self._thumbnail_worker.moveToThread(self._thumbnail_thread)
-
-        self._thumbnail_thread.started.connect(self._thumbnail_worker.run)
-        self._thumbnail_worker.thumbnail_ready.connect(self._on_thumbnail_ready)
-        self._thumbnail_worker.progress.connect(self._on_thumbnail_progress)
-        self._thumbnail_worker.failed.connect(self._on_thumbnail_failed)
-        self._thumbnail_worker.finished.connect(self._on_thumbnail_batch_finished)
-        self._thumbnail_worker.finished.connect(self._thumbnail_thread.quit)
-        self._thumbnail_thread.finished.connect(self._thumbnail_worker.deleteLater)
-        self._thumbnail_thread.finished.connect(self._thumbnail_thread.deleteLater)
-        self._thumbnail_thread.finished.connect(self._clear_thumbnail_loader)
-
-        self._thumbnail_thread.start()
-
-    def _on_thumbnail_ready(self, file_path: str, thumbnail) -> None:
-        if file_path in self._image_paths:
-            return
-        pixmap = QPixmap.fromImage(linear_to_qimage(thumbnail))
-        name = Path(file_path).name
-        item = QListWidgetItem()
         item.setIcon(QIcon(pixmap))
-        item.setText(name)
+        item.setText(str(payload["text"]))
         item.setTextAlignment(
             int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         )
-        item.setData(Qt.ItemDataRole.UserRole, file_path)
-        item.setToolTip(name)
-        item.setSizeHint(
-            QSize(self.THUMB_CELL_WIDTH, self.THUMB_CELL_HEIGHT)
+        item.setToolTip(str(payload["tooltip"]))
+        item.setData(Qt.ItemDataRole.UserRole + 1, payload["status"])
+
+    def _build_state_pixmap(self, label: str, fill: str, stroke: str) -> QPixmap:
+        pixmap = QPixmap(self.THUMBNAIL_SIZE, self.THUMBNAIL_SIZE)
+        pixmap.fill(QColor(fill))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(stroke), 2))
+        painter.drawRect(1, 1, self.THUMBNAIL_SIZE - 3, self.THUMBNAIL_SIZE - 3)
+        painter.setPen(QColor("#e8e8e8"))
+        painter.drawText(
+            pixmap.rect(),
+            int(Qt.AlignmentFlag.AlignCenter),
+            label,
         )
-        self._list_widget.addItem(item)
-        self._image_paths.append(file_path)
-        self._update_info_label()
+        painter.end()
+        return pixmap
 
-    def _on_thumbnail_progress(self, current: int, total: int) -> None:
-        self.thumbnail_batch_progress.emit(current, total)
+    def _on_create_library_clicked(self) -> None:
+        default_name = self._default_library_name()
+        self.create_library_requested.emit(default_name)
 
-    def _on_thumbnail_failed(self, file_path: str, error: str) -> None:
-        logger.warning("Failed to load thumbnail for %s: %s", file_path, error)
+    def _on_remove_library_clicked(self, library_id: str) -> None:
+        self.remove_library_requested.emit(library_id)
 
-    def _on_thumbnail_batch_finished(self) -> None:
-        self._update_info_label()
-        self.thumbnail_batch_finished.emit()
-
-    def _clear_thumbnail_loader(self) -> None:
-        self._thumbnail_worker = None
-        self._thumbnail_thread = None
-
-    def cancel_thumbnail_batch(self) -> None:
-        """Ask the background thumbnail worker to stop after the current file."""
-        if self._thumbnail_worker is not None:
-            self._thumbnail_worker.cancel()
-
-    def _add_image_item(self, file_path: str):
-        """Add an image item to the list widget.
-        
-        Args:
-            file_path: Path to the image file
-        """
-        try:
-            thumbnail = self._image_service.load_preview_thumbnail(
-                file_path,
-                (self.THUMBNAIL_SIZE, self.THUMBNAIL_SIZE),
-            )
-            pixmap = QPixmap.fromImage(linear_to_qimage(thumbnail))
-
-            name = Path(file_path).name
-            item = QListWidgetItem()
-            item.setIcon(QIcon(pixmap))
-            item.setText(name)
-            item.setTextAlignment(
-                int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-            )
-            item.setData(Qt.ItemDataRole.UserRole, file_path)
-            item.setToolTip(name)
-            item.setSizeHint(
-                QSize(self.THUMB_CELL_WIDTH, self.THUMB_CELL_HEIGHT)
-            )
-
-            self._list_widget.addItem(item)
-        except Exception as e:
-            logger.warning("Failed to load thumbnail for %s: %s", file_path, e)
-
-    def _on_item_clicked(self, item: QListWidgetItem):
-        """Handle item click."""
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
         file_path = item.data(Qt.ItemDataRole.UserRole)
-        if file_path:
+        status = item.data(Qt.ItemDataRole.UserRole + 1)
+        if file_path and status == "available":
             self.image_selected.emit(file_path)
 
-    def _on_item_double_clicked(self, item: QListWidgetItem):
-        """Handle item double-click."""
-        # Same as single click for now
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
         self._on_item_clicked(item)
 
-    def _update_info_label(self):
-        """Update the info label with image count."""
-        count = len(self._image_paths)
+    def _default_library_name(self) -> str:
+        existing_names = {
+            section.title() for section in self._library_sections.values()
+        }
+        index = 1
+        while True:
+            candidate = f"Library {index}"
+            if candidate not in existing_names:
+                return candidate
+            index += 1
+
+    def _update_info_label(self) -> None:
+        grid = self._grid_by_library_id.get(self._current_library_id)
+        count = grid.count() if grid is not None else 0
         if count == 0:
             self._info_label.setText("No images")
         elif count == 1:
@@ -344,47 +384,57 @@ class LibraryView(QWidget):
             self._info_label.setText(f"{count} images")
 
     def get_image_count(self) -> int:
-        """Get the number of images in the library.
-        
-        Returns:
-            Number of images
-        """
-        return len(self._image_paths)
+        grid = self._grid_by_library_id.get(self._current_library_id)
+        return grid.count() if grid is not None else 0
+
+    def get_library_count(self) -> int:
+        return len(self._library_sections)
 
     def get_selected_path(self) -> Optional[str]:
-        """Get the currently selected image path.
-        
-        Returns:
-            Path to selected image or None
-        """
-        current = self._list_widget.currentItem()
-        if current:
-            return current.data(Qt.ItemDataRole.UserRole)
+        grid = self._grid_by_library_id.get(self._current_library_id)
+        if grid is None:
+            return None
+        current = grid.currentItem()
+        if current is None:
+            return None
+        if current.data(Qt.ItemDataRole.UserRole + 1) != "available":
+            return None
+        return current.data(Qt.ItemDataRole.UserRole)
+
+    def get_current_library_id(self) -> str:
+        return self._current_library_id
+
+    def is_library_section_expanded(self) -> bool:
+        section = self._library_sections.get(self._current_library_id)
+        return section.is_expanded() if section is not None else False
+
+    def set_library_section_expanded(self, expanded: bool) -> None:
+        section = self._library_sections.get(self._current_library_id)
+        if section is None:
+            return
+        self._suppress_section_signal = True
+        try:
+            section.set_expanded(expanded)
+            self._apply_active_section_layout()
+        finally:
+            self._suppress_section_signal = False
+
+    def import_folder(self, folder_path: str, recursive: bool = False) -> list[str]:
+        return self._file_service.get_image_files_from_directory(
+            folder_path,
+            recursive=recursive,
+        )
+
+    def cleanup(self) -> None:
+        """No-op cleanup hook so MainWindow can treat panels uniformly."""
         return None
 
-    def clear(self):
-        """Clear all images from the library."""
-        self._list_widget.clear()
-        self._image_paths.clear()
-        self._update_info_label()
-
-    def import_folder(self, folder_path: str, recursive: bool = False) -> List[str]:
-        """Import all images from a folder.
-        
-        Args:
-            folder_path: Path to the folder
-            recursive: If True, search subdirectories
-            
-        Returns:
-            List of imported file paths
-        """
-        image_files = self._file_service.get_image_files_from_directory(
-            folder_path,
-            recursive=recursive
-        )
-        
-        if image_files:
-            self.add_images_async(image_files)
-            self.images_imported.emit(image_files)
-        
-        return image_files
+    def _apply_active_section_layout(self) -> None:
+        for library_id, section in self._library_sections.items():
+            is_active = library_id == self._current_library_id and section.is_expanded()
+            section.set_fill_available_space(is_active)
+            if is_active:
+                grid = self._grid_by_library_id.get(library_id)
+                if grid is not None:
+                    grid.refresh_layout_metrics()
+        self._content_widget.updateGeometry()

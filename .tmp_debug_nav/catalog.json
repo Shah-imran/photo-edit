@@ -1,0 +1,43 @@
+{
+  "current_library_id": "7e37d2fb30584e87b750f0a08dbb89bf",
+  "libraries": [
+    {
+      "created_at": "2026-05-07T18:26:30.902372+00:00",
+      "entries": [
+        {
+          "added_at": "2026-05-07T18:26:31.176309+00:00",
+          "adjustment_state": {
+            "values": {
+              "brightness": 0.0,
+              "contrast": 0.0,
+              "exposure": 1.3,
+              "saturation": 0.0,
+              "vibrance": 0.0
+            },
+            "version": 1
+          },
+          "filename": "a.jpg",
+          "last_seen_mtime_ns": 1778178390890390400,
+          "last_seen_size": 709,
+          "path": "d:\\Research-work\\PhotoEdit\\.tmp_debug_nav\\a.jpg",
+          "status": "available",
+          "thumbnail_cache_key": "545f6510855551910c153597f70d1809f404a674"
+        },
+        {
+          "added_at": "2026-05-07T18:26:31.176309+00:00",
+          "adjustment_state": null,
+          "filename": "b.jpg",
+          "last_seen_mtime_ns": 1778178390901823100,
+          "last_seen_size": 709,
+          "path": "d:\\Research-work\\PhotoEdit\\.tmp_debug_nav\\b.jpg",
+          "status": "available",
+          "thumbnail_cache_key": "562dc49c1d73409cc800bf422db693f2acb232bc"
+        }
+      ],
+      "id": "7e37d2fb30584e87b750f0a08dbb89bf",
+      "name": "Library 1",
+      "updated_at": "2026-05-07T18:26:32.991038+00:00"
+    }
+  ],
+  "schema_version": 1
+}

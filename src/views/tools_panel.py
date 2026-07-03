@@ -41,6 +41,7 @@ class ToolsPanel(QWidget):
             'saturation': 0.0,
             'vibrance': 0.0
         }
+        self._suppress_adjustment_signal = False
         
         self._setup_ui()
         self._connect_signals()
@@ -205,7 +206,8 @@ class ToolsPanel(QWidget):
             value: New value
         """
         self._adjustments[name] = value
-        self.adjustments_changed.emit(self._adjustments.copy())
+        if not self._suppress_adjustment_signal:
+            self.adjustments_changed.emit(self._adjustments.copy())
 
     def get_adjustments(self) -> Dict[str, float]:
         """Get all current adjustment values.
@@ -240,11 +242,29 @@ class ToolsPanel(QWidget):
 
     def reset_all(self):
         """Reset all adjustments to default values."""
-        self._exposure_slider.reset()
-        self._contrast_slider.reset()
-        self._brightness_slider.reset()
-        self._saturation_slider.reset()
-        self._vibrance_slider.reset()
+        self.set_adjustments({}, emit_signal=True)
+
+    def set_adjustments(self, adjustments: Dict[str, float], emit_signal: bool = False):
+        """Apply a complete adjustment-state payload to the slider UI."""
+        merged = {
+            'exposure': float(adjustments.get('exposure', 0.0)),
+            'contrast': float(adjustments.get('contrast', 0.0)),
+            'brightness': float(adjustments.get('brightness', 0.0)),
+            'saturation': float(adjustments.get('saturation', 0.0)),
+            'vibrance': float(adjustments.get('vibrance', 0.0)),
+        }
+        self._suppress_adjustment_signal = True
+        try:
+            self._exposure_slider.set_value(merged['exposure'])
+            self._contrast_slider.set_value(merged['contrast'])
+            self._brightness_slider.set_value(merged['brightness'])
+            self._saturation_slider.set_value(merged['saturation'])
+            self._vibrance_slider.set_value(merged['vibrance'])
+        finally:
+            self._suppress_adjustment_signal = False
+        self._adjustments = merged
+        if emit_signal:
+            self.adjustments_changed.emit(self._adjustments.copy())
 
     def set_enabled(self, enabled: bool):
         """Enable or disable all controls.

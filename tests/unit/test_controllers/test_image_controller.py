@@ -146,6 +146,45 @@ class TestImageController:
         assert controller.has_image() is True
         controller.cleanup()
 
+    def test_get_adjustment_state_returns_normalized_defaults(self, qapp):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+
+        assert controller.get_adjustment_state() == {
+            "exposure": 0.0,
+            "contrast": 0.0,
+            "brightness": 0.0,
+            "saturation": 0.0,
+            "vibrance": 0.0,
+        }
+        controller.cleanup()
+
+    def test_restore_adjustment_state_applies_saved_values(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {
+                "exposure": 1.0,
+                "contrast": 10.0,
+                "brightness": 5.0,
+                "saturation": 20.0,
+                "vibrance": 8.0,
+            }
+        )
+
+        assert controller.get_adjustment_state() == {
+            "exposure": 1.0,
+            "contrast": 10.0,
+            "brightness": 5.0,
+            "saturation": 20.0,
+            "vibrance": 8.0,
+        }
+        assert controller.image_model.get_current_image() is not None
+        assert controller.can_undo() is False
+        controller.cleanup()
+
     def test_zoom_in(self, qapp, sample_image_path):
         """Test zoom in."""
         view = ImageView()

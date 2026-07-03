@@ -3,8 +3,12 @@
 import pytest
 from PIL import Image
 from pathlib import Path
-import tempfile
-import os
+
+from src.services.library_catalog_service import LibraryCatalogService
+from src.services.library_image_preview_cache_service import (
+    LibraryImagePreviewCacheService,
+)
+from src.services.library_thumbnail_cache_service import LibraryThumbnailCacheService
 
 
 @pytest.fixture
@@ -36,3 +40,39 @@ def sample_png_path(tmp_path):
 def temp_dir(tmp_path):
     """Create a temporary directory for testing."""
     return tmp_path
+
+
+@pytest.fixture
+def library_catalog_path(tmp_path):
+    """Per-test persistent catalog path."""
+    return tmp_path / "appdata" / "library_catalog.json"
+
+
+@pytest.fixture
+def thumbnail_cache_dir(tmp_path):
+    """Per-test thumbnail cache directory."""
+    return tmp_path / "cache"
+
+
+@pytest.fixture
+def image_preview_cache_dir(tmp_path):
+    """Per-test edited-preview cache directory."""
+    return tmp_path / "preview-cache"
+
+
+@pytest.fixture
+def library_catalog_service(library_catalog_path):
+    """Per-test library catalog service."""
+    return LibraryCatalogService(catalog_path=library_catalog_path)
+
+
+@pytest.fixture
+def thumbnail_cache_service(thumbnail_cache_dir):
+    """Per-test thumbnail cache service."""
+    return LibraryThumbnailCacheService(cache_dir=thumbnail_cache_dir)
+
+
+@pytest.fixture
+def image_preview_cache_service(image_preview_cache_dir):
+    """Per-test edited-preview cache service."""
+    return LibraryImagePreviewCacheService(cache_dir=image_preview_cache_dir)

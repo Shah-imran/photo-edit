@@ -5,9 +5,15 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtTest import QTest
 
+from src.services.library_catalog_service import LibraryCatalogService
+from src.services.library_image_preview_cache_service import (
+    LibraryImagePreviewCacheService,
+)
+from src.services.library_thumbnail_cache_service import LibraryThumbnailCacheService
+from src.services.settings_service import SettingsService
 from src.views.main_window import MainWindow
 
 
@@ -21,9 +27,20 @@ def qapp():
 
 
 @pytest.fixture
-def main_window(qapp, qtbot):
+def main_window(qapp, qtbot, tmp_path):
     """Create a MainWindow instance for testing."""
-    window = MainWindow()
+    window = MainWindow(
+        settings_service=SettingsService(
+            QSettings(str(tmp_path / "adjustment-workflow.ini"), QSettings.Format.IniFormat)
+        ),
+        catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+        thumbnail_cache_service=LibraryThumbnailCacheService(
+            cache_dir=tmp_path / "cache"
+        ),
+        image_preview_cache_service=LibraryImagePreviewCacheService(
+            cache_dir=tmp_path / "preview-cache"
+        ),
+    )
     qtbot.addWidget(window)
     window.show()
     qtbot.waitExposed(window)

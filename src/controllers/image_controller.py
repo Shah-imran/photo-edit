@@ -76,6 +76,13 @@ class ImageController(QObject):
     image_preview_ready = pyqtSignal(str)
     image_load_finished = pyqtSignal(str, bool)
     _worker_image_set_requested = pyqtSignal(object)
+    _ADJUSTMENT_DEFAULTS = {
+        "exposure": 0.0,
+        "contrast": 0.0,
+        "brightness": 0.0,
+        "saturation": 0.0,
+        "vibrance": 0.0,
+    }
 
     def __init__(
         self,
@@ -127,6 +134,7 @@ class ImageController(QObject):
         self._load_parent_widget: Optional[QWidget] = None
         self._load_threads: list[QThread] = []
         self._load_workers: list[_ImageLoadWorker] = []
+        self._skip_intermediate_preview_request_ids: set[int] = set()
         self._pending_preview: Optional[tuple[int, DisplayFrame]] = None
         self._preview_present_timer = QTimer(self)
         self._preview_present_timer.setSingleShot(True)
@@ -237,9 +245,12 @@ class ImageController(QObject):
         Returns:
             True if image was loaded successfully
         """
+        self._load_parent_widget = parent
+        self.image_load_started.emit(file_path)
         try:
             image = self._image_service.load_image(file_path)
             self._apply_loaded_image(file_path, image)
+            self.image_load_finished.emit(file_path, True)
             return True
         except FileNotFoundError:
             QMessageBox.warning(
@@ -247,6 +258,7 @@ class ImageController(QObject):
                 "File Not Found",
                 f"Could not find file: {file_path}"
             )
+            self.image_load_finished.emit(file_path, False)
             return False
         except ValueError as e:
             QMessageBox.warning(
@@ -254,13 +266,21 @@ class ImageController(QObject):
                 "Invalid Image",
                 f"Could not load image: {str(e)}"
             )
+            self.image_load_finished.emit(file_path, False)
             return False
 
-    def load_image_async(self, file_path: str, parent: Optional[QWidget] = None) -> None:
+    def load_image_async(
+        self,
+        file_path: str,
+        parent: Optional[QWidget] = None,
+        show_intermediate_preview: bool = True,
+    ) -> None:
         """Load an image in the background to keep UI responsive."""
         self._latest_load_request_id += 1
         request_id = self._latest_load_request_id
         self._load_parent_widget = parent
+        if not show_intermediate_preview:
+            self._skip_intermediate_preview_request_ids.add(request_id)
         self.image_load_started.emit(file_path)
 
         thread = QThread()
@@ -315,6 +335,8 @@ class ImageController(QObject):
         """Show a fast preview while full-resolution decode continues."""
         if request_id != self._latest_load_request_id:
             return
+        if request_id in self._skip_intermediate_preview_request_ids:
+            return
         self._image_view.set_image(preview, emit_loaded=False)
         QTimer.singleShot(0, self._image_view.fit_to_window)
         self.image_preview_ready.emit(file_path)
@@ -323,6 +345,7 @@ class ImageController(QObject):
         """Handle successful async image load."""
         if request_id != self._latest_load_request_id:
             return
+        self._skip_intermediate_preview_request_ids.discard(request_id)
         self._apply_loaded_image(file_path, image)
         self.image_load_finished.emit(file_path, True)
 
@@ -332,6 +355,7 @@ class ImageController(QObject):
         """Handle async image load failure."""
         if request_id != self._latest_load_request_id:
             return
+        self._skip_intermediate_preview_request_ids.discard(request_id)
         # Preserve user-facing error semantics from synchronous load.
         if "not found" in error_message.lower():
             QMessageBox.warning(
@@ -373,6 +397,60 @@ class ImageController(QObject):
                 emit_loaded=False,
                 preserve_view_scale=True,
             )
+
+    def get_adjustment_state(self) -> Dict[str, float]:
+        """Return the current normalized adjustment payload."""
+        state = self._ADJUSTMENT_DEFAULTS.copy()
+        state.update(self._exposure_params)
+        state.update(self._color_params)
+        return state
+
+    def restore_adjustment_state(self, adjustments: Optional[Dict[str, float]]) -> None:
+        """Apply a saved adjustment payload without creating undo history."""
+        normalized = self._normalize_adjustment_state(adjustments)
+        self._history_service.clear_history()
+        self._pending_history_previous_image = None
+        self._pending_final_request_id = -1
+        self._final_render_timer.stop()
+        if self._debouncer is not None:
+            self._debouncer.cancel()
+        if self._processing_worker is not None and hasattr(
+            self._processing_worker, "cancel_pending"
+        ):
+            self._processing_worker.cancel_pending()
+        if self._final_processing_worker is not None and hasattr(
+            self._final_processing_worker, "cancel_pending"
+        ):
+            self._final_processing_worker.cancel_pending()
+
+        self._exposure_params = {
+            "exposure": normalized["exposure"],
+            "contrast": normalized["contrast"],
+            "brightness": normalized["brightness"],
+        }
+        self._color_params = {
+            "saturation": normalized["saturation"],
+            "vibrance": normalized["vibrance"],
+        }
+
+        if not self.has_image():
+            return
+
+        has_changes = any(value != 0.0 for value in normalized.values())
+        if not has_changes:
+            self._image_model.reset_to_original()
+            self.refresh_view()
+            return
+
+        original = self._image_model.get_original_image()
+        if original is None:
+            return
+
+        result = original.copy()
+        result = self._exposure_processor.process(result, **self._exposure_params)
+        result = self._color_processor.process(result, **self._color_params)
+        self._image_model.current_image = result
+        self.refresh_view()
 
     def reset_to_original(self) -> None:
         """Reset the image to its original state."""
@@ -836,3 +914,19 @@ class ImageController(QObject):
                 color_params=self._color_params.copy()
             )
             self._history_service.execute_command(command)
+
+    def _normalize_adjustment_state(
+        self,
+        adjustments: Optional[Dict[str, float]],
+    ) -> Dict[str, float]:
+        """Return a complete adjustment-state payload with defaulted values."""
+        normalized = self._ADJUSTMENT_DEFAULTS.copy()
+        if not adjustments:
+            return normalized
+        for key, default in normalized.items():
+            value = adjustments.get(key, default)
+            try:
+                normalized[key] = float(value)
+            except (TypeError, ValueError):
+                normalized[key] = default
+        return normalized
