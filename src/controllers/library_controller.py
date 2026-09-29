@@ -27,6 +27,12 @@ class _ThumbnailTask:
     library_id: str
     file_path: str
     cache_key: str
+    #: True if a valid cached PNG already exists on disk for this entry --
+    #: the worker skips regenerating it and just lets the existing
+    #: ``thumbnail_ready`` -> UI-thread-decode path load it, instead of the
+    #: rebuild loop decoding it synchronously up front (see
+    #: docs/planning/implementation-notes/2026-09-29-library-rebuild-responsiveness.md).
+    cached: bool = False
 
 
 class _ThumbnailBatchWorker(QObject):
@@ -59,17 +65,53 @@ class _ThumbnailBatchWorker(QObject):
             if self._cancelled:
                 break
             try:
-                thumbnail = service.load_preview_thumbnail(
-                    task.file_path,
-                    (self._size, self._size),
-                )
-                self._cache_service.write_thumbnail(task.cache_key, thumbnail)
+                if not task.cached:
+                    thumbnail = service.load_preview_thumbnail(
+                        task.file_path,
+                        (self._size, self._size),
+                    )
+                    self._cache_service.write_thumbnail(task.cache_key, thumbnail)
+                # The cached case has nothing left to do here -- the PNG
+                # already exists on disk. Either way, the UI-thread slot on
+                # thumbnail_ready re-reads it as a QImage (one decode per
+                # queued signal, naturally interleaved with the Qt event
+                # loop -- unlike a tight synchronous loop).
                 self.thumbnail_ready.emit(
-                    task.library_id, task.file_path, thumbnail, task.cache_key
+                    task.library_id, task.file_path, None, task.cache_key
                 )
             except Exception as exc:
                 self.failed.emit(task.file_path, str(exc))
             self.progress.emit(idx, total)
+        self.finished.emit()
+
+
+class _OrphanCacheCleanupWorker(QObject):
+    """Remove orphaned thumbnail cache files in a background thread.
+
+    ``LibraryThumbnailCacheService.remove_orphaned_cache`` walks the
+    entire thumbnail cache directory (``rglob``) and unlinks anything not
+    referenced by any library -- a single long synchronous call with
+    nothing to yield mid-way through, which used to run on the UI thread
+    on every library rebuild. See
+    docs/planning/implementation-notes/2026-09-29-library-rebuild-responsiveness.md.
+    """
+
+    finished = pyqtSignal()
+
+    def __init__(
+        self,
+        cache_service: LibraryThumbnailCacheService,
+        valid_keys: set[str],
+    ):
+        super().__init__()
+        self._cache_service = cache_service
+        self._valid_keys = valid_keys
+
+    def run(self) -> None:
+        try:
+            self._cache_service.remove_orphaned_cache(self._valid_keys)
+        except Exception:
+            logger.exception("Orphaned thumbnail cache cleanup failed")
         self.finished.emit()
 
 
@@ -101,6 +143,15 @@ class LibraryController(QObject):
         )
         self._thumbnail_thread: Optional[QThread] = None
         self._thumbnail_worker: Optional[_ThumbnailBatchWorker] = None
+        self._orphan_cleanup_threads: list[QThread] = []
+        # Keeps each worker alive until its thread finishes -- unlike
+        # _thumbnail_worker (a single named slot), several cleanup passes
+        # can be in flight at once (e.g. initialize() then an immediate
+        # import_images()), so this is a list indexed by nothing but
+        # membership; without it the worker is garbage-collected before
+        # the queued started->run connection ever delivers, and run()
+        # silently never executes.
+        self._orphan_cleanup_workers: list[_OrphanCacheCleanupWorker] = []
         self._current_library_id = ""
 
     @property
@@ -128,9 +179,7 @@ class LibraryController(QObject):
 
     def remove_library(self, library_id: str) -> None:
         self._catalog_service.remove_library(library_id)
-        self._thumbnail_cache_service.remove_orphaned_cache(
-            self._catalog_service.referenced_cache_keys()
-        )
+        self._cleanup_orphaned_cache_async(self._catalog_service.referenced_cache_keys())
         self._current_library_id = self._catalog_service.get_current_library_id()
         self._emit_libraries()
         self._rebuild_entries_for_current_library()
@@ -149,9 +198,9 @@ class LibraryController(QObject):
             return
         self.cancel_thumbnail_batch()
         self._catalog_service.clear_library_entries(self._current_library_id)
-        self._thumbnail_cache_service.remove_orphaned_cache(
-            self._catalog_service.referenced_cache_keys()
-        )
+        # _rebuild_entries_for_current_library() below already dispatches an
+        # orphan-cache cleanup pass against the post-clear reference set;
+        # an explicit call here would just be a redundant duplicate pass.
         self._rebuild_entries_for_current_library()
 
     def cleanup(self) -> None:
@@ -160,6 +209,9 @@ class LibraryController(QObject):
         if thread is not None:
             thread.quit()
             thread.wait(3000)
+        for orphan_thread in list(self._orphan_cleanup_threads):
+            orphan_thread.quit()
+            orphan_thread.wait(3000)
 
     def get_library_name(self, library_id: str) -> str:
         library = self._catalog_service.get_library(library_id)
@@ -237,9 +289,7 @@ class LibraryController(QObject):
                 tasks.append(task)
 
         self.entries_rebuilt.emit(self._current_library_id, payloads)
-        self._thumbnail_cache_service.remove_orphaned_cache(
-            self._catalog_service.referenced_cache_keys()
-        )
+        self._cleanup_orphaned_cache_async(self._catalog_service.referenced_cache_keys())
         if tasks:
             self._start_thumbnail_batch(tasks)
 
@@ -267,17 +317,20 @@ class LibraryController(QObject):
             )
             entry.thumbnail_cache_key = cache_key
 
-        cached = self._thumbnail_cache_service.load_qimage(cache_key)
-        if cached is not None:
-            payload["thumbnail"] = cached
-            payload["placeholder"] = None
-            return payload, None
-
         if cache_key:
+            # Whether a cached PNG already exists or still needs to be
+            # generated, defer the actual decode/generation to the
+            # background thumbnail worker rather than decoding it here --
+            # doing this synchronously for every entry is what caused the
+            # "Not Responding" freeze this avoids (see
+            # docs/planning/implementation-notes/2026-09-29-library-rebuild-responsiveness.md).
+            # A plain existence check is a cheap stat(), not a decode.
+            already_cached = self._thumbnail_cache_service.path_for_key(cache_key).exists()
             task = _ThumbnailTask(
                 library_id=self._current_library_id,
                 file_path=entry.path,
                 cache_key=cache_key,
+                cached=already_cached,
             )
         return payload, task
 
@@ -348,3 +401,33 @@ class LibraryController(QObject):
             self._thumbnail_thread = None
         if self._thumbnail_worker is worker:
             self._thumbnail_worker = None
+
+    def _cleanup_orphaned_cache_async(self, valid_keys: set[str]) -> None:
+        """Dispatch orphaned thumbnail-cache removal to a background thread.
+
+        Fire-and-forget from the caller's perspective: touches only
+        ``LibraryThumbnailCacheService`` (a cache directory on disk), never
+        ``LibraryCatalogService``, so it needs no synchronization with the
+        UI thread's own catalog access.
+        """
+        thread = QThread(self)
+        worker = _OrphanCacheCleanupWorker(self._thumbnail_cache_service, valid_keys)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda t=thread, w=worker: self._clear_orphan_cleanup_thread(t, w)
+        )
+        self._orphan_cleanup_threads.append(thread)
+        self._orphan_cleanup_workers.append(worker)
+        thread.start()
+
+    def _clear_orphan_cleanup_thread(
+        self, thread: QThread, worker: "_OrphanCacheCleanupWorker"
+    ) -> None:
+        if thread in self._orphan_cleanup_threads:
+            self._orphan_cleanup_threads.remove(thread)
+        if worker in self._orphan_cleanup_workers:
+            self._orphan_cleanup_workers.remove(worker)
