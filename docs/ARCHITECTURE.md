@@ -182,7 +182,7 @@ PhotoEdit/
 │   ├── architecture.md
 │   └── api.md
 │
-├── Pipfile                     # Dependencies
+├── pyproject.toml              # Project metadata and dependencies
 ├── README.md
 └── docs/ARCHITECTURE.md        # This file
 ```
