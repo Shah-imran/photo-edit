@@ -46,6 +46,7 @@ class TestFileService:
         assert service.is_image_file("test.jpg") is True
         assert service.is_image_file("test.png") is True
         assert service.is_image_file("test.tiff") is True
+        assert service.is_image_file("test.nef") is True
         assert service.is_image_file("test.txt") is False
         assert service.is_image_file("test") is False
 

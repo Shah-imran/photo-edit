@@ -1,8 +1,10 @@
 """File service for file system operations."""
 
-from typing import List
-from pathlib import Path
 import os
+from pathlib import Path
+from typing import List
+
+from src.utils.image_extensions import ALL_IMAGE_EXTENSIONS
 
 
 class FileService:
@@ -12,8 +14,8 @@ class FileService:
     file validation, and file metadata.
     """
 
-    # Supported image file extensions
-    IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
+    # Includes standard raster formats and camera RAW (see image_extensions)
+    IMAGE_EXTENSIONS = ALL_IMAGE_EXTENSIONS
 
     def __init__(self):
         """Initialize FileService."""

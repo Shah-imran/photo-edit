@@ -27,6 +27,7 @@ class ProcessingRequest:
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
     cancelled: bool = False
+    interactive_preview: bool = True
     
     def cancel(self) -> None:
         """Mark this request as cancelled."""
@@ -78,7 +79,8 @@ class ProcessingQueue:
         exposure_params: Optional[Dict[str, float]] = None,
         tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
-        use_proxy: bool = True
+        use_proxy: bool = True,
+        interactive_preview: bool = True,
     ) -> ProcessingRequest:
         """Create a new processing request with auto-incremented ID.
 
@@ -97,7 +99,8 @@ class ProcessingQueue:
                 exposure_params=exposure_params or {},
                 tonal_params=tonal_params or {},
                 color_params=color_params or {},
-                use_proxy=use_proxy
+                use_proxy=use_proxy,
+                interactive_preview=interactive_preview,
             )
             self._next_id += 1
             return request
