@@ -20,6 +20,7 @@ from src.processors.color_processor import ColorProcessor
 from src.processors.curve_processor import CurveProcessor
 from src.processors.exposure_processor import ExposureProcessor
 from src.processors.tonal_processor import TonalProcessor
+from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils.color_pipeline import LinearImage
 
 
@@ -74,6 +75,7 @@ class ProcessingWorker(QObject):
         self._exposure_processor = ExposureProcessor()
         self._tonal_processor = TonalProcessor()
         self._curve_processor = CurveProcessor()
+        self._wb_processor = WhiteBalanceProcessor()
         self._color_processor = ColorProcessor()
 
         # Thread control
@@ -140,6 +142,7 @@ class ProcessingWorker(QObject):
         tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
         curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -150,6 +153,7 @@ class ProcessingWorker(QObject):
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             curve_params: Tone curve parameters
+            wb_params: White balance (Temperature/Tint) parameters
             use_proxy: Whether to process proxy (fast) or full image
             interactive_preview: Whether to use the lower-cost interactive proxy
 
@@ -161,6 +165,7 @@ class ProcessingWorker(QObject):
             tonal_params=tonal_params,
             color_params=color_params,
             curve_params=curve_params,
+            wb_params=wb_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -177,6 +182,7 @@ class ProcessingWorker(QObject):
         tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
         curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -188,6 +194,7 @@ class ProcessingWorker(QObject):
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             curve_params: Tone curve parameters
+            wb_params: White balance (Temperature/Tint) parameters
             interactive_preview: Use smaller interactive proxy for drag updates.
 
         Returns:
@@ -198,6 +205,7 @@ class ProcessingWorker(QObject):
             tonal_params,
             color_params,
             curve_params,
+            wb_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -208,6 +216,7 @@ class ProcessingWorker(QObject):
         tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
         curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -218,6 +227,7 @@ class ProcessingWorker(QObject):
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             curve_params: Tone curve parameters
+            wb_params: White balance (Temperature/Tint) parameters
 
         Returns:
             Request ID
@@ -227,6 +237,7 @@ class ProcessingWorker(QObject):
             tonal_params,
             color_params,
             curve_params,
+            wb_params,
             use_proxy=False,
         )
     
@@ -330,6 +341,7 @@ class ProcessingWorker(QObject):
                 request.tonal_params,
                 request.color_params,
                 request.curve_params,
+                request.wb_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -398,6 +410,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.tonal_params.items())),
             tuple(sorted(request.color_params.items())),
             tuple(sorted(request.curve_params.items())),
+            tuple(sorted(request.wb_params.items())),
         )
 
     @staticmethod
@@ -408,6 +421,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.tonal_params.items())),
             tuple(sorted(request.color_params.items())),
             tuple(sorted(request.curve_params.items())),
+            tuple(sorted(request.wb_params.items())),
         )
 
     def _apply_adjustments(
@@ -417,14 +431,17 @@ class ProcessingWorker(QObject):
         tonal_params: Dict[str, float],
         color_params: Dict[str, float],
         curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
     ) -> LinearImage:
-        """Apply exposure, tonal, curve, and color adjustments to a ``LinearImage``."""
+        """Apply exposure, tonal, white balance, curve, and color adjustments
+        to a ``LinearImage``."""
         total_start = perf_counter()
         copy_start = perf_counter()
         result = image.copy()
         copy_ms = _elapsed_ms(copy_start)
         exposure_ms = 0.0
         tonal_ms = 0.0
+        wb_ms = 0.0
         curve_ms = 0.0
         color_ms = 0.0
 
@@ -438,6 +455,11 @@ class ProcessingWorker(QObject):
             result = self._tonal_processor.process(result, **tonal_params)
             tonal_ms = _elapsed_ms(tonal_start)
 
+        if wb_params and any(v != 0 for v in wb_params.values()):
+            wb_start = perf_counter()
+            result = self._wb_processor.process(result, **wb_params)
+            wb_ms = _elapsed_ms(wb_start)
+
         if curve_params:
             curve_start = perf_counter()
             result = self._curve_processor.process(result, **curve_params)
@@ -450,11 +472,12 @@ class ProcessingWorker(QObject):
 
         logger.info(
             "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
-            "tonal_ms=%.2f curve_ms=%.2f color_ms=%.2f total_ms=%.2f",
+            "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f total_ms=%.2f",
             image.shape,
             copy_ms,
             exposure_ms,
             tonal_ms,
+            wb_ms,
             curve_ms,
             color_ms,
             _elapsed_ms(total_start),

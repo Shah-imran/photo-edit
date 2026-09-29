@@ -17,6 +17,7 @@ class ProcessingRequest:
         tonal_params: Highlights/Shadows/Whites/Blacks adjustment parameters
         color_params: Color adjustment parameters
         curve_params: Tone curve parameters (``{"points": [(x, y), ...]}``)
+        wb_params: White balance (Temperature/Tint) adjustment parameters
         use_proxy: Whether to process proxy (True) or full-res (False)
         timestamp: When the request was created
         cancelled: Whether this request has been cancelled
@@ -26,6 +27,7 @@ class ProcessingRequest:
     tonal_params: Dict[str, float] = field(default_factory=dict)
     color_params: Dict[str, float] = field(default_factory=dict)
     curve_params: Dict[str, Any] = field(default_factory=dict)
+    wb_params: Dict[str, float] = field(default_factory=dict)
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
     cancelled: bool = False
@@ -82,6 +84,7 @@ class ProcessingQueue:
         tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
         curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> ProcessingRequest:
@@ -92,6 +95,7 @@ class ProcessingQueue:
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             curve_params: Tone curve parameters
+            wb_params: White balance (Temperature/Tint) parameters
             use_proxy: Whether to use proxy image
 
         Returns:
@@ -104,6 +108,7 @@ class ProcessingQueue:
                 tonal_params=tonal_params or {},
                 color_params=color_params or {},
                 curve_params=curve_params or {},
+                wb_params=wb_params or {},
                 use_proxy=use_proxy,
                 interactive_preview=interactive_preview,
             )

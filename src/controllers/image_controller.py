@@ -15,6 +15,7 @@ from src.processors.exposure_processor import ExposureProcessor
 from src.processors.tonal_processor import TonalProcessor
 from src.processors.color_processor import ColorProcessor
 from src.processors.curve_processor import CurveProcessor
+from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.commands.adjustment_commands import (
     CombinedAdjustmentCommand,
     ImageStateChangeCommand,
@@ -87,6 +88,8 @@ class ImageController(QObject):
         "shadows": 0.0,
         "whites": 0.0,
         "blacks": 0.0,
+        "temperature": 0.0,
+        "tint": 0.0,
         "saturation": 0.0,
         "vibrance": 0.0,
     }
@@ -130,6 +133,7 @@ class ImageController(QObject):
         self._exposure_processor = ExposureProcessor()
         self._tonal_processor = TonalProcessor()
         self._curve_processor = CurveProcessor()
+        self._wb_processor = WhiteBalanceProcessor()
         self._color_processor = ColorProcessor()
 
         # Current adjustment values
@@ -137,6 +141,7 @@ class ImageController(QObject):
         self._tonal_params: Dict[str, float] = {}
         self._color_params: Dict[str, float] = {}
         self._curve_params: Dict[str, Any] = {}
+        self._wb_params: Dict[str, float] = {}
         
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
@@ -339,6 +344,7 @@ class ImageController(QObject):
         self._tonal_params = {}
         self._color_params = {}
         self._curve_params = {}
+        self._wb_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -434,6 +440,8 @@ class ImageController(QObject):
             result = self._exposure_processor.process(result, **self._exposure_params)
         if self._tonal_params:
             result = self._tonal_processor.process(result, **self._tonal_params)
+        if self._wb_params:
+            result = self._wb_processor.process(result, **self._wb_params)
         if self._curve_params:
             result = self._curve_processor.process(result, **self._curve_params)
         if self._color_params:
@@ -461,6 +469,7 @@ class ImageController(QObject):
         state: Dict[str, Any] = self._ADJUSTMENT_DEFAULTS.copy()
         state.update(self._exposure_params)
         state.update(self._tonal_params)
+        state.update(self._wb_params)
         state.update(self._color_params)
         curve_points = self._curve_params.get("points", self._CURVE_DEFAULT_POINTS)
         state["tone_curve"] = [list(point) for point in curve_points]
@@ -498,6 +507,10 @@ class ImageController(QObject):
             "whites": normalized["whites"],
             "blacks": normalized["blacks"],
         }
+        self._wb_params = {
+            "temperature": normalized["temperature"],
+            "tint": normalized["tint"],
+        }
         self._color_params = {
             "saturation": normalized["saturation"],
             "vibrance": normalized["vibrance"],
@@ -525,6 +538,7 @@ class ImageController(QObject):
         result = original.copy()
         result = self._exposure_processor.process(result, **self._exposure_params)
         result = self._tonal_processor.process(result, **self._tonal_params)
+        result = self._wb_processor.process(result, **self._wb_params)
         if self._curve_params:
             result = self._curve_processor.process(result, **self._curve_params)
         result = self._color_processor.process(result, **self._color_params)
@@ -539,6 +553,7 @@ class ImageController(QObject):
         self._tonal_params = {}
         self._color_params = {}
         self._curve_params = {}
+        self._wb_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -620,6 +635,7 @@ class ImageController(QObject):
         tonal_params: Dict[str, float] = None,
         color_params: Dict[str, float] = None,
         curve_params: Dict[str, Any] = None,
+        wb_params: Dict[str, float] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -629,6 +645,7 @@ class ImageController(QObject):
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             curve_params: Tone curve parameters (``{"points": [...]}`)
+            wb_params: White balance (Temperature/Tint) parameters
             add_to_history: If True, add command to history for undo
         """
         if not self.has_image():
@@ -654,6 +671,8 @@ class ImageController(QObject):
             self._color_params = color_params
         if curve_params is not None:
             self._curve_params = curve_params
+        if wb_params:
+            self._wb_params = wb_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -664,6 +683,7 @@ class ImageController(QObject):
                         tonal_params=self._tonal_params,
                         color_params=self._color_params,
                         curve_params=self._curve_params,
+                        wb_params=self._wb_params,
                     )
                 )
             else:
@@ -674,6 +694,7 @@ class ImageController(QObject):
                         tonal_params=self._tonal_params,
                         color_params=self._color_params,
                         curve_params=self._curve_params,
+                        wb_params=self._wb_params,
                         interactive_preview=True,
                     )
                 )
@@ -687,6 +708,7 @@ class ImageController(QObject):
                 tonal_params=self._tonal_params,
                 color_params=self._color_params,
                 curve_params=self._curve_params,
+                wb_params=self._wb_params,
             )
             self._history_service.execute_command(command)
         else:
@@ -704,6 +726,10 @@ class ImageController(QObject):
             # Apply tonal adjustments
             if self._tonal_params:
                 result = self._tonal_processor.process(result, **self._tonal_params)
+
+            # Apply white balance
+            if self._wb_params:
+                result = self._wb_processor.process(result, **self._wb_params)
 
             # Apply tone curve
             if self._curve_params:
@@ -762,6 +788,10 @@ class ImageController(QObject):
             'whites': adjustments.get('whites', 0.0),
             'blacks': adjustments.get('blacks', 0.0)
         }
+        wb_params = {
+            'temperature': adjustments.get('temperature', 0.0),
+            'tint': adjustments.get('tint', 0.0),
+        }
         color_params = {
             'saturation': adjustments.get('saturation', 0.0),
             'vibrance': adjustments.get('vibrance', 0.0)
@@ -770,6 +800,7 @@ class ImageController(QObject):
         # Store params
         self._exposure_params = exposure_params
         self._tonal_params = tonal_params
+        self._wb_params = wb_params
         self._color_params = color_params
 
         if self._use_threading and self._debouncer is not None:
@@ -783,6 +814,7 @@ class ImageController(QObject):
                 'tonal': tonal_params,
                 'color': color_params,
                 'curve': self._curve_params,
+                'wb': wb_params,
             })
             mode = "debounced-threaded"
         else:
@@ -792,6 +824,7 @@ class ImageController(QObject):
                 tonal_params,
                 color_params,
                 self._curve_params,
+                wb_params,
                 add_to_history=False,
             )
             mode = "sync-fallback"
@@ -845,6 +878,7 @@ class ImageController(QObject):
                 'tonal': self._tonal_params,
                 'color': self._color_params,
                 'curve': self._curve_params,
+                'wb': self._wb_params,
             })
         else:
             self.apply_adjustments(
@@ -852,6 +886,7 @@ class ImageController(QObject):
                 self._tonal_params,
                 self._color_params,
                 self._curve_params,
+                self._wb_params,
                 add_to_history=False,
             )
 
@@ -867,11 +902,13 @@ class ImageController(QObject):
         tonal_params = params.get('tonal', {})
         color_params = params.get('color', {})
         curve_params = params.get('curve', {})
+        wb_params = params.get('wb', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
             color_params=color_params,
             curve_params=curve_params,
+            wb_params=wb_params,
             interactive_preview=True,
         )
         logger.info(
@@ -897,6 +934,7 @@ class ImageController(QObject):
         tonal_params = params.get('tonal', {})
         color_params = params.get('color', {})
         curve_params = params.get('curve', {})
+        wb_params = params.get('wb', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -905,6 +943,7 @@ class ImageController(QObject):
             tonal_params=tonal_params,
             color_params=color_params,
             curve_params=curve_params,
+            wb_params=wb_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1009,6 +1048,7 @@ class ImageController(QObject):
                 tonal_params=self._tonal_params,
                 color_params=self._color_params,
                 curve_params=self._curve_params,
+                wb_params=self._wb_params,
                 interactive_preview=False,
             )
 
@@ -1033,6 +1073,7 @@ class ImageController(QObject):
         return (
             any(v != 0 for v in self._exposure_params.values()) or
             any(v != 0 for v in self._tonal_params.values()) or
+            any(v != 0 for v in self._wb_params.values()) or
             any(v != 0 for v in self._color_params.values()) or
             not is_identity_curve(self._curve_params.get("points"))
         )
@@ -1053,6 +1094,7 @@ class ImageController(QObject):
             tonal_params=self._tonal_params,
             color_params=self._color_params,
             curve_params=self._curve_params,
+            wb_params=self._wb_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -1101,6 +1143,7 @@ class ImageController(QObject):
                 tonal_params=self._tonal_params.copy(),
                 color_params=self._color_params.copy(),
                 curve_params=dict(self._curve_params),
+                wb_params=self._wb_params.copy(),
             )
             self._history_service.execute_command(command)
 

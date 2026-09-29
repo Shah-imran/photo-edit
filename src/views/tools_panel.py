@@ -48,6 +48,8 @@ class ToolsPanel(QWidget):
             'shadows': 0.0,
             'whites': 0.0,
             'blacks': 0.0,
+            'temperature': 0.0,
+            'tint': 0.0,
             'saturation': 0.0,
             'vibrance': 0.0
         }
@@ -131,7 +133,17 @@ class ToolsPanel(QWidget):
 
         # Color section
         color_section, color_content_layout = self._create_section("Color")
-        
+
+        self._temperature_slider = AdjustmentSlider(
+            "Temperature", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+        )
+        color_content_layout.addWidget(self._temperature_slider)
+
+        self._tint_slider = AdjustmentSlider(
+            "Tint", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+        )
+        color_content_layout.addWidget(self._tint_slider)
+
         self._saturation_slider = AdjustmentSlider(
             "Saturation", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
         )
@@ -229,13 +241,19 @@ class ToolsPanel(QWidget):
         self._blacks_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('blacks', v)
         )
+        self._temperature_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('temperature', v)
+        )
+        self._tint_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('tint', v)
+        )
         self._saturation_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('saturation', v)
         )
         self._vibrance_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('vibrance', v)
         )
-        
+
         # Slider released signals (for final processing)
         self._exposure_slider.slider_released.connect(self._on_slider_released)
         self._contrast_slider.slider_released.connect(self._on_slider_released)
@@ -244,6 +262,8 @@ class ToolsPanel(QWidget):
         self._shadows_slider.slider_released.connect(self._on_slider_released)
         self._whites_slider.slider_released.connect(self._on_slider_released)
         self._blacks_slider.slider_released.connect(self._on_slider_released)
+        self._temperature_slider.slider_released.connect(self._on_slider_released)
+        self._tint_slider.slider_released.connect(self._on_slider_released)
         self._saturation_slider.slider_released.connect(self._on_slider_released)
         self._vibrance_slider.slider_released.connect(self._on_slider_released)
 
@@ -322,6 +342,17 @@ class ToolsPanel(QWidget):
             'vibrance': self._adjustments['vibrance']
         }
 
+    def get_wb_params(self) -> Dict[str, float]:
+        """Get white balance (Temperature/Tint) adjustment parameters.
+
+        Returns:
+            Dictionary of white balance parameters
+        """
+        return {
+            'temperature': self._adjustments['temperature'],
+            'tint': self._adjustments['tint'],
+        }
+
     def get_curve_params(self) -> Dict[str, Any]:
         """Get the tone curve parameters.
 
@@ -349,6 +380,8 @@ class ToolsPanel(QWidget):
             'shadows': float(adjustments.get('shadows', 0.0)),
             'whites': float(adjustments.get('whites', 0.0)),
             'blacks': float(adjustments.get('blacks', 0.0)),
+            'temperature': float(adjustments.get('temperature', 0.0)),
+            'tint': float(adjustments.get('tint', 0.0)),
             'saturation': float(adjustments.get('saturation', 0.0)),
             'vibrance': float(adjustments.get('vibrance', 0.0)),
         }
@@ -362,6 +395,8 @@ class ToolsPanel(QWidget):
             self._shadows_slider.set_value(merged['shadows'])
             self._whites_slider.set_value(merged['whites'])
             self._blacks_slider.set_value(merged['blacks'])
+            self._temperature_slider.set_value(merged['temperature'])
+            self._tint_slider.set_value(merged['tint'])
             self._saturation_slider.set_value(merged['saturation'])
             self._vibrance_slider.set_value(merged['vibrance'])
             self._curve_editor.set_points(curve_points)
@@ -386,6 +421,8 @@ class ToolsPanel(QWidget):
         self._shadows_slider.setEnabled(enabled)
         self._whites_slider.setEnabled(enabled)
         self._blacks_slider.setEnabled(enabled)
+        self._temperature_slider.setEnabled(enabled)
+        self._tint_slider.setEnabled(enabled)
         self._saturation_slider.setEnabled(enabled)
         self._vibrance_slider.setEnabled(enabled)
         self._curve_editor.setEnabled(enabled)

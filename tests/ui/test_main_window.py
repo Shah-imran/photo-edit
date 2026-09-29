@@ -679,6 +679,8 @@ class TestAdjustmentPayloadRoundTrip:
                 "shadows": -30.0,
                 "whites": 20.0,
                 "blacks": -15.0,
+                "temperature": 25.0,
+                "tint": -12.0,
                 "saturation": 20.0,
                 "vibrance": 8.0,
                 "tone_curve": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]],
@@ -691,6 +693,8 @@ class TestAdjustmentPayloadRoundTrip:
         assert restored["shadows"] == -30.0
         assert restored["whites"] == 20.0
         assert restored["blacks"] == -15.0
+        assert restored["temperature"] == 25.0
+        assert restored["tint"] == -12.0
         assert restored["tone_curve"] == [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
 
     def test_payload_missing_new_keys_defaults_safely(self, main_window):
@@ -701,6 +705,8 @@ class TestAdjustmentPayloadRoundTrip:
         restored = main_window._adjustment_values_from_payload(payload)
 
         assert restored["highlights"] == 0.0
+        assert restored["temperature"] == 0.0
+        assert restored["tint"] == 0.0
         assert restored["tone_curve"] is None
 
     def test_switching_images_restores_tonal_sliders_and_curve(

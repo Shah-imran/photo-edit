@@ -166,3 +166,63 @@ class TestProcessingWorkerCurve:
         key_b = worker._cache_key(request_b, source)
 
         assert key_a != key_b
+
+
+class TestProcessingWorkerWhiteBalance:
+    """White balance threading through the worker's apply/cache-key paths."""
+
+    def test_wb_params_reach_wb_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        calls = []
+
+        def fake_process(image, **kwargs):
+            calls.append(kwargs)
+            return image
+
+        monkeypatch.setattr(worker._wb_processor, "process", fake_process)
+
+        request = ProcessingRequest(
+            request_id=1,
+            wb_params={"temperature": 30.0, "tint": -10.0},
+            use_proxy=False,
+        )
+        worker._process_request(request)
+
+        assert calls == [{"temperature": 30.0, "tint": -10.0}]
+
+    def test_all_zero_wb_params_skip_wb_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        calls = []
+        monkeypatch.setattr(
+            worker._wb_processor, "process", lambda image, **kw: calls.append(kw)
+        )
+
+        request = ProcessingRequest(
+            request_id=1,
+            wb_params={"temperature": 0.0, "tint": 0.0},
+            use_proxy=False,
+        )
+        worker._process_request(request)
+
+        assert calls == []
+
+    def test_different_wb_params_produce_different_cache_keys(self):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        request_a = ProcessingRequest(
+            request_id=1, wb_params={"temperature": 0.0, "tint": 0.0}, use_proxy=True
+        )
+        request_b = ProcessingRequest(
+            request_id=2, wb_params={"temperature": 30.0, "tint": 0.0}, use_proxy=True
+        )
+        source = worker._proxy_manager.get_proxy(interactive=True)
+
+        key_a = worker._cache_key(request_a, source)
+        key_b = worker._cache_key(request_b, source)
+
+        assert key_a != key_b

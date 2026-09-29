@@ -174,3 +174,33 @@ class TestCombinedAdjustmentCommand:
 
         assert cmd.is_executed() is False
         assert model.get_current_image() is previous
+
+    def test_wb_only(self, sample_linear_image):
+        """Test with only a white balance adjustment."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+
+        cmd = CombinedAdjustmentCommand(
+            model,
+            wb_params={'temperature': 30.0, 'tint': -10.0},
+        )
+        cmd.execute()
+
+        assert cmd.is_executed() is True
+        assert model.is_modified() is True
+
+    def test_undo_wb_only(self, sample_linear_image):
+        """Test undoing a wb-only adjustment restores the previous image."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+        previous = model.get_current_image()
+
+        cmd = CombinedAdjustmentCommand(
+            model,
+            wb_params={'temperature': 30.0, 'tint': -10.0},
+        )
+        cmd.execute()
+        cmd.undo()
+
+        assert cmd.is_executed() is False
+        assert model.get_current_image() is previous

@@ -687,6 +687,8 @@ class MainWindow(QMainWindow):
             "shadows": float(values.get("shadows", 0.0)),
             "whites": float(values.get("whites", 0.0)),
             "blacks": float(values.get("blacks", 0.0)),
+            "temperature": float(values.get("temperature", 0.0)),
+            "tint": float(values.get("tint", 0.0)),
             "saturation": float(values.get("saturation", 0.0)),
             "vibrance": float(values.get("vibrance", 0.0)),
             "tone_curve": values.get("tone_curve"),

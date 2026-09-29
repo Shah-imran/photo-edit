@@ -174,3 +174,82 @@ class TestToolsPanelToneCurve:
             'highlights': 0.0, 'shadows': 0.0, 'whites': 0.0, 'blacks': 0.0
         }
         assert panel.get_color_params() == {'saturation': 0.0, 'vibrance': 0.0}
+
+
+class TestToolsPanelWhiteBalance:
+    """Tests for the Temperature/Tint controls."""
+
+    def test_wb_sliders_default_to_zero(self, qapp):
+        panel = ToolsPanel()
+        adjustments = panel.get_adjustments()
+        assert adjustments['temperature'] == 0.0
+        assert adjustments['tint'] == 0.0
+
+    def test_get_wb_params_returns_only_wb_keys(self, qapp):
+        panel = ToolsPanel()
+        params = panel.get_wb_params()
+        assert set(params.keys()) == {'temperature', 'tint'}
+
+    def test_moving_temperature_slider_updates_adjustments(self, qapp):
+        panel = ToolsPanel()
+        panel._temperature_slider.set_value(40.0)
+        assert panel.get_adjustments()['temperature'] == 40.0
+        assert panel.get_wb_params()['temperature'] == 40.0
+
+    def test_moving_tint_slider_emits_full_adjustments_dict(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel._tint_slider.set_value(-25.0)
+        assert len(received) >= 1
+        assert received[-1]['tint'] == -25.0
+        assert 'exposure' in received[-1]
+        assert 'temperature' in received[-1]
+
+    def test_temperature_and_tint_are_independent(self, qapp):
+        panel = ToolsPanel()
+        panel._temperature_slider.set_value(30.0)
+        panel._tint_slider.set_value(-15.0)
+        params = panel.get_wb_params()
+        assert params['temperature'] == 30.0
+        assert params['tint'] == -15.0
+
+    def test_reset_all_resets_wb_sliders(self, qapp):
+        panel = ToolsPanel()
+        panel._temperature_slider.set_value(50.0)
+        panel._tint_slider.set_value(-50.0)
+
+        panel.reset_all()
+
+        assert panel.get_wb_params() == {'temperature': 0.0, 'tint': 0.0}
+
+    def test_set_enabled_false_disables_wb_sliders(self, qapp):
+        panel = ToolsPanel()
+        panel.set_enabled(False)
+        assert panel._temperature_slider.isEnabled() is False
+        assert panel._tint_slider.isEnabled() is False
+
+    def test_set_enabled_true_enables_wb_sliders(self, qapp):
+        panel = ToolsPanel()
+        panel.set_enabled(False)
+        panel.set_enabled(True)
+        assert panel._temperature_slider.isEnabled() is True
+        assert panel._tint_slider.isEnabled() is True
+
+    def test_wb_change_does_not_affect_other_params(self, qapp):
+        panel = ToolsPanel()
+        panel._temperature_slider.set_value(60.0)
+        assert panel.get_exposure_params() == {
+            'exposure': 0.0, 'contrast': 0.0, 'brightness': 0.0
+        }
+        assert panel.get_tonal_params() == {
+            'highlights': 0.0, 'shadows': 0.0, 'whites': 0.0, 'blacks': 0.0
+        }
+        assert panel.get_color_params() == {'saturation': 0.0, 'vibrance': 0.0}
+
+    def test_set_adjustments_restores_wb_values(self, qapp):
+        panel = ToolsPanel()
+        panel.set_adjustments(
+            {'temperature': 25.0, 'tint': -10.0}, emit_signal=False
+        )
+        assert panel.get_wb_params() == {'temperature': 25.0, 'tint': -10.0}

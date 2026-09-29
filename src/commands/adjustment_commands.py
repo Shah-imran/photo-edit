@@ -8,6 +8,7 @@ from src.processors.color_processor import ColorProcessor
 from src.processors.curve_processor import CurveProcessor
 from src.processors.exposure_processor import ExposureProcessor
 from src.processors.tonal_processor import TonalProcessor
+from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils.color_pipeline import LinearImage
 
 
@@ -98,6 +99,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         tonal_params: Dict[str, float] = None,
         color_params: Dict[str, float] = None,
         curve_params: Dict[str, Any] = None,
+        wb_params: Dict[str, float] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -107,6 +109,7 @@ class CombinedAdjustmentCommand(BaseCommand):
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             curve_params: Tone curve parameters (``{"points": [...]}``)
+            wb_params: White balance (Temperature/Tint) parameters
         """
         super().__init__()
         self._image_model = image_model
@@ -114,12 +117,14 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._tonal_params = tonal_params or {}
         self._color_params = color_params or {}
         self._curve_params = curve_params or {}
+        self._wb_params = wb_params or {}
         self._previous_image = image_model.get_current_image()
         self._new_image: Optional[LinearImage] = None
 
         self._exposure_processor = ExposureProcessor()
         self._tonal_processor = TonalProcessor()
         self._curve_processor = CurveProcessor()
+        self._wb_processor = WhiteBalanceProcessor()
         self._color_processor = ColorProcessor()
 
     def execute(self) -> None:
@@ -137,6 +142,9 @@ class CombinedAdjustmentCommand(BaseCommand):
 
         if self._tonal_params:
             result = self._tonal_processor.process(result, **self._tonal_params)
+
+        if self._wb_params:
+            result = self._wb_processor.process(result, **self._wb_params)
 
         if self._curve_params:
             result = self._curve_processor.process(result, **self._curve_params)

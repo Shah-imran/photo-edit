@@ -82,6 +82,20 @@ class TestProcessingQueue:
 
         assert request.curve_params == {}
 
+    def test_create_request_threads_wb_params(self):
+        queue = ProcessingQueue()
+        request = queue.create_request(
+            wb_params={'temperature': 30.0, 'tint': -10.0}
+        )
+
+        assert request.wb_params == {'temperature': 30.0, 'tint': -10.0}
+
+    def test_create_request_defaults_wb_params_to_empty_dict(self):
+        queue = ProcessingQueue()
+        request = queue.create_request()
+
+        assert request.wb_params == {}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

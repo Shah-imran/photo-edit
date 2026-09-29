@@ -158,6 +158,8 @@ class TestImageController:
             "shadows": 0.0,
             "whites": 0.0,
             "blacks": 0.0,
+            "temperature": 0.0,
+            "tint": 0.0,
             "saturation": 0.0,
             "vibrance": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
@@ -187,12 +189,57 @@ class TestImageController:
             "shadows": 0.0,
             "whites": 0.0,
             "blacks": 0.0,
+            "temperature": 0.0,
+            "tint": 0.0,
             "saturation": 20.0,
             "vibrance": 8.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
         }
         assert controller.image_model.get_current_image() is not None
         assert controller.can_undo() is False
+        controller.cleanup()
+
+    def test_restore_adjustment_state_applies_white_balance(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"temperature": 30.0, "tint": -15.0})
+
+        state = controller.get_adjustment_state()
+        assert state["temperature"] == 30.0
+        assert state["tint"] == -15.0
+        assert controller.image_model.get_current_image() is not None
+        controller.cleanup()
+
+    def test_on_adjustments_changed_reaches_export_image_via_wb(
+        self, qapp
+    ):
+        import numpy as np
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        mid_gray = np.full((4, 4, 3), 0.5, dtype=np.float32)
+        controller._apply_loaded_image("sample.jpg", mid_gray)
+
+        controller.on_adjustments_changed({"temperature": 40.0})
+
+        exported = controller.get_export_image()
+        original = controller.image_model.get_original_image()
+        assert not (exported == original).all()
+        controller.cleanup()
+
+    def test_reset_to_original_clears_white_balance(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_adjustments_changed({"temperature": 40.0, "tint": 20.0})
+
+        controller.reset_to_original()
+
+        state = controller.get_adjustment_state()
+        assert state["temperature"] == 0.0
+        assert state["tint"] == 0.0
         controller.cleanup()
 
     def test_restore_adjustment_state_applies_tone_curve(self, qapp, sample_image):
