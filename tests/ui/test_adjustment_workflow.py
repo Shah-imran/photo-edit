@@ -5,9 +5,15 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtTest import QTest
 
+from src.services.library_catalog_service import LibraryCatalogService
+from src.services.library_image_preview_cache_service import (
+    LibraryImagePreviewCacheService,
+)
+from src.services.library_thumbnail_cache_service import LibraryThumbnailCacheService
+from src.services.settings_service import SettingsService
 from src.views.main_window import MainWindow
 
 
@@ -21,9 +27,20 @@ def qapp():
 
 
 @pytest.fixture
-def main_window(qapp, qtbot):
+def main_window(qapp, qtbot, tmp_path):
     """Create a MainWindow instance for testing."""
-    window = MainWindow()
+    window = MainWindow(
+        settings_service=SettingsService(
+            QSettings(str(tmp_path / "adjustment-workflow.ini"), QSettings.Format.IniFormat)
+        ),
+        catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+        thumbnail_cache_service=LibraryThumbnailCacheService(
+            cache_dir=tmp_path / "cache"
+        ),
+        image_preview_cache_service=LibraryImagePreviewCacheService(
+            cache_dir=tmp_path / "preview-cache"
+        ),
+    )
     qtbot.addWidget(window)
     window.show()
     qtbot.waitExposed(window)
@@ -62,10 +79,13 @@ class TestCompleteAdjustmentWorkflow:
         current_image = main_window._image_controller.get_current_image()
         assert current_image is not None
         
-        # Get pixel value - should be brighter than original
-        pixel = current_image.getpixel((100, 100))
-        # Original was (128, 128, 128), with +50 brightness should be brighter
-        assert pixel[0] > 128  # R channel should be higher
+        # Pixel value at (100, 100) should be brighter than the
+        # original mid-grey (image is now a LinearImage; indexing is
+        # ``[row, col]`` and channels are ``[R, G, B]``).
+        pixel_r = float(current_image[100, 100, 0])
+        # Original mid-grey (linear) is ~0.2159; brightness +50 must
+        # produce a strictly larger value.
+        assert pixel_r > 0.22
 
     def test_multiple_adjustments_workflow(self, main_window, gray_image_file, qtbot):
         """Test applying multiple adjustments."""
@@ -136,16 +156,15 @@ class TestAdjustmentSignalFlow:
         
         # Get original image
         original = main_window._image_controller.image_model.get_original_image()
-        original_pixel = original.getpixel((100, 100))
-        
+        original_pixel = float(original[100, 100, 0])
+
         # Make significant adjustment
         main_window._tools_panel._brightness_slider.set_value(100.0)
         qtbot.wait(300)  # Wait for debounced processing
-        
-        # Check current image is different
+
         current = main_window._image_controller.get_current_image()
-        current_pixel = current.getpixel((100, 100))
-        
+        current_pixel = float(current[100, 100, 0])
+
         # Pixels should be different (brighter)
         assert current_pixel != original_pixel
 
@@ -192,36 +211,38 @@ class TestTonalSliderWorkflow:
         qtbot.wait(100)
 
         original = main_window._image_controller.image_model.get_original_image()
-        original_pixel = original.getpixel((100, 100))
+        original_pixel = original[100, 100].copy()
 
         main_window._tools_panel._highlights_slider.set_value(-80.0)
         qtbot.wait(300)
 
         current = main_window._image_controller.get_current_image()
-        current_pixel = current.getpixel((100, 100))
-        assert current_pixel != original_pixel
+        assert not np.array_equal(current[100, 100], original_pixel)
 
     def test_shadows_slider_changes_dark_pixel(self, main_window, dark_image_file, qtbot):
         main_window._image_controller.load_image(dark_image_file)
         qtbot.wait(100)
 
         original = main_window._image_controller.image_model.get_original_image()
-        original_pixel = original.getpixel((100, 100))
+        original_pixel = original[100, 100].copy()
 
         main_window._tools_panel._shadows_slider.set_value(80.0)
         qtbot.wait(300)
 
         current = main_window._image_controller.get_current_image()
-        current_pixel = current.getpixel((100, 100))
-        assert current_pixel != original_pixel
+        assert not np.array_equal(current[100, 100], original_pixel)
 
     def test_whites_and_blacks_survive_slider_release_and_history_commit(
         self, main_window, gray_image_file, qtbot
     ):
         """Releasing the slider triggers the full-resolution async render and
         an undo-history commit (see ImageController.on_slider_released /
-        _on_processing_complete) - confirm that round trip actually carries
-        the tonal parameters through, not just the live-preview path."""
+        _submit_delayed_final_render / _commit_rendered_adjustment) - confirm
+        that round trip actually carries the tonal parameters through, not
+        just the live-preview path. The final render is deliberately delayed
+        (ImageController._final_render_timer, 1500ms) so an idle slider
+        doesn't compete with an active drag; the wait below has to clear
+        that delay plus the render itself."""
         main_window._image_controller.load_image(gray_image_file)
         qtbot.wait(100)
 
@@ -230,7 +251,7 @@ class TestTonalSliderWorkflow:
         qtbot.wait(150)
 
         main_window._image_controller.on_slider_released()
-        qtbot.wait(500)
+        qtbot.wait(2500)
 
         assert main_window._image_controller.can_undo() is True
 
@@ -238,25 +259,25 @@ class TestTonalSliderWorkflow:
         # the original rather than trusting whatever is cached for display.
         exported = main_window._image_controller.get_export_image()
         original = main_window._image_controller.image_model.get_original_image()
-        assert exported.getpixel((100, 100)) != original.getpixel((100, 100))
+        assert not np.array_equal(exported[100, 100], original[100, 100])
 
     def test_undo_reverts_tonal_adjustment(self, main_window, gray_image_file, qtbot):
         main_window._image_controller.load_image(gray_image_file)
         qtbot.wait(100)
 
         original = main_window._image_controller.image_model.get_original_image()
-        original_pixel = original.getpixel((100, 100))
+        original_pixel = original[100, 100].copy()
 
         main_window._tools_panel._highlights_slider.set_value(70.0)
         qtbot.wait(150)
         main_window._image_controller.on_slider_released()
-        qtbot.wait(500)
+        qtbot.wait(2500)
 
         assert main_window._image_controller.can_undo() is True
         main_window._image_controller.undo()
 
         reverted = main_window._image_controller.get_current_image()
-        assert reverted.getpixel((100, 100)) == original_pixel
+        assert np.array_equal(reverted[100, 100], original_pixel)
 
 
 class TestPanelInteraction:

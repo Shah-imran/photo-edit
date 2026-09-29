@@ -1,9 +1,11 @@
 """Unit tests for ImageView widget."""
 
 import pytest
+import numpy as np
 from PIL import Image
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
+from src.processing.display_frame import DisplayFrame
 from src.views.image_view import ImageView
 
 
@@ -30,6 +32,20 @@ class TestImageView:
         """Test setting an image."""
         view = ImageView()
         view.set_image(sample_image)
+        assert view.has_image() is True
+
+    def test_set_display_frame(self, qapp):
+        """Worker display frames should be presentable without linear conversion."""
+        view = ImageView()
+        frame = DisplayFrame(
+            request_id=1,
+            tier="interactive",
+            adjustment_signature=(),
+            rgb=np.full((20, 30, 3), 128, dtype=np.uint8),
+        )
+
+        view.set_display_frame(frame)
+
         assert view.has_image() is True
 
     def test_clear_image(self, qapp, sample_image):

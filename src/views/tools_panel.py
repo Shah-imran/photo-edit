@@ -45,6 +45,7 @@ class ToolsPanel(QWidget):
             'saturation': 0.0,
             'vibrance': 0.0
         }
+        self._suppress_adjustment_signal = False
         
         self._setup_ui()
         self._connect_signals()
@@ -245,7 +246,8 @@ class ToolsPanel(QWidget):
             value: New value
         """
         self._adjustments[name] = value
-        self.adjustments_changed.emit(self._adjustments.copy())
+        if not self._suppress_adjustment_signal:
+            self.adjustments_changed.emit(self._adjustments.copy())
 
     def get_adjustments(self) -> Dict[str, float]:
         """Get all current adjustment values.
@@ -293,19 +295,41 @@ class ToolsPanel(QWidget):
 
     def reset_all(self):
         """Reset all adjustments to default values."""
-        self._exposure_slider.reset()
-        self._contrast_slider.reset()
-        self._brightness_slider.reset()
-        self._highlights_slider.reset()
-        self._shadows_slider.reset()
-        self._whites_slider.reset()
-        self._blacks_slider.reset()
-        self._saturation_slider.reset()
-        self._vibrance_slider.reset()
+        self.set_adjustments({}, emit_signal=True)
+
+    def set_adjustments(self, adjustments: Dict[str, float], emit_signal: bool = False):
+        """Apply a complete adjustment-state payload to the slider UI."""
+        merged = {
+            'exposure': float(adjustments.get('exposure', 0.0)),
+            'contrast': float(adjustments.get('contrast', 0.0)),
+            'brightness': float(adjustments.get('brightness', 0.0)),
+            'highlights': float(adjustments.get('highlights', 0.0)),
+            'shadows': float(adjustments.get('shadows', 0.0)),
+            'whites': float(adjustments.get('whites', 0.0)),
+            'blacks': float(adjustments.get('blacks', 0.0)),
+            'saturation': float(adjustments.get('saturation', 0.0)),
+            'vibrance': float(adjustments.get('vibrance', 0.0)),
+        }
+        self._suppress_adjustment_signal = True
+        try:
+            self._exposure_slider.set_value(merged['exposure'])
+            self._contrast_slider.set_value(merged['contrast'])
+            self._brightness_slider.set_value(merged['brightness'])
+            self._highlights_slider.set_value(merged['highlights'])
+            self._shadows_slider.set_value(merged['shadows'])
+            self._whites_slider.set_value(merged['whites'])
+            self._blacks_slider.set_value(merged['blacks'])
+            self._saturation_slider.set_value(merged['saturation'])
+            self._vibrance_slider.set_value(merged['vibrance'])
+        finally:
+            self._suppress_adjustment_signal = False
+        self._adjustments = merged
+        if emit_signal:
+            self.adjustments_changed.emit(self._adjustments.copy())
 
     def set_enabled(self, enabled: bool):
         """Enable or disable all controls.
-
+        
         Args:
             enabled: True to enable, False to disable
         """

@@ -7,29 +7,29 @@ are luminance-masked adjustments that only affect the bright or dark end
 of the tonal range, and Whites/Blacks remap the input black/white points
 before the rest of the tone curve runs.
 
-Unlike ``ExposureProcessor``/``ColorProcessor``, this operates on
-linear-light float32 RGB arrays (see ``src/processing/color_space.py``),
-not 8-bit gamma-encoded PIL images - luminance-masked recovery only
-behaves physically plausibly in linear light, since gamma-encoded values
-already have a nonlinear relationship with perceived brightness baked in.
-Callers are expected to decode with :func:`src.processing.color_space.image_to_linear`
-before calling :meth:`TonalProcessor.process`, and re-encode afterwards.
+Like ``ExposureProcessor``/``ColorProcessor``, this operates directly on
+the canonical pipeline format (:data:`src.utils.color_pipeline.LinearImage`:
+float32, ``(H, W, 3)``, linear-light, ``[0, 1]``) - luminance-masked
+recovery only behaves physically plausibly in linear light, since
+gamma-encoded values already have a nonlinear relationship with perceived
+brightness baked in. Conversions to/from PIL or ``QImage`` happen at the
+pipeline boundaries (``ImageService``, ``ImageView``), not here.
 """
 
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils.color_pipeline import LinearImage
 
 
 class TonalProcessor(BaseProcessor):
     """Processor for Highlights/Shadows/Whites/Blacks tonal adjustments.
 
-    All four parameters use Lightroom's -100..+100 range and operate on
-    linear-light float32 RGB (or RGBA - only the first 3 channels are read
-    for the luminance mask, and only they are adjusted) arrays with values
-    nominally in [0.0, 1.0]. The result is not clipped here; that happens
-    once, at final re-encoding, so multiple processors can stack without
-    each one separately clamping intermediate headroom.
+    All four parameters use Lightroom's -100..+100 range and operate on a
+    ``LinearImage`` (values nominally in [0.0, 1.0]). The result is not
+    clipped here; that happens once, at final re-encoding, so multiple
+    processors can stack without each one separately clamping intermediate
+    headroom.
     """
 
     # Rec. 709 luma weights, used to build the luminance mask that confines
@@ -43,17 +43,17 @@ class TonalProcessor(BaseProcessor):
 
     def process(
         self,
-        linear_rgb: np.ndarray,
+        linear_rgb: LinearImage,
         highlights: float = 0.0,
         shadows: float = 0.0,
         whites: float = 0.0,
         blacks: float = 0.0,
-    ) -> np.ndarray:
-        """Apply tonal adjustments to a linear-light RGB(A) array.
+    ) -> LinearImage:
+        """Apply tonal adjustments to a ``LinearImage``.
 
         Args:
-            linear_rgb: float32 array of shape (H, W, 3) or (H, W, 4) in
-                linear light (see ``image_to_linear``).
+            linear_rgb: ``LinearImage`` (float32, ``(H, W, 3)``, linear
+                light, ``[0, 1]``).
             highlights: -100..100. Positive recovers/brightens highlights,
                 negative darkens them (pulls back blown-out areas).
             shadows: -100..100. Positive lifts shadow detail, negative

@@ -2,17 +2,27 @@
 
 import pytest
 from PIL import Image
-from src.commands.adjustment_commands import AdjustmentCommand, CombinedAdjustmentCommand
+
+from src.commands.adjustment_commands import (
+    AdjustmentCommand,
+    CombinedAdjustmentCommand,
+)
 from src.models.image_model import ImageModel
+from src.utils.color_pipeline import pil_to_linear
+
+
+@pytest.fixture
+def sample_linear_image(sample_image):
+    return pil_to_linear(sample_image)
 
 
 class TestAdjustmentCommand:
     """Test cases for AdjustmentCommand class."""
 
-    def test_command_initialization(self, sample_image):
+    def test_command_initialization(self, sample_linear_image):
         """Test AdjustmentCommand can be initialized."""
         model = ImageModel()
-        model.set_original_image(sample_image)
+        model.set_original_image(sample_linear_image)
         
         cmd = AdjustmentCommand(
             model,
@@ -21,10 +31,10 @@ class TestAdjustmentCommand:
         )
         assert cmd is not None
 
-    def test_execute_exposure_adjustment(self, sample_image):
+    def test_execute_exposure_adjustment(self, sample_linear_image):
         """Test executing exposure adjustment."""
         model = ImageModel()
-        model.set_original_image(sample_image)
+        model.set_original_image(sample_linear_image)
         
         cmd = AdjustmentCommand(
             model,
@@ -36,10 +46,10 @@ class TestAdjustmentCommand:
         assert cmd.is_executed() is True
         assert model.is_modified() is True
 
-    def test_undo_adjustment(self, sample_image):
+    def test_undo_adjustment(self, sample_linear_image):
         """Test undoing adjustment."""
         model = ImageModel()
-        model.set_original_image(sample_image)
+        model.set_original_image(sample_linear_image)
         original_image = model.get_current_image()
         
         cmd = AdjustmentCommand(
@@ -52,10 +62,10 @@ class TestAdjustmentCommand:
         
         assert cmd.is_executed() is False
 
-    def test_get_parameters(self, sample_image):
+    def test_get_parameters(self, sample_linear_image):
         """Test getting command parameters."""
         model = ImageModel()
-        model.set_original_image(sample_image)
+        model.set_original_image(sample_linear_image)
         params = {'exposure': 1.0, 'contrast': 50.0}
         
         cmd = AdjustmentCommand(
@@ -71,18 +81,18 @@ class TestAdjustmentCommand:
 class TestCombinedAdjustmentCommand:
     """Test cases for CombinedAdjustmentCommand class."""
 
-    def test_command_initialization(self, sample_image):
+    def test_command_initialization(self, sample_linear_image):
         """Test CombinedAdjustmentCommand can be initialized."""
         model = ImageModel()
-        model.set_original_image(sample_image)
+        model.set_original_image(sample_linear_image)
         
         cmd = CombinedAdjustmentCommand(model)
         assert cmd is not None
 
-    def test_execute_combined_adjustments(self, sample_image):
+    def test_execute_combined_adjustments(self, sample_linear_image):
         """Test executing combined adjustments."""
         model = ImageModel()
-        model.set_original_image(sample_image)
+        model.set_original_image(sample_linear_image)
         
         cmd = CombinedAdjustmentCommand(
             model,
@@ -94,10 +104,10 @@ class TestCombinedAdjustmentCommand:
         assert cmd.is_executed() is True
         assert model.is_modified() is True
 
-    def test_undo_combined_adjustments(self, sample_image):
+    def test_undo_combined_adjustments(self, sample_linear_image):
         """Test undoing combined adjustments."""
         model = ImageModel()
-        model.set_original_image(sample_image)
+        model.set_original_image(sample_linear_image)
         
         cmd = CombinedAdjustmentCommand(
             model,
@@ -109,10 +119,10 @@ class TestCombinedAdjustmentCommand:
         
         assert cmd.is_executed() is False
 
-    def test_exposure_only(self, sample_image):
+    def test_exposure_only(self, sample_linear_image):
         """Test with only exposure adjustments."""
         model = ImageModel()
-        model.set_original_image(sample_image)
+        model.set_original_image(sample_linear_image)
         
         cmd = CombinedAdjustmentCommand(
             model,
@@ -122,10 +132,10 @@ class TestCombinedAdjustmentCommand:
         
         assert cmd.is_executed() is True
 
-    def test_color_only(self, sample_image):
+    def test_color_only(self, sample_linear_image):
         """Test with only color adjustments."""
         model = ImageModel()
-        model.set_original_image(sample_image)
+        model.set_original_image(sample_linear_image)
         
         cmd = CombinedAdjustmentCommand(
             model,

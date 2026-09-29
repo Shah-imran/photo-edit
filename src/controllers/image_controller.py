@@ -1,19 +1,66 @@
 """Controller for image operations."""
 
+import logging
+from time import perf_counter
 from typing import Optional, Dict
 from PyQt6.QtWidgets import QFileDialog, QWidget, QMessageBox
-from PyQt6.QtCore import QObject, QSize
-from PIL import Image
+from PyQt6.QtCore import QObject, QThread, Qt, QTimer, pyqtSignal
 
 from src.models.image_model import ImageModel
 from src.services.image_service import ImageService
 from src.services.history_service import HistoryService
 from src.services.settings_service import SettingsService
 from src.views.image_view import ImageView
-from src.commands.adjustment_commands import CombinedAdjustmentCommand
-from src.processing.adjustment_pipeline import apply_basic_adjustments
+from src.processors.exposure_processor import ExposureProcessor
+from src.processors.tonal_processor import TonalProcessor
+from src.processors.color_processor import ColorProcessor
+from src.commands.adjustment_commands import (
+    CombinedAdjustmentCommand,
+    ImageStateChangeCommand,
+)
+from src.processing.display_frame import DisplayFrame
 from src.processing.processing_worker import ProcessingWorker
-from src.utils.debouncer import Debouncer
+from src.utils.debouncer import ThrottledDebouncer
+from src.utils.image_extensions import open_image_file_dialog_filter
+logger = logging.getLogger(__name__)
+
+
+def _elapsed_ms(start: float) -> float:
+    return (perf_counter() - start) * 1000.0
+
+
+class _ImageLoadWorker(QObject):
+    """Worker that loads an image in a background thread."""
+
+    preview_loaded = pyqtSignal(int, str, object)
+    loaded = pyqtSignal(int, str, object)
+    failed = pyqtSignal(int, str, str)
+
+    def __init__(self, request_id: int, file_path: str, image_service: ImageService):
+        super().__init__()
+        self._request_id = request_id
+        self._file_path = file_path
+        self._image_service = image_service
+
+    def run(self) -> None:
+        """Decode the image and emit completion signal."""
+        try:
+            try:
+                preview = self._image_service.load_preview_thumbnail(
+                    self._file_path,
+                    (1600, 1600),
+                    maintain_aspect=True,
+                )
+                self.preview_loaded.emit(
+                    self._request_id, self._file_path, preview
+                )
+            except Exception:
+                logger.exception("Preview load failed for %s", self._file_path)
+
+            image = self._image_service.load_image(self._file_path)
+            self.loaded.emit(self._request_id, self._file_path, image)
+        except Exception as e:
+            self.failed.emit(self._request_id, self._file_path, str(e))
 
 
 class ImageController(QObject):
@@ -25,6 +72,22 @@ class ImageController(QObject):
     The controller uses background threading for image processing
     to keep the UI responsive during adjustments.
     """
+
+    image_load_started = pyqtSignal(str)
+    image_preview_ready = pyqtSignal(str)
+    image_load_finished = pyqtSignal(str, bool)
+    _worker_image_set_requested = pyqtSignal(object)
+    _ADJUSTMENT_DEFAULTS = {
+        "exposure": 0.0,
+        "contrast": 0.0,
+        "brightness": 0.0,
+        "highlights": 0.0,
+        "shadows": 0.0,
+        "whites": 0.0,
+        "blacks": 0.0,
+        "saturation": 0.0,
+        "vibrance": 0.0,
+    }
 
     def __init__(
         self,
@@ -55,6 +118,11 @@ class ImageController(QObject):
         self._history_service = history_service or HistoryService()
         self._settings_service = settings_service
         self._use_threading = use_threading
+        
+        # Processors (for synchronous fallback / export)
+        self._exposure_processor = ExposureProcessor()
+        self._tonal_processor = TonalProcessor()
+        self._color_processor = ColorProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
@@ -63,8 +131,26 @@ class ImageController(QObject):
         
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
-        self._debouncer: Optional[Debouncer] = None
+        self._final_processing_worker: Optional[ProcessingWorker] = None
+        self._debouncer: Optional[ThrottledDebouncer] = None
         self._latest_request_id: int = -1
+        self._latest_presented_preview_id: int = -1
+        self._latest_load_request_id: int = -1
+        self._pending_final_request_id: int = -1
+        self._pending_history_previous_image = None
+        self._load_parent_widget: Optional[QWidget] = None
+        self._load_threads: list[QThread] = []
+        self._load_workers: list[_ImageLoadWorker] = []
+        self._skip_intermediate_preview_request_ids: set[int] = set()
+        self._pending_preview: Optional[tuple[int, DisplayFrame]] = None
+        self._preview_present_timer = QTimer(self)
+        self._preview_present_timer.setSingleShot(True)
+        self._preview_present_timer.setInterval(16)  # Cap UI presents ~60 FPS
+        self._preview_present_timer.timeout.connect(self._present_pending_preview)
+        self._final_render_timer = QTimer(self)
+        self._final_render_timer.setSingleShot(True)
+        self._final_render_timer.setInterval(1500)
+        self._final_render_timer.timeout.connect(self._submit_delayed_final_render)
         
         if use_threading:
             self._setup_async_processing()
@@ -77,13 +163,31 @@ class ImageController(QObject):
         # Create and start processing worker
         self._processing_worker = ProcessingWorker()
         self._processing_worker.preview_ready.connect(self._on_preview_ready)
-        self._processing_worker.processing_complete.connect(self._on_processing_complete)
         self._processing_worker.error_occurred.connect(self._on_processing_error)
+        self._final_processing_worker = ProcessingWorker()
+        self._final_processing_worker.processing_complete.connect(
+            self._on_processing_complete
+        )
+        self._final_processing_worker.error_occurred.connect(
+            self._on_processing_error
+        )
+        # Ensure expensive proxy generation runs in the worker thread.
+        self._worker_image_set_requested.connect(
+            self._processing_worker.set_image,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._worker_image_set_requested.connect(
+            self._final_processing_worker.set_image,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._processing_worker.start()
+        self._final_processing_worker.start()
         
-        # Create debouncer for slider input (50ms delay)
-        self._debouncer = Debouncer(delay_ms=50)
-        self._debouncer.triggered.connect(self._on_debounced_adjustment)
+        # Max-performance profile: throttle previews to smooth frame cadence
+        # and debounce to consolidate final pause events.
+        self._debouncer = ThrottledDebouncer(throttle_ms=16, debounce_ms=50)
+        self._debouncer.throttled.connect(self._on_throttled_adjustment)
+        self._debouncer.debounced.connect(self._on_debounced_adjustment)
 
     def _connect_signals(self):
         """Connect view signals to controller methods."""
@@ -93,6 +197,13 @@ class ImageController(QObject):
         """Clean up resources (call before destroying)."""
         if self._processing_worker is not None:
             self._processing_worker.stop()
+        if self._final_processing_worker is not None:
+            self._final_processing_worker.stop()
+        for thread in self._load_threads:
+            thread.quit()
+            thread.wait(2000)
+        self._load_threads.clear()
+        self._load_workers.clear()
 
     @property
     def image_model(self) -> ImageModel:
@@ -122,7 +233,7 @@ class ImageController(QObject):
             parent,
             "Open Image",
             start_dir,
-            "Image Files (*.jpg *.jpeg *.png *.tiff *.tif *.bmp *.webp);;All Files (*)"
+            open_image_file_dialog_filter()
         )
         
         if file_path:
@@ -141,26 +252,12 @@ class ImageController(QObject):
         Returns:
             True if image was loaded successfully
         """
+        self._load_parent_widget = parent
+        self.image_load_started.emit(file_path)
         try:
             image = self._image_service.load_image(file_path)
-            self._image_model.file_path = file_path
-            self._image_model.set_original_image(image)
-            self._image_view.set_image(image)
-            # Zoom levels (100%, fit-to-window) stay tied to these true
-            # dimensions even while the view is later fed a small proxy for
-            # fast live preview.
-            self._image_view.set_reference_size(QSize(*image.size))
-            self._history_service.clear_history()
-            
-            # Reset adjustment params
-            self._exposure_params = {}
-            self._tonal_params = {}
-            self._color_params = {}
-
-            # Set image in processing worker for proxy generation
-            if self._processing_worker is not None:
-                self._processing_worker.set_image(image)
-            
+            self._apply_loaded_image(file_path, image)
+            self.image_load_finished.emit(file_path, True)
             return True
         except FileNotFoundError:
             QMessageBox.warning(
@@ -168,6 +265,7 @@ class ImageController(QObject):
                 "File Not Found",
                 f"Could not find file: {file_path}"
             )
+            self.image_load_finished.emit(file_path, False)
             return False
         except ValueError as e:
             QMessageBox.warning(
@@ -175,7 +273,111 @@ class ImageController(QObject):
                 "Invalid Image",
                 f"Could not load image: {str(e)}"
             )
+            self.image_load_finished.emit(file_path, False)
             return False
+
+    def load_image_async(
+        self,
+        file_path: str,
+        parent: Optional[QWidget] = None,
+        show_intermediate_preview: bool = True,
+    ) -> None:
+        """Load an image in the background to keep UI responsive."""
+        self._latest_load_request_id += 1
+        request_id = self._latest_load_request_id
+        self._load_parent_widget = parent
+        if not show_intermediate_preview:
+            self._skip_intermediate_preview_request_ids.add(request_id)
+        self.image_load_started.emit(file_path)
+
+        thread = QThread()
+        worker = _ImageLoadWorker(request_id, file_path, self._image_service)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.preview_loaded.connect(self._on_async_image_preview_loaded)
+        worker.loaded.connect(self._on_async_image_loaded)
+        worker.failed.connect(self._on_async_image_failed)
+        worker.loaded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda t=thread, w=worker: self._on_load_thread_finished(t, w)
+        )
+        self._load_threads.append(thread)
+        self._load_workers.append(worker)
+        thread.start()
+
+    def _on_load_thread_finished(
+        self, thread: QThread, worker: _ImageLoadWorker
+    ) -> None:
+        """Remove completed load resources from active tracking."""
+        if thread in self._load_threads:
+            self._load_threads.remove(thread)
+        if worker in self._load_workers:
+            self._load_workers.remove(worker)
+
+    def _apply_loaded_image(self, file_path: str, image) -> None:
+        """Apply a decoded image to model/view state on the UI thread."""
+        self._image_model.file_path = file_path
+        self._image_model.set_original_image(image)
+        self._image_view.set_image(image)
+        self._history_service.clear_history()
+
+        # Reset adjustment params
+        self._exposure_params = {}
+        self._tonal_params = {}
+        self._color_params = {}
+        self._pending_final_request_id = -1
+        self._pending_history_previous_image = None
+        self._final_render_timer.stop()
+
+        # Set image in processing worker for proxy generation
+        if self._processing_worker is not None:
+            self._worker_image_set_requested.emit(image)
+
+    def _on_async_image_preview_loaded(
+        self, request_id: int, file_path: str, preview
+    ) -> None:
+        """Show a fast preview while full-resolution decode continues."""
+        if request_id != self._latest_load_request_id:
+            return
+        if request_id in self._skip_intermediate_preview_request_ids:
+            return
+        self._image_view.set_image(preview, emit_loaded=False)
+        QTimer.singleShot(0, self._image_view.fit_to_window)
+        self.image_preview_ready.emit(file_path)
+
+    def _on_async_image_loaded(self, request_id: int, file_path: str, image) -> None:
+        """Handle successful async image load."""
+        if request_id != self._latest_load_request_id:
+            return
+        self._skip_intermediate_preview_request_ids.discard(request_id)
+        self._apply_loaded_image(file_path, image)
+        self.image_load_finished.emit(file_path, True)
+
+    def _on_async_image_failed(
+        self, request_id: int, file_path: str, error_message: str
+    ) -> None:
+        """Handle async image load failure."""
+        if request_id != self._latest_load_request_id:
+            return
+        self._skip_intermediate_preview_request_ids.discard(request_id)
+        # Preserve user-facing error semantics from synchronous load.
+        if "not found" in error_message.lower():
+            QMessageBox.warning(
+                self._load_parent_widget,
+                "File Not Found",
+                f"Could not find file: {file_path}",
+            )
+        else:
+            QMessageBox.warning(
+                self._load_parent_widget,
+                "Invalid Image",
+                f"Could not load image: {error_message}",
+            )
+        self.image_load_finished.emit(file_path, False)
 
     def has_image(self) -> bool:
         """Check if an image is currently loaded.
@@ -189,26 +391,26 @@ class ImageController(QObject):
         """Get the current image.
 
         Returns:
-            Current PIL Image or None
+            Current ``LinearImage`` or None
         """
         return self._image_model.get_current_image()
 
     def get_export_image(self):
         """Get the full-resolution image for export.
 
-        Recomputes directly from the original image and the currently active
-        adjustment parameters, rather than returning whatever happens to be
-        cached in ``current_image``. That field is intentionally allowed to
-        hold a lower-resolution proxy frame for a moment while a slider is
-        being dragged (see ``_on_preview_ready``), so reading it directly
-        would risk exporting an undersized image if the user exports before
-        that settles back to full resolution. This always processes the
-        true original at full size, so it is correct regardless of timing,
-        at the cost of a synchronous recompute when called.
+        Recomputes directly from the original image and the currently
+        active adjustment parameters, rather than trusting whatever is
+        cached in ``current_image``. That field is deliberately allowed to
+        hold a lower-resolution preview frame for a moment during an
+        interactive drag (see ``_present_pending_preview``), so reading it
+        directly risks exporting an undersized image if export is
+        triggered before it settles back to a full-resolution render.
+        This always reprocesses the true original at full size, so it is
+        correct regardless of that timing.
 
         Returns:
-            Full-resolution PIL Image with current adjustments applied, or
-            None if no image is loaded.
+            Full-resolution ``LinearImage`` with current adjustments
+            applied, or None if no image is loaded.
         """
         if not self.has_image():
             return None
@@ -217,19 +419,87 @@ class ImageController(QObject):
         if original is None:
             return None
 
-        return apply_basic_adjustments(
-            original,
-            exposure_params=self._exposure_params,
-            tonal_params=self._tonal_params,
-            color_params=self._color_params,
-        )
+        result = original.copy()
+        if self._exposure_params:
+            result = self._exposure_processor.process(result, **self._exposure_params)
+        if self._tonal_params:
+            result = self._tonal_processor.process(result, **self._tonal_params)
+        if self._color_params:
+            result = self._color_processor.process(result, **self._color_params)
+        return result
 
     def refresh_view(self) -> None:
         """Refresh the image view with the current image state."""
         current_image = self._image_model.get_current_image()
-        if current_image:
+        if current_image is not None:
             # Don't emit image_loaded signal on refresh (only on initial load)
-            self._image_view.set_image(current_image, emit_loaded=False)
+            self._image_view.set_image(
+                current_image,
+                emit_loaded=False,
+                preserve_view_scale=True,
+            )
+
+    def get_adjustment_state(self) -> Dict[str, float]:
+        """Return the current normalized adjustment payload."""
+        state = self._ADJUSTMENT_DEFAULTS.copy()
+        state.update(self._exposure_params)
+        state.update(self._tonal_params)
+        state.update(self._color_params)
+        return state
+
+    def restore_adjustment_state(self, adjustments: Optional[Dict[str, float]]) -> None:
+        """Apply a saved adjustment payload without creating undo history."""
+        normalized = self._normalize_adjustment_state(adjustments)
+        self._history_service.clear_history()
+        self._pending_history_previous_image = None
+        self._pending_final_request_id = -1
+        self._final_render_timer.stop()
+        if self._debouncer is not None:
+            self._debouncer.cancel()
+        if self._processing_worker is not None and hasattr(
+            self._processing_worker, "cancel_pending"
+        ):
+            self._processing_worker.cancel_pending()
+        if self._final_processing_worker is not None and hasattr(
+            self._final_processing_worker, "cancel_pending"
+        ):
+            self._final_processing_worker.cancel_pending()
+
+        self._exposure_params = {
+            "exposure": normalized["exposure"],
+            "contrast": normalized["contrast"],
+            "brightness": normalized["brightness"],
+        }
+        self._tonal_params = {
+            "highlights": normalized["highlights"],
+            "shadows": normalized["shadows"],
+            "whites": normalized["whites"],
+            "blacks": normalized["blacks"],
+        }
+        self._color_params = {
+            "saturation": normalized["saturation"],
+            "vibrance": normalized["vibrance"],
+        }
+
+        if not self.has_image():
+            return
+
+        has_changes = any(value != 0.0 for value in normalized.values())
+        if not has_changes:
+            self._image_model.reset_to_original()
+            self.refresh_view()
+            return
+
+        original = self._image_model.get_original_image()
+        if original is None:
+            return
+
+        result = original.copy()
+        result = self._exposure_processor.process(result, **self._exposure_params)
+        result = self._tonal_processor.process(result, **self._tonal_params)
+        result = self._color_processor.process(result, **self._color_params)
+        self._image_model.current_image = result
+        self.refresh_view()
 
     def reset_to_original(self) -> None:
         """Reset the image to its original state."""
@@ -238,10 +508,16 @@ class ImageController(QObject):
         self._exposure_params = {}
         self._tonal_params = {}
         self._color_params = {}
-        
+        self._pending_final_request_id = -1
+        self._pending_history_previous_image = None
+        self._final_render_timer.stop()
+
         # Cancel any pending processing
         if self._processing_worker is not None:
             self._processing_worker.cancel_pending()
+        if self._final_processing_worker is not None and \
+           hasattr(self._final_processing_worker, "cancel_pending"):
+            self._final_processing_worker.cancel_pending()
         
         self.refresh_view()
 
@@ -325,6 +601,17 @@ class ImageController(QObject):
         if not self.has_image():
             return
 
+        self._final_render_timer.stop()
+        self._pending_final_request_id = -1
+
+        if self._pending_history_previous_image is None:
+            current = self._image_model.get_current_image()
+            if current is not None:
+                # LinearImage instances are treated as immutable in the
+                # pipeline. Keep the reference instead of copying a full-res
+                # buffer on the UI thread.
+                self._pending_history_previous_image = current
+
         # Store current params
         if exposure_params:
             self._exposure_params = exposure_params
@@ -332,6 +619,28 @@ class ImageController(QObject):
             self._tonal_params = tonal_params
         if color_params:
             self._color_params = color_params
+
+        if self._use_threading and self._processing_worker is not None:
+            if add_to_history:
+                final_worker = self._final_processing_worker or self._processing_worker
+                self._pending_final_request_id = (
+                    final_worker.submit_final_request(
+                        exposure_params=self._exposure_params,
+                        tonal_params=self._tonal_params,
+                        color_params=self._color_params,
+                    )
+                )
+            else:
+                self._pending_final_request_id = -1
+                self._latest_request_id = (
+                    self._processing_worker.submit_preview_request(
+                        exposure_params=self._exposure_params,
+                        tonal_params=self._tonal_params,
+                        color_params=self._color_params,
+                        interactive_preview=True,
+                    )
+                )
+            return
 
         if add_to_history:
             # Create and execute command for undo/redo
@@ -348,12 +657,21 @@ class ImageController(QObject):
             if original is None:
                 return
 
-            self._image_model.current_image = apply_basic_adjustments(
-                original,
-                exposure_params=self._exposure_params,
-                tonal_params=self._tonal_params,
-                color_params=self._color_params,
-            )
+            result = original.copy()
+
+            # Apply exposure adjustments
+            if self._exposure_params:
+                result = self._exposure_processor.process(result, **self._exposure_params)
+
+            # Apply tonal adjustments
+            if self._tonal_params:
+                result = self._tonal_processor.process(result, **self._tonal_params)
+
+            # Apply color adjustments
+            if self._color_params:
+                result = self._color_processor.process(result, **self._color_params)
+
+            self._image_model.current_image = result
 
         self.refresh_view()
 
@@ -366,8 +684,30 @@ class ImageController(QObject):
         Args:
             adjustments: Dictionary of all adjustment values
         """
+        total_start = perf_counter()
         if not self.has_image():
             return
+
+        # Capture the state this adjustment gesture started from, once per
+        # gesture, so that when the delayed full-resolution render lands
+        # (see _submit_delayed_final_render / _commit_rendered_adjustment)
+        # there is a "before" image to diff against and undo has something
+        # to restore. Without this, dragging a slider through the normal
+        # UI path and releasing it would compute the final image correctly
+        # but silently never add it to history.
+        if self._pending_history_previous_image is None:
+            current = self._image_model.get_current_image()
+            if current is not None:
+                self._pending_history_previous_image = current
+
+        cancel_start = perf_counter()
+        self._final_render_timer.stop()
+        self._pending_final_request_id = -1
+        if self._final_processing_worker is not None and hasattr(
+            self._final_processing_worker, "cancel_pending"
+        ):
+            self._final_processing_worker.cancel_pending()
+        cancel_ms = _elapsed_ms(cancel_start)
 
         exposure_params = {
             'exposure': adjustments.get('exposure', 0.0),
@@ -391,106 +731,150 @@ class ImageController(QObject):
         self._color_params = color_params
 
         if self._use_threading and self._debouncer is not None:
-            # Use debounced async processing
+            # Use throttled + debounced async processing
             self._debouncer.call({
                 'exposure': exposure_params,
                 'tonal': tonal_params,
                 'color': color_params
             })
+            mode = "debounced-threaded"
         else:
             # Fallback to synchronous processing
             self.apply_adjustments(
                 exposure_params, tonal_params, color_params, add_to_history=False
             )
+            mode = "sync-fallback"
 
-    def _on_debounced_adjustment(self, params: dict) -> None:
-        """Handle debounced adjustment (called after slider pause).
+        logger.info(
+            "PERF controller.adjustments_changed mode=%s cancel_final_ms=%.2f "
+            "total_ms=%.2f exposure=%s contrast=%s brightness=%s saturation=%s "
+            "vibrance=%s",
+            mode,
+            cancel_ms,
+            _elapsed_ms(total_start),
+            exposure_params.get("exposure"),
+            exposure_params.get("contrast"),
+            exposure_params.get("brightness"),
+            color_params.get("saturation"),
+            color_params.get("vibrance"),
+        )
 
-        Args:
-            params: Dictionary with 'exposure', 'tonal', and 'color' params
-        """
+    def _on_throttled_adjustment(self, params: dict) -> None:
+        """Handle throttled live preview updates during slider drags."""
+        start = perf_counter()
         if not self.has_image() or self._processing_worker is None:
             return
+        self._final_render_timer.stop()
+        self._pending_final_request_id = -1
 
         exposure_params = params.get('exposure', {})
         tonal_params = params.get('tonal', {})
         color_params = params.get('color', {})
-
-        # Submit preview request to worker
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
-            color_params=color_params
+            color_params=color_params,
+            interactive_preview=True,
+        )
+        logger.info(
+            "PERF controller.submit_preview request=%s tier=interactive "
+            "schedule_ms=%.2f",
+            self._latest_request_id,
+            _elapsed_ms(start),
         )
 
-    def _on_preview_ready(self, request_id: int, image: Image.Image) -> None:
-        """Handle preview image ready from worker.
-
-        The proxy-resolution result is sent straight to ``ImageView`` without
-        ever being resized back up to the original pixel dimensions: that
-        PIL/LANCZOS upscale (previously done on every slider tick) was doing
-        far more work than the actual adjustment math, and was the main
-        cause of visible lag while dragging a slider. ``ImageView`` already
-        knows the true image size (set once via ``set_reference_size`` on
-        load) and scales this small pixmap to the correct on-screen size
-        itself, cheaply, via Qt.
-
-        ``current_image`` is still updated with this result (existing code
-        and tests treat it as "the latest preview", live-drag included), but
-        now at whatever resolution the proxy actually is instead of being
-        forced back up to the original size first. For a small image the
-        proxy already equals the original, so nothing observable changes;
-        for a large one, ``current_image`` is briefly proxy-resolution while
-        a slider is being dragged, settling back to full resolution once
-        ``_on_processing_complete`` runs. Anything that needs a guaranteed
-        full-resolution result regardless of that in-flight state (export)
-        should use :meth:`get_export_image` rather than ``current_image``.
-
+    def _on_debounced_adjustment(self, params: dict) -> None:
+        """Handle debounced adjustment (called after slider pause).
+        
         Args:
-            request_id: The request ID
-            image: Processed preview (proxy-resolution) image
+            params: Dictionary with 'exposure' and 'color' params
         """
+        start = perf_counter()
+        if not self.has_image() or self._processing_worker is None:
+            return
+        self._final_render_timer.stop()
+        self._pending_final_request_id = -1
+        
+        exposure_params = params.get('exposure', {})
+        tonal_params = params.get('tonal', {})
+        color_params = params.get('color', {})
+
+        # Keep pause updates on the cheap interactive tier. Quality previews are
+        # presented on release so larger frames cannot interrupt active drags.
+        self._latest_request_id = self._processing_worker.submit_preview_request(
+            exposure_params=exposure_params,
+            tonal_params=tonal_params,
+            color_params=color_params,
+            interactive_preview=True,
+        )
+        logger.info(
+            "PERF controller.submit_preview request=%s tier=interactive-idle "
+            "schedule_ms=%.2f",
+            self._latest_request_id,
+            _elapsed_ms(start),
+        )
+
+    def _on_preview_ready(self, request_id: int, frame) -> None:
+        """Handle preview ``DisplayFrame`` ready from worker."""
+        start = perf_counter()
         if self._processing_worker is not None and \
            self._processing_worker.is_latest_request(request_id):
-            self._image_model.current_image = image
-            self._image_view.set_image(image, emit_loaded=False)
+            if not isinstance(frame, DisplayFrame):
+                logger.warning(
+                    "Ignoring preview request=%s with unexpected payload %s",
+                    request_id,
+                    type(frame).__name__,
+                )
+                return
+            # Coalesce preview presents so conversion/paint cadence is bounded.
+            if request_id < self._latest_presented_preview_id:
+                return
+            if frame.tier == "quality" and request_id != self._latest_request_id:
+                return
+            self._pending_preview = (request_id, frame)
+            if not self._preview_present_timer.isActive():
+                self._present_pending_preview()
+                self._preview_present_timer.start()
+            logger.info(
+                "PERF controller.preview_ready request=%s shape=%s total_ms=%.2f",
+                request_id,
+                frame.shape,
+                _elapsed_ms(start),
+            )
 
-    def _on_processing_complete(self, request_id: int, image: Image.Image) -> None:
-        """Handle full-resolution processing complete from worker.
-
-        This is the single point where a full-resolution buffer is produced,
-        and it is used only to commit the edit to history (and thus to
-        ``ImageModel.current_image``, which undo/redo rely on) -- it is
-        deliberately never pushed to ``ImageView``. Converting a full-size
-        image to a ``QPixmap`` on the UI thread is itself slow enough to feel
-        laggy on large images, and the on-screen preview from the proxy path
-        already matches it visually, so there is nothing to gain from
-        displaying it and real responsiveness to lose.
-
-        Args:
-            request_id: The request ID
-            image: Processed full-resolution image
-        """
-        if not self.has_image():
+    def _present_pending_preview(self) -> None:
+        """Present the latest pending preview frame (if any)."""
+        start = perf_counter()
+        if self._pending_preview is None:
             return
-
-        has_changes = (
-            any(v != 0 for v in self._exposure_params.values()) or
-            any(v != 0 for v in self._tonal_params.values()) or
-            any(v != 0 for v in self._color_params.values())
+        request_id, frame = self._pending_preview
+        self._pending_preview = None
+        self._latest_presented_preview_id = request_id
+        if frame.linear_image is not None:
+            self._image_model.current_image = frame.linear_image
+        self._image_view.set_display_frame(frame, preserve_view_scale=True)
+        logger.info(
+            "PERF controller.present_preview request=%s shape=%s total_ms=%.2f",
+            request_id,
+            frame.shape,
+            _elapsed_ms(start),
         )
 
-        if has_changes:
-            command = CombinedAdjustmentCommand(
-                self._image_model,
-                exposure_params=self._exposure_params.copy(),
-                tonal_params=self._tonal_params.copy(),
-                color_params=self._color_params.copy(),
-                new_image=image
-            )
-            self._history_service.execute_command(command)
-        else:
-            self._image_model.current_image = image
+    def _on_processing_complete(self, request_id: int, image) -> None:
+        """Handle full-resolution processing complete from worker."""
+        final_worker = self._final_processing_worker or self._processing_worker
+        if final_worker is not None and \
+           not final_worker.is_latest_request(request_id):
+            return
+        if request_id != self._pending_final_request_id:
+            return
+
+        # Final frame should supersede queued previews immediately.
+        self._pending_preview = None
+        self._preview_present_timer.stop()
+        self._image_model.current_image = image
+
+        self._commit_rendered_adjustment(image)
 
     def _on_processing_error(self, request_id: int, error: str) -> None:
         """Handle processing error from worker.
@@ -499,38 +883,106 @@ class ImageController(QObject):
             request_id: The request ID
             error: Error message
         """
-        # Log error but don't show dialog for transient errors
-        print(f"Processing error (request {request_id}): {error}")
+        # Log error but don't show dialog for transient errors.
+        logger.error("Processing error (request %s): %s", request_id, error)
 
     def on_slider_released(self) -> None:
         """Handle slider release - trigger full-resolution processing.
-
+        
         Call this when the user releases a slider to get the final
         high-quality result.
         """
+        start = perf_counter()
         if not self.has_image():
             return
-
+        
         if self._use_threading and self._processing_worker is not None:
-            # Flush any pending debounced calls
+            # Cancel any pending throttled/debounced preview events so release
+            # goes straight to final processing.
             if self._debouncer is not None:
-                self._debouncer.flush()
+                self._debouncer.cancel()
 
-            # Request full-resolution processing. The commit to history
-            # happens later, in _on_processing_complete, once that result is
-            # actually ready -- committing here too would recompute the same
-            # full-resolution adjustment a second time, synchronously, on
-            # this (UI) thread, which is what made releasing a slider feel
-            # slow regardless of the background worker's own speed.
-            self._processing_worker.submit_final_request(
+            # Show a better quality proxy immediately; the full-res render is
+            # delayed and uses a separate worker so it cannot block previews.
+            self._latest_request_id = self._processing_worker.submit_preview_request(
                 exposure_params=self._exposure_params,
                 tonal_params=self._tonal_params,
-                color_params=self._color_params
+                color_params=self._color_params,
+                interactive_preview=False,
             )
-        else:
-            # No background worker available: commit synchronously, since
-            # there is no async completion callback to do it for us.
-            self.commit_adjustments()
+
+            # Delay full-resolution processing. If the user grabs
+            # the slider again, the next adjustment cancels this timer before
+            # an expensive full render can occupy the worker.
+            self._final_render_timer.start()
+            logger.info(
+                "PERF controller.slider_released quality_request=%s "
+                "full_idle_delay_ms=%s schedule_ms=%.2f",
+                self._latest_request_id,
+                self._final_render_timer.interval(),
+                _elapsed_ms(start),
+            )
+            return
+        
+        # Synchronous fallback for tests/non-threaded callers only.
+        self.commit_adjustments()
+
+    def _submit_delayed_final_render(self) -> None:
+        """Submit full-resolution render after the user has stayed idle."""
+        start = perf_counter()
+        final_worker = self._final_processing_worker or self._processing_worker
+        if not self.has_image() or final_worker is None:
+            return
+
+        has_changes = (
+            any(v != 0 for v in self._exposure_params.values()) or
+            any(v != 0 for v in self._tonal_params.values()) or
+            any(v != 0 for v in self._color_params.values())
+        )
+        if not has_changes:
+            self._pending_history_previous_image = None
+            return
+
+        self._pending_final_request_id = final_worker.submit_final_request(
+            exposure_params=self._exposure_params,
+            tonal_params=self._tonal_params,
+            color_params=self._color_params,
+        )
+        logger.info(
+            "PERF controller.submit_full request=%s schedule_ms=%.2f",
+            self._pending_final_request_id,
+            _elapsed_ms(start),
+        )
+
+    def _commit_rendered_adjustment(self, rendered_image) -> None:
+        """Add a completed worker render to history without reprocessing."""
+        start = perf_counter()
+        previous = self._pending_history_previous_image
+        self._pending_history_previous_image = None
+        self._pending_final_request_id = -1
+
+        if previous is None:
+            return
+
+        has_changes = (
+            any(v != 0 for v in self._exposure_params.values()) or
+            any(v != 0 for v in self._tonal_params.values()) or
+            any(v != 0 for v in self._color_params.values())
+        )
+        if not has_changes:
+            return
+
+        command = ImageStateChangeCommand(
+            self._image_model,
+            previous_image=previous,
+            new_image=rendered_image,
+        )
+        self._history_service.execute_command(command)
+        logger.info(
+            "PERF controller.commit_rendered shape=%s total_ms=%.2f",
+            rendered_image.shape,
+            _elapsed_ms(start),
+        )
 
     def commit_adjustments(self) -> None:
         """Commit current adjustments to history.
@@ -555,3 +1007,19 @@ class ImageController(QObject):
                 color_params=self._color_params.copy()
             )
             self._history_service.execute_command(command)
+
+    def _normalize_adjustment_state(
+        self,
+        adjustments: Optional[Dict[str, float]],
+    ) -> Dict[str, float]:
+        """Return a complete adjustment-state payload with defaulted values."""
+        normalized = self._ADJUSTMENT_DEFAULTS.copy()
+        if not adjustments:
+            return normalized
+        for key, default in normalized.items():
+            value = adjustments.get(key, default)
+            try:
+                normalized[key] = float(value)
+            except (TypeError, ValueError):
+                normalized[key] = default
+        return normalized
