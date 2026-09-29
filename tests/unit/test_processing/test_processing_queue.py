@@ -60,9 +60,27 @@ class TestProcessingQueue:
         request = queue.create_request(
             exposure_params={'exposure': 1.0}
         )
-        
+
         assert request.request_id == 0
         assert request.exposure_params == {'exposure': 1.0}
+
+    def test_create_request_threads_curve_params(self):
+        """Curve params must thread through create_request like the other
+        adjustment categories."""
+        queue = ProcessingQueue()
+        request = queue.create_request(
+            curve_params={'points': ((0.0, 0.0), (0.5, 0.7), (1.0, 1.0))}
+        )
+
+        assert request.curve_params == {
+            'points': ((0.0, 0.0), (0.5, 0.7), (1.0, 1.0))
+        }
+
+    def test_create_request_defaults_curve_params_to_empty_dict(self):
+        queue = ProcessingQueue()
+        request = queue.create_request()
+
+        assert request.curve_params == {}
 
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""

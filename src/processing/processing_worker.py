@@ -9,7 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import logging
 from time import perf_counter
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from PyQt6.QtCore import QMutex, QObject, QThread, QWaitCondition, pyqtSignal
 
@@ -17,6 +17,7 @@ from src.processing.display_frame import DisplayFrame
 from src.processing.processing_queue import ProcessingQueue, ProcessingRequest
 from src.processing.proxy_manager import ProxyManager
 from src.processors.color_processor import ColorProcessor
+from src.processors.curve_processor import CurveProcessor
 from src.processors.exposure_processor import ExposureProcessor
 from src.processors.tonal_processor import TonalProcessor
 from src.utils.color_pipeline import LinearImage
@@ -72,8 +73,9 @@ class ProcessingWorker(QObject):
         # Processors
         self._exposure_processor = ExposureProcessor()
         self._tonal_processor = TonalProcessor()
+        self._curve_processor = CurveProcessor()
         self._color_processor = ColorProcessor()
-        
+
         # Thread control
         self._running = False
         self._mutex = QMutex()
@@ -137,6 +139,7 @@ class ProcessingWorker(QObject):
         exposure_params: Optional[Dict[str, float]] = None,
         tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
+        curve_params: Optional[Dict[str, Any]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -146,6 +149,7 @@ class ProcessingWorker(QObject):
             exposure_params: Exposure adjustment parameters
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
+            curve_params: Tone curve parameters
             use_proxy: Whether to process proxy (fast) or full image
             interactive_preview: Whether to use the lower-cost interactive proxy
 
@@ -156,6 +160,7 @@ class ProcessingWorker(QObject):
             exposure_params=exposure_params,
             tonal_params=tonal_params,
             color_params=color_params,
+            curve_params=curve_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -171,6 +176,7 @@ class ProcessingWorker(QObject):
         exposure_params: Optional[Dict[str, float]] = None,
         tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
+        curve_params: Optional[Dict[str, Any]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -181,6 +187,7 @@ class ProcessingWorker(QObject):
             exposure_params: Exposure adjustment parameters
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
+            curve_params: Tone curve parameters
             interactive_preview: Use smaller interactive proxy for drag updates.
 
         Returns:
@@ -190,6 +197,7 @@ class ProcessingWorker(QObject):
             exposure_params,
             tonal_params,
             color_params,
+            curve_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -198,7 +206,8 @@ class ProcessingWorker(QObject):
         self,
         exposure_params: Optional[Dict[str, float]] = None,
         tonal_params: Optional[Dict[str, float]] = None,
-        color_params: Optional[Dict[str, float]] = None
+        color_params: Optional[Dict[str, float]] = None,
+        curve_params: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -208,12 +217,17 @@ class ProcessingWorker(QObject):
             exposure_params: Exposure adjustment parameters
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
+            curve_params: Tone curve parameters
 
         Returns:
             Request ID
         """
         return self.submit_request(
-            exposure_params, tonal_params, color_params, use_proxy=False
+            exposure_params,
+            tonal_params,
+            color_params,
+            curve_params,
+            use_proxy=False,
         )
     
     def cancel_pending(self) -> None:
@@ -314,7 +328,8 @@ class ProcessingWorker(QObject):
                 source,
                 request.exposure_params,
                 request.tonal_params,
-                request.color_params
+                request.color_params,
+                request.curve_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -382,6 +397,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.exposure_params.items())),
             tuple(sorted(request.tonal_params.items())),
             tuple(sorted(request.color_params.items())),
+            tuple(sorted(request.curve_params.items())),
         )
 
     @staticmethod
@@ -391,6 +407,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.exposure_params.items())),
             tuple(sorted(request.tonal_params.items())),
             tuple(sorted(request.color_params.items())),
+            tuple(sorted(request.curve_params.items())),
         )
 
     def _apply_adjustments(
@@ -399,14 +416,16 @@ class ProcessingWorker(QObject):
         exposure_params: Dict[str, float],
         tonal_params: Dict[str, float],
         color_params: Dict[str, float],
+        curve_params: Optional[Dict[str, Any]] = None,
     ) -> LinearImage:
-        """Apply exposure, tonal, and color adjustments to a ``LinearImage``."""
+        """Apply exposure, tonal, curve, and color adjustments to a ``LinearImage``."""
         total_start = perf_counter()
         copy_start = perf_counter()
         result = image.copy()
         copy_ms = _elapsed_ms(copy_start)
         exposure_ms = 0.0
         tonal_ms = 0.0
+        curve_ms = 0.0
         color_ms = 0.0
 
         if exposure_params and any(v != 0 for v in exposure_params.values()):
@@ -419,6 +438,11 @@ class ProcessingWorker(QObject):
             result = self._tonal_processor.process(result, **tonal_params)
             tonal_ms = _elapsed_ms(tonal_start)
 
+        if curve_params:
+            curve_start = perf_counter()
+            result = self._curve_processor.process(result, **curve_params)
+            curve_ms = _elapsed_ms(curve_start)
+
         if color_params and any(v != 0 for v in color_params.values()):
             color_start = perf_counter()
             result = self._color_processor.process(result, **color_params)
@@ -426,11 +450,12 @@ class ProcessingWorker(QObject):
 
         logger.info(
             "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
-            "tonal_ms=%.2f color_ms=%.2f total_ms=%.2f",
+            "tonal_ms=%.2f curve_ms=%.2f color_ms=%.2f total_ms=%.2f",
             image.shape,
             copy_ms,
             exposure_ms,
             tonal_ms,
+            curve_ms,
             color_ms,
             _elapsed_ms(total_start),
         )

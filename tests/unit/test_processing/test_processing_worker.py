@@ -106,3 +106,63 @@ class TestProcessingWorkerCache:
         assert frame.rgb.dtype == np.uint8
         assert frame.rgb.flags["C_CONTIGUOUS"] is True
         assert frame.linear_image is not None
+
+
+class TestProcessingWorkerCurve:
+    """Tone curve threading through the worker's apply/cache-key paths."""
+
+    def test_curve_params_reach_curve_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        calls = []
+
+        def fake_process(image, **kwargs):
+            calls.append(kwargs)
+            return image
+
+        monkeypatch.setattr(worker._curve_processor, "process", fake_process)
+
+        request = ProcessingRequest(
+            request_id=1,
+            curve_params={"points": ((0.0, 0.0), (0.5, 0.7), (1.0, 1.0))},
+            use_proxy=False,
+        )
+        worker._process_request(request)
+
+        assert calls == [{"points": ((0.0, 0.0), (0.5, 0.7), (1.0, 1.0))}]
+
+    def test_empty_curve_params_skip_curve_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        calls = []
+        monkeypatch.setattr(
+            worker._curve_processor, "process", lambda image, **kw: calls.append(kw)
+        )
+
+        request = ProcessingRequest(request_id=1, use_proxy=False)
+        worker._process_request(request)
+
+        assert calls == []
+
+    def test_different_curve_params_produce_different_cache_keys(self):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        request_a = ProcessingRequest(
+            request_id=1,
+            curve_params={"points": ((0.0, 0.0), (1.0, 1.0))},
+            use_proxy=True,
+        )
+        request_b = ProcessingRequest(
+            request_id=2,
+            curve_params={"points": ((0.0, 0.0), (0.5, 0.7), (1.0, 1.0))},
+            use_proxy=True,
+        )
+        source = worker._proxy_manager.get_proxy(interactive=True)
+
+        key_a = worker._cache_key(request_a, source)
+        key_b = worker._cache_key(request_b, source)
+
+        assert key_a != key_b

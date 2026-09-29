@@ -160,6 +160,7 @@ class TestImageController:
             "blacks": 0.0,
             "saturation": 0.0,
             "vibrance": 0.0,
+            "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
         }
         controller.cleanup()
 
@@ -188,9 +189,73 @@ class TestImageController:
             "blacks": 0.0,
             "saturation": 20.0,
             "vibrance": 8.0,
+            "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
         }
         assert controller.image_model.get_current_image() is not None
         assert controller.can_undo() is False
+        controller.cleanup()
+
+    def test_restore_adjustment_state_applies_tone_curve(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"tone_curve": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]}
+        )
+
+        assert controller.get_adjustment_state()["tone_curve"] == [
+            [0.0, 0.0],
+            [0.5, 0.7],
+            [1.0, 1.0],
+        ]
+        assert controller.image_model.get_current_image() is not None
+        controller.cleanup()
+
+    def test_restore_adjustment_state_tolerates_malformed_curve(
+        self, qapp, sample_image
+    ):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"tone_curve": "not a curve"})
+
+        assert controller.get_adjustment_state()["tone_curve"] == [
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ]
+        controller.cleanup()
+
+    def test_on_curve_changed_reaches_export_image(self, qapp):
+        import numpy as np
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        # A mid-gray image (not the fixed 0/1 curve endpoints) so a moved
+        # midpoint control point actually changes pixel values.
+        mid_gray = np.full((4, 4, 3), 0.5, dtype=np.float32)
+        controller._apply_loaded_image("sample.jpg", mid_gray)
+
+        controller.on_curve_changed([[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]])
+
+        exported = controller.get_export_image()
+        original = controller.image_model.get_original_image()
+        assert not (exported == original).all()
+        controller.cleanup()
+
+    def test_reset_to_original_clears_curve(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_curve_changed([[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]])
+
+        controller.reset_to_original()
+
+        assert controller.get_adjustment_state()["tone_curve"] == [
+            [0.0, 0.0],
+            [1.0, 1.0],
+        ]
         controller.cleanup()
 
     def test_zoom_in(self, qapp, sample_image_path):

@@ -97,3 +97,80 @@ class TestToolsPanelTonalSliders:
             'exposure': 0.0, 'contrast': 0.0, 'brightness': 0.0
         }
         assert panel.get_color_params() == {'saturation': 0.0, 'vibrance': 0.0}
+
+
+class TestToolsPanelToneCurve:
+    """Tests for the Tone Curve section."""
+
+    def test_curve_defaults_to_identity(self, qapp):
+        panel = ToolsPanel()
+        assert panel.get_curve_params() == {'points': [[0.0, 0.0], [1.0, 1.0]]}
+
+    def test_curve_editor_change_updates_params_and_emits(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.curve_changed.connect(received.append)
+
+        panel._curve_editor.set_points([(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)])
+        # set_points() alone (programmatic) must not emit; only a genuine
+        # widget-driven change should.
+        assert received == []
+
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]])
+        assert panel.get_curve_params() == {
+            'points': [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        }
+        assert received[-1] == [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+
+    def test_curve_release_emits_slider_released(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.slider_released.connect(lambda: received.append(True))
+        panel._curve_editor.curve_released.emit()
+        assert received == [True]
+
+    def test_reset_all_resets_curve(self, qapp):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]])
+
+        panel.reset_all()
+
+        assert panel.get_curve_params() == {'points': [[0.0, 0.0], [1.0, 1.0]]}
+
+    def test_set_adjustments_restores_curve_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.curve_changed.connect(received.append)
+
+        panel.set_adjustments(
+            {'tone_curve': [[0.0, 0.0], [0.4, 0.6], [1.0, 1.0]]}, emit_signal=False
+        )
+
+        assert panel.get_curve_params() == {
+            'points': [[0.0, 0.0], [0.4, 0.6], [1.0, 1.0]]
+        }
+        assert received == []
+
+    def test_set_adjustments_with_missing_curve_defaults_to_identity(self, qapp):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]])
+
+        panel.set_adjustments({'exposure': 1.0}, emit_signal=False)
+
+        assert panel.get_curve_params() == {'points': [[0.0, 0.0], [1.0, 1.0]]}
+
+    def test_set_enabled_false_disables_curve_editor(self, qapp):
+        panel = ToolsPanel()
+        panel.set_enabled(False)
+        assert panel._curve_editor.isEnabled() is False
+
+    def test_curve_change_does_not_affect_other_params(self, qapp):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]])
+        assert panel.get_exposure_params() == {
+            'exposure': 0.0, 'contrast': 0.0, 'brightness': 0.0
+        }
+        assert panel.get_tonal_params() == {
+            'highlights': 0.0, 'shadows': 0.0, 'whites': 0.0, 'blacks': 0.0
+        }
+        assert panel.get_color_params() == {'saturation': 0.0, 'vibrance': 0.0}

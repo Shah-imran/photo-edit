@@ -1,6 +1,6 @@
 """Tools panel for image adjustments."""
 
-from typing import Optional, Dict, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -11,18 +11,24 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from src.utils.curve_math import normalize_points
 from src.views.widgets.adjustment_slider import AdjustmentSlider
+from src.views.widgets.curve_editor import CurveEditor
 
 
 class ToolsPanel(QWidget):
     """Panel containing adjustment controls for image editing.
-    
+
     Signals:
-        adjustments_changed: Emitted when any adjustment changes
-        slider_released: Emitted when any slider is released (for final processing)
+        adjustments_changed: Emitted when any (non-curve) adjustment changes
+        curve_changed: Emitted when the tone curve changes (list of [x, y]
+            control points)
+        slider_released: Emitted when any slider or the curve editor is
+            released (for final processing)
     """
-    
+
     adjustments_changed = pyqtSignal(dict)
+    curve_changed = pyqtSignal(list)
     slider_released = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -45,8 +51,9 @@ class ToolsPanel(QWidget):
             'saturation': 0.0,
             'vibrance': 0.0
         }
+        self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
         self._suppress_adjustment_signal = False
-        
+
         self._setup_ui()
         self._connect_signals()
 
@@ -113,7 +120,15 @@ class ToolsPanel(QWidget):
         light_content_layout.addWidget(self._blacks_slider)
 
         content_layout.addWidget(light_section)
-        
+
+        # Tone Curve section
+        curve_section, curve_content_layout = self._create_section("Tone Curve")
+
+        self._curve_editor = CurveEditor()
+        curve_content_layout.addWidget(self._curve_editor)
+
+        content_layout.addWidget(curve_section)
+
         # Color section
         color_section, color_content_layout = self._create_section("Color")
         
@@ -231,12 +246,26 @@ class ToolsPanel(QWidget):
         self._blacks_slider.slider_released.connect(self._on_slider_released)
         self._saturation_slider.slider_released.connect(self._on_slider_released)
         self._vibrance_slider.slider_released.connect(self._on_slider_released)
-        
+
+        self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
+        self._curve_editor.curve_released.connect(self._on_curve_editor_released)
+
         self._reset_button.clicked.connect(self.reset_all)
     
     def _on_slider_released(self, value: float):
         """Handle any slider being released."""
         self.slider_released.emit()
+
+    def _on_curve_editor_changed(self, points: list):
+        """Handle the tone curve changing (continuous, during drag)."""
+        self._curve_points = [tuple(p) for p in points]
+        if not self._suppress_adjustment_signal:
+            self.curve_changed.emit([list(p) for p in self._curve_points])
+
+    def _on_curve_editor_released(self):
+        """Handle the tone curve gesture being committed."""
+        if not self._suppress_adjustment_signal:
+            self.slider_released.emit()
 
     def _on_adjustment_changed(self, name: str, value: float):
         """Handle adjustment value change.
@@ -284,7 +313,7 @@ class ToolsPanel(QWidget):
 
     def get_color_params(self) -> Dict[str, float]:
         """Get color-related adjustment parameters.
-        
+
         Returns:
             Dictionary of color parameters
         """
@@ -293,11 +322,24 @@ class ToolsPanel(QWidget):
             'vibrance': self._adjustments['vibrance']
         }
 
+    def get_curve_params(self) -> Dict[str, Any]:
+        """Get the tone curve parameters.
+
+        Returns:
+            Dictionary with a single ``"points"`` key (list of ``[x, y]``
+            control points).
+        """
+        return {'points': [list(p) for p in self._curve_points]}
+
+    def update_curve_histogram(self, counts: Optional[Sequence[int]]) -> None:
+        """Set the histogram backdrop drawn behind the tone curve."""
+        self._curve_editor.set_histogram(counts)
+
     def reset_all(self):
         """Reset all adjustments to default values."""
         self.set_adjustments({}, emit_signal=True)
 
-    def set_adjustments(self, adjustments: Dict[str, float], emit_signal: bool = False):
+    def set_adjustments(self, adjustments: Dict[str, Any], emit_signal: bool = False):
         """Apply a complete adjustment-state payload to the slider UI."""
         merged = {
             'exposure': float(adjustments.get('exposure', 0.0)),
@@ -310,6 +352,7 @@ class ToolsPanel(QWidget):
             'saturation': float(adjustments.get('saturation', 0.0)),
             'vibrance': float(adjustments.get('vibrance', 0.0)),
         }
+        curve_points = normalize_points(adjustments.get('tone_curve'))
         self._suppress_adjustment_signal = True
         try:
             self._exposure_slider.set_value(merged['exposure'])
@@ -321,15 +364,18 @@ class ToolsPanel(QWidget):
             self._blacks_slider.set_value(merged['blacks'])
             self._saturation_slider.set_value(merged['saturation'])
             self._vibrance_slider.set_value(merged['vibrance'])
+            self._curve_editor.set_points(curve_points)
         finally:
             self._suppress_adjustment_signal = False
         self._adjustments = merged
+        self._curve_points = list(curve_points)
         if emit_signal:
             self.adjustments_changed.emit(self._adjustments.copy())
+            self.curve_changed.emit([list(p) for p in self._curve_points])
 
     def set_enabled(self, enabled: bool):
         """Enable or disable all controls.
-        
+
         Args:
             enabled: True to enable, False to disable
         """
@@ -342,4 +388,5 @@ class ToolsPanel(QWidget):
         self._blacks_slider.setEnabled(enabled)
         self._saturation_slider.setEnabled(enabled)
         self._vibrance_slider.setEnabled(enabled)
+        self._curve_editor.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)

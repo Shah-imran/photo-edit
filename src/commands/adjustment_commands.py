@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 from src.commands.base_command import BaseCommand
 from src.models.image_model import ImageModel
 from src.processors.color_processor import ColorProcessor
+from src.processors.curve_processor import CurveProcessor
 from src.processors.exposure_processor import ExposureProcessor
 from src.processors.tonal_processor import TonalProcessor
 from src.utils.color_pipeline import LinearImage
@@ -95,7 +96,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         image_model: ImageModel,
         exposure_params: Dict[str, float] = None,
         tonal_params: Dict[str, float] = None,
-        color_params: Dict[str, float] = None
+        color_params: Dict[str, float] = None,
+        curve_params: Dict[str, Any] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -104,17 +106,20 @@ class CombinedAdjustmentCommand(BaseCommand):
             exposure_params: Exposure adjustment parameters
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
+            curve_params: Tone curve parameters (``{"points": [...]}``)
         """
         super().__init__()
         self._image_model = image_model
         self._exposure_params = exposure_params or {}
         self._tonal_params = tonal_params or {}
         self._color_params = color_params or {}
+        self._curve_params = curve_params or {}
         self._previous_image = image_model.get_current_image()
         self._new_image: Optional[LinearImage] = None
 
         self._exposure_processor = ExposureProcessor()
         self._tonal_processor = TonalProcessor()
+        self._curve_processor = CurveProcessor()
         self._color_processor = ColorProcessor()
 
     def execute(self) -> None:
@@ -132,6 +137,9 @@ class CombinedAdjustmentCommand(BaseCommand):
 
         if self._tonal_params:
             result = self._tonal_processor.process(result, **self._tonal_params)
+
+        if self._curve_params:
+            result = self._curve_processor.process(result, **self._curve_params)
 
         if self._color_params:
             result = self._color_processor.process(result, **self._color_params)

@@ -136,11 +136,41 @@ class TestCombinedAdjustmentCommand:
         """Test with only color adjustments."""
         model = ImageModel()
         model.set_original_image(sample_linear_image)
-        
+
         cmd = CombinedAdjustmentCommand(
             model,
             color_params={'saturation': 50.0}
         )
         cmd.execute()
-        
+
         assert cmd.is_executed() is True
+
+    def test_curve_only(self, sample_linear_image):
+        """Test with only a tone curve adjustment."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+
+        cmd = CombinedAdjustmentCommand(
+            model,
+            curve_params={'points': ((0.0, 0.0), (0.5, 0.7), (1.0, 1.0))},
+        )
+        cmd.execute()
+
+        assert cmd.is_executed() is True
+        assert model.is_modified() is True
+
+    def test_undo_curve_only(self, sample_linear_image):
+        """Test undoing a curve-only adjustment restores the previous image."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+        previous = model.get_current_image()
+
+        cmd = CombinedAdjustmentCommand(
+            model,
+            curve_params={'points': ((0.0, 0.0), (0.5, 0.7), (1.0, 1.0))},
+        )
+        cmd.execute()
+        cmd.undo()
+
+        assert cmd.is_executed() is False
+        assert model.get_current_image() is previous

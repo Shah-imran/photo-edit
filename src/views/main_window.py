@@ -34,6 +34,7 @@ from src.services.library_image_preview_cache_service import (
 )
 from src.services.library_thumbnail_cache_service import LibraryThumbnailCacheService
 from src.services.settings_service import SettingsService
+from src.utils.curve_math import compute_luminance_histogram
 from src.utils.image_extensions import open_image_file_dialog_filter
 
 
@@ -262,6 +263,7 @@ class MainWindow(QMainWindow):
         self._image_view.image_loaded.connect(self._on_image_loaded)
         self._image_view.zoom_changed.connect(self._on_zoom_changed)
         self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
+        self._tools_panel.curve_changed.connect(self._on_curve_changed)
         self._tools_panel.slider_released.connect(self._on_slider_released)
         self._library_view.image_selected.connect(self._on_library_image_selected)
         self._library_view.import_requested.connect(self._import_images)
@@ -320,10 +322,34 @@ class MainWindow(QMainWindow):
         self._image_controller.on_adjustments_changed(adjustments)
         self._adjustment_persist_timer.start()
 
+    def _on_curve_changed(self, points: list):
+        """Handle tone curve changes from the tools panel."""
+        self._image_controller.on_curve_changed(points)
+        self._adjustment_persist_timer.start()
+
     def _on_slider_released(self):
         """Handle slider released - trigger final processing."""
         self._image_controller.on_slider_released()
         self._adjustment_persist_timer.start()
+        self._refresh_curve_histogram()
+
+    def _refresh_curve_histogram(self) -> None:
+        """Refresh the tone curve's histogram backdrop from the current image.
+
+        Uses whatever ``ImageController.get_current_image()`` currently
+        holds, which may be an interactive-tier preview frame rather than
+        the final full-resolution render immediately after a release -- an
+        intentional simplification (see
+        docs/planning/implementation-notes/2026-09-29-tone-curve.md section
+        5) to avoid a full-image histogram pass on every settle event.
+        """
+        if not self._image_controller.has_image():
+            return
+        image = self._image_controller.get_current_image()
+        if image is None:
+            return
+        histogram = compute_luminance_histogram(image)
+        self._tools_panel.update_curve_histogram(histogram)
 
     def _on_library_image_selected(self, file_path: str):
         """Handle image selection from library."""
@@ -417,6 +443,7 @@ class MainWindow(QMainWindow):
         self._image_view.set_loading(False)
         self._settings_service.set_current_image_path(file_path)
         self._settings_service.sync()
+        self._refresh_curve_histogram()
 
     def _on_create_library_requested(self, default_name: str) -> None:
         self._persist_current_adjustments()
@@ -639,18 +666,30 @@ class MainWindow(QMainWindow):
 
     def _adjustment_values_from_payload(
         self, payload: Optional[dict]
-    ) -> dict[str, float]:
+    ) -> dict:
         if not isinstance(payload, dict):
             return {}
         values = payload.get("values", {})
         if not isinstance(values, dict):
             return {}
+        # NOTE: this whitelist previously omitted highlights/shadows/whites/
+        # blacks (never updated when that slice landed), so those sliders
+        # silently reset to 0 on every library reload even though they were
+        # correctly persisted to disk. Fixed here alongside adding
+        # tone_curve -- see
+        # docs/planning/implementation-notes/2026-09-29-tone-curve.md
+        # section 2.
         return {
             "exposure": float(values.get("exposure", 0.0)),
             "contrast": float(values.get("contrast", 0.0)),
             "brightness": float(values.get("brightness", 0.0)),
+            "highlights": float(values.get("highlights", 0.0)),
+            "shadows": float(values.get("shadows", 0.0)),
+            "whites": float(values.get("whites", 0.0)),
+            "blacks": float(values.get("blacks", 0.0)),
             "saturation": float(values.get("saturation", 0.0)),
             "vibrance": float(values.get("vibrance", 0.0)),
+            "tone_curve": values.get("tone_curve"),
         }
 
     def _zoom_factor_from_payload(self, payload: Optional[dict]) -> Optional[float]:

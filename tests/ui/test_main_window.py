@@ -657,3 +657,85 @@ class TestMainWindowSettingsPersistence:
         )
         assert reopened._tools_panel.get_adjustments()["contrast"] == 25.0
         reopened.close()
+
+
+class TestAdjustmentPayloadRoundTrip:
+    """Regression coverage for _adjustment_values_from_payload.
+
+    Highlights/Shadows/Whites/Blacks were previously dropped by this
+    function's whitelist (never updated when that slider slice landed),
+    even though they were correctly persisted to disk -- see
+    docs/planning/implementation-notes/2026-09-29-tone-curve.md section 2.
+    """
+
+    def test_payload_restores_tonal_sliders_and_tone_curve(self, main_window):
+        payload = {
+            "version": 1,
+            "values": {
+                "exposure": 1.0,
+                "contrast": 10.0,
+                "brightness": 5.0,
+                "highlights": 40.0,
+                "shadows": -30.0,
+                "whites": 20.0,
+                "blacks": -15.0,
+                "saturation": 20.0,
+                "vibrance": 8.0,
+                "tone_curve": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]],
+            },
+        }
+
+        restored = main_window._adjustment_values_from_payload(payload)
+
+        assert restored["highlights"] == 40.0
+        assert restored["shadows"] == -30.0
+        assert restored["whites"] == 20.0
+        assert restored["blacks"] == -15.0
+        assert restored["tone_curve"] == [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+
+    def test_payload_missing_new_keys_defaults_safely(self, main_window):
+        """An older catalog entry saved before this slice has no tone_curve
+        key at all; restoring it must not raise."""
+        payload = {"version": 1, "values": {"exposure": 1.0}}
+
+        restored = main_window._adjustment_values_from_payload(payload)
+
+        assert restored["highlights"] == 0.0
+        assert restored["tone_curve"] is None
+
+    def test_switching_images_restores_tonal_sliders_and_curve(
+        self, main_window, sample_image_file, tmp_path, qtbot
+    ):
+        other = tmp_path / "other.jpg"
+        Image.new("RGB", (80, 60), color="green").save(other)
+
+        main_window._library_controller.import_images([sample_image_file, str(other)])
+        library = main_window._library_view
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(sample_image_file)
+        main_window._tools_panel._highlights_slider.set_value(35.0)
+        main_window._tools_panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        )
+        qtbot.wait(500)
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(str(other))
+        qtbot.wait(200)
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(sample_image_file)
+        qtbot.waitUntil(
+            lambda: main_window._tools_panel.get_adjustments()["highlights"] == 35.0,
+            timeout=3000,
+        )
+        assert main_window._tools_panel.get_curve_params() == {
+            "points": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        }

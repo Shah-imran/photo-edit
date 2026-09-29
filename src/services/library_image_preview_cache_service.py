@@ -55,12 +55,12 @@ class LibraryImagePreviewCacheService:
         path: str,
         last_seen_mtime_ns: Optional[int],
         last_seen_size: Optional[int],
-        adjustment_values: dict[str, float],
+        adjustment_values: dict,
     ) -> Optional[str]:
         if last_seen_mtime_ns is None or last_seen_size is None:
             return None
         signature = ",".join(
-            f"{key}={float(adjustment_values.get(key, 0.0)):.4f}"
+            f"{key}={self._format_adjustment_value(adjustment_values.get(key))}"
             for key in sorted(adjustment_values.keys())
         )
         digest = hashlib.sha1(
@@ -69,6 +69,24 @@ class LibraryImagePreviewCacheService:
             )
         ).hexdigest()
         return digest
+
+    @staticmethod
+    def _format_adjustment_value(value) -> str:
+        """Format one adjustment value for the cache-key signature.
+
+        Most values are plain floats (formatted exactly as before, so
+        existing cache keys for images with no curve edit are unchanged).
+        The tone curve's value is a list of ``[x, y]`` points, which
+        ``float(...)`` cannot handle -- formatted via ``repr`` instead.
+        """
+        if isinstance(value, (list, tuple)):
+            return repr(
+                [tuple(round(float(c), 4) for c in point) for point in value]
+            )
+        try:
+            return f"{float(value):.4f}"
+        except (TypeError, ValueError):
+            return repr(value)
 
     def path_for_key(self, cache_key: str) -> Path:
         prefix = cache_key[:2]

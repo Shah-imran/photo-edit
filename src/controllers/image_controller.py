@@ -2,7 +2,7 @@
 
 import logging
 from time import perf_counter
-from typing import Optional, Dict
+from typing import Any, Dict, List, Optional
 from PyQt6.QtWidgets import QFileDialog, QWidget, QMessageBox
 from PyQt6.QtCore import QObject, QThread, Qt, QTimer, pyqtSignal
 
@@ -14,12 +14,14 @@ from src.views.image_view import ImageView
 from src.processors.exposure_processor import ExposureProcessor
 from src.processors.tonal_processor import TonalProcessor
 from src.processors.color_processor import ColorProcessor
+from src.processors.curve_processor import CurveProcessor
 from src.commands.adjustment_commands import (
     CombinedAdjustmentCommand,
     ImageStateChangeCommand,
 )
 from src.processing.display_frame import DisplayFrame
 from src.processing.processing_worker import ProcessingWorker
+from src.utils.curve_math import DEFAULT_CURVE_POINTS, is_identity_curve, normalize_points
 from src.utils.debouncer import ThrottledDebouncer
 from src.utils.image_extensions import open_image_file_dialog_filter
 logger = logging.getLogger(__name__)
@@ -88,6 +90,11 @@ class ImageController(QObject):
         "saturation": 0.0,
         "vibrance": 0.0,
     }
+    # Tone curve control points are not floats, so they are kept out of
+    # _ADJUSTMENT_DEFAULTS (which _normalize_adjustment_state float-casts
+    # every value of) and threaded as a separate, parallel parameter --
+    # see docs/planning/implementation-notes/2026-09-29-tone-curve.md.
+    _CURVE_DEFAULT_POINTS = DEFAULT_CURVE_POINTS
 
     def __init__(
         self,
@@ -122,12 +129,14 @@ class ImageController(QObject):
         # Processors (for synchronous fallback / export)
         self._exposure_processor = ExposureProcessor()
         self._tonal_processor = TonalProcessor()
+        self._curve_processor = CurveProcessor()
         self._color_processor = ColorProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
         self._tonal_params: Dict[str, float] = {}
         self._color_params: Dict[str, float] = {}
+        self._curve_params: Dict[str, Any] = {}
         
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
@@ -329,6 +338,7 @@ class ImageController(QObject):
         self._exposure_params = {}
         self._tonal_params = {}
         self._color_params = {}
+        self._curve_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -424,6 +434,8 @@ class ImageController(QObject):
             result = self._exposure_processor.process(result, **self._exposure_params)
         if self._tonal_params:
             result = self._tonal_processor.process(result, **self._tonal_params)
+        if self._curve_params:
+            result = self._curve_processor.process(result, **self._curve_params)
         if self._color_params:
             result = self._color_processor.process(result, **self._color_params)
         return result
@@ -439,17 +451,27 @@ class ImageController(QObject):
                 preserve_view_scale=True,
             )
 
-    def get_adjustment_state(self) -> Dict[str, float]:
-        """Return the current normalized adjustment payload."""
-        state = self._ADJUSTMENT_DEFAULTS.copy()
+    def get_adjustment_state(self) -> Dict[str, Any]:
+        """Return the current normalized adjustment payload.
+
+        Includes one non-float key, ``"tone_curve"`` (a JSON-plain list of
+        ``[x, y]`` control points), alongside the nine float keys -- see
+        docs/planning/implementation-notes/2026-09-29-tone-curve.md section 4.
+        """
+        state: Dict[str, Any] = self._ADJUSTMENT_DEFAULTS.copy()
         state.update(self._exposure_params)
         state.update(self._tonal_params)
         state.update(self._color_params)
+        curve_points = self._curve_params.get("points", self._CURVE_DEFAULT_POINTS)
+        state["tone_curve"] = [list(point) for point in curve_points]
         return state
 
-    def restore_adjustment_state(self, adjustments: Optional[Dict[str, float]]) -> None:
+    def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
         """Apply a saved adjustment payload without creating undo history."""
         normalized = self._normalize_adjustment_state(adjustments)
+        curve_points = normalize_points(
+            adjustments.get("tone_curve") if adjustments else None
+        )
         self._history_service.clear_history()
         self._pending_history_previous_image = None
         self._pending_final_request_id = -1
@@ -480,11 +502,17 @@ class ImageController(QObject):
             "saturation": normalized["saturation"],
             "vibrance": normalized["vibrance"],
         }
+        self._curve_params = (
+            {"points": curve_points} if not is_identity_curve(curve_points) else {}
+        )
 
         if not self.has_image():
             return
 
-        has_changes = any(value != 0.0 for value in normalized.values())
+        has_changes = (
+            any(value != 0.0 for value in normalized.values())
+            or not is_identity_curve(curve_points)
+        )
         if not has_changes:
             self._image_model.reset_to_original()
             self.refresh_view()
@@ -497,6 +525,8 @@ class ImageController(QObject):
         result = original.copy()
         result = self._exposure_processor.process(result, **self._exposure_params)
         result = self._tonal_processor.process(result, **self._tonal_params)
+        if self._curve_params:
+            result = self._curve_processor.process(result, **self._curve_params)
         result = self._color_processor.process(result, **self._color_params)
         self._image_model.current_image = result
         self.refresh_view()
@@ -508,6 +538,7 @@ class ImageController(QObject):
         self._exposure_params = {}
         self._tonal_params = {}
         self._color_params = {}
+        self._curve_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -588,6 +619,7 @@ class ImageController(QObject):
         exposure_params: Dict[str, float] = None,
         tonal_params: Dict[str, float] = None,
         color_params: Dict[str, float] = None,
+        curve_params: Dict[str, Any] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -596,6 +628,7 @@ class ImageController(QObject):
             exposure_params: Exposure adjustment parameters
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
+            curve_params: Tone curve parameters (``{"points": [...]}`)
             add_to_history: If True, add command to history for undo
         """
         if not self.has_image():
@@ -619,6 +652,8 @@ class ImageController(QObject):
             self._tonal_params = tonal_params
         if color_params:
             self._color_params = color_params
+        if curve_params is not None:
+            self._curve_params = curve_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -628,6 +663,7 @@ class ImageController(QObject):
                         exposure_params=self._exposure_params,
                         tonal_params=self._tonal_params,
                         color_params=self._color_params,
+                        curve_params=self._curve_params,
                     )
                 )
             else:
@@ -637,6 +673,7 @@ class ImageController(QObject):
                         exposure_params=self._exposure_params,
                         tonal_params=self._tonal_params,
                         color_params=self._color_params,
+                        curve_params=self._curve_params,
                         interactive_preview=True,
                     )
                 )
@@ -648,7 +685,8 @@ class ImageController(QObject):
                 self._image_model,
                 exposure_params=self._exposure_params,
                 tonal_params=self._tonal_params,
-                color_params=self._color_params
+                color_params=self._color_params,
+                curve_params=self._curve_params,
             )
             self._history_service.execute_command(command)
         else:
@@ -666,6 +704,10 @@ class ImageController(QObject):
             # Apply tonal adjustments
             if self._tonal_params:
                 result = self._tonal_processor.process(result, **self._tonal_params)
+
+            # Apply tone curve
+            if self._curve_params:
+                result = self._curve_processor.process(result, **self._curve_params)
 
             # Apply color adjustments
             if self._color_params:
@@ -731,17 +773,26 @@ class ImageController(QObject):
         self._color_params = color_params
 
         if self._use_threading and self._debouncer is not None:
-            # Use throttled + debounced async processing
+            # Use throttled + debounced async processing. The curve is not
+            # part of this signal's payload, so re-send the currently
+            # stored curve params -- ThrottledDebouncer.call() replaces the
+            # whole pending dict, so omitting it here would revert an
+            # in-progress curve edit on the next slider move.
             self._debouncer.call({
                 'exposure': exposure_params,
                 'tonal': tonal_params,
-                'color': color_params
+                'color': color_params,
+                'curve': self._curve_params,
             })
             mode = "debounced-threaded"
         else:
             # Fallback to synchronous processing
             self.apply_adjustments(
-                exposure_params, tonal_params, color_params, add_to_history=False
+                exposure_params,
+                tonal_params,
+                color_params,
+                self._curve_params,
+                add_to_history=False,
             )
             mode = "sync-fallback"
 
@@ -759,6 +810,51 @@ class ImageController(QObject):
             color_params.get("vibrance"),
         )
 
+    def on_curve_changed(self, points: List[Any]) -> None:
+        """Handle tone curve changes from the tools panel.
+
+        Mirrors :meth:`on_adjustments_changed` but for the tone curve,
+        which travels on its own signal/parameter (see
+        docs/planning/implementation-notes/2026-09-29-tone-curve.md).
+        """
+        if not self.has_image():
+            return
+
+        if self._pending_history_previous_image is None:
+            current = self._image_model.get_current_image()
+            if current is not None:
+                self._pending_history_previous_image = current
+
+        self._final_render_timer.stop()
+        self._pending_final_request_id = -1
+        if self._final_processing_worker is not None and hasattr(
+            self._final_processing_worker, "cancel_pending"
+        ):
+            self._final_processing_worker.cancel_pending()
+
+        normalized_points = normalize_points(points)
+        self._curve_params = (
+            {"points": normalized_points}
+            if not is_identity_curve(normalized_points)
+            else {}
+        )
+
+        if self._use_threading and self._debouncer is not None:
+            self._debouncer.call({
+                'exposure': self._exposure_params,
+                'tonal': self._tonal_params,
+                'color': self._color_params,
+                'curve': self._curve_params,
+            })
+        else:
+            self.apply_adjustments(
+                self._exposure_params,
+                self._tonal_params,
+                self._color_params,
+                self._curve_params,
+                add_to_history=False,
+            )
+
     def _on_throttled_adjustment(self, params: dict) -> None:
         """Handle throttled live preview updates during slider drags."""
         start = perf_counter()
@@ -770,10 +866,12 @@ class ImageController(QObject):
         exposure_params = params.get('exposure', {})
         tonal_params = params.get('tonal', {})
         color_params = params.get('color', {})
+        curve_params = params.get('curve', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
             color_params=color_params,
+            curve_params=curve_params,
             interactive_preview=True,
         )
         logger.info(
@@ -785,7 +883,7 @@ class ImageController(QObject):
 
     def _on_debounced_adjustment(self, params: dict) -> None:
         """Handle debounced adjustment (called after slider pause).
-        
+
         Args:
             params: Dictionary with 'exposure' and 'color' params
         """
@@ -794,10 +892,11 @@ class ImageController(QObject):
             return
         self._final_render_timer.stop()
         self._pending_final_request_id = -1
-        
+
         exposure_params = params.get('exposure', {})
         tonal_params = params.get('tonal', {})
         color_params = params.get('color', {})
+        curve_params = params.get('curve', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -805,6 +904,7 @@ class ImageController(QObject):
             exposure_params=exposure_params,
             tonal_params=tonal_params,
             color_params=color_params,
+            curve_params=curve_params,
             interactive_preview=True,
         )
         logger.info(
@@ -908,6 +1008,7 @@ class ImageController(QObject):
                 exposure_params=self._exposure_params,
                 tonal_params=self._tonal_params,
                 color_params=self._color_params,
+                curve_params=self._curve_params,
                 interactive_preview=False,
             )
 
@@ -927,6 +1028,15 @@ class ImageController(QObject):
         # Synchronous fallback for tests/non-threaded callers only.
         self.commit_adjustments()
 
+    def _has_pending_adjustment_changes(self) -> bool:
+        """True if any current adjustment (including the tone curve) is non-default."""
+        return (
+            any(v != 0 for v in self._exposure_params.values()) or
+            any(v != 0 for v in self._tonal_params.values()) or
+            any(v != 0 for v in self._color_params.values()) or
+            not is_identity_curve(self._curve_params.get("points"))
+        )
+
     def _submit_delayed_final_render(self) -> None:
         """Submit full-resolution render after the user has stayed idle."""
         start = perf_counter()
@@ -934,12 +1044,7 @@ class ImageController(QObject):
         if not self.has_image() or final_worker is None:
             return
 
-        has_changes = (
-            any(v != 0 for v in self._exposure_params.values()) or
-            any(v != 0 for v in self._tonal_params.values()) or
-            any(v != 0 for v in self._color_params.values())
-        )
-        if not has_changes:
+        if not self._has_pending_adjustment_changes():
             self._pending_history_previous_image = None
             return
 
@@ -947,6 +1052,7 @@ class ImageController(QObject):
             exposure_params=self._exposure_params,
             tonal_params=self._tonal_params,
             color_params=self._color_params,
+            curve_params=self._curve_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -964,12 +1070,7 @@ class ImageController(QObject):
         if previous is None:
             return
 
-        has_changes = (
-            any(v != 0 for v in self._exposure_params.values()) or
-            any(v != 0 for v in self._tonal_params.values()) or
-            any(v != 0 for v in self._color_params.values())
-        )
-        if not has_changes:
+        if not self._has_pending_adjustment_changes():
             return
 
         command = ImageStateChangeCommand(
@@ -991,20 +1092,15 @@ class ImageController(QObject):
         """
         if not self.has_image():
             return
-        
-        # Only commit if there are actual changes
-        has_changes = (
-            any(v != 0 for v in self._exposure_params.values()) or
-            any(v != 0 for v in self._tonal_params.values()) or
-            any(v != 0 for v in self._color_params.values())
-        )
 
-        if has_changes:
+        # Only commit if there are actual changes
+        if self._has_pending_adjustment_changes():
             command = CombinedAdjustmentCommand(
                 self._image_model,
                 exposure_params=self._exposure_params.copy(),
                 tonal_params=self._tonal_params.copy(),
-                color_params=self._color_params.copy()
+                color_params=self._color_params.copy(),
+                curve_params=dict(self._curve_params),
             )
             self._history_service.execute_command(command)
 
