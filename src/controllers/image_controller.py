@@ -10,9 +10,8 @@ from src.services.image_service import ImageService
 from src.services.history_service import HistoryService
 from src.services.settings_service import SettingsService
 from src.views.image_view import ImageView
-from src.processors.exposure_processor import ExposureProcessor
-from src.processors.color_processor import ColorProcessor
 from src.commands.adjustment_commands import CombinedAdjustmentCommand
+from src.processing.adjustment_pipeline import apply_basic_adjustments
 from src.processing.processing_worker import ProcessingWorker
 from src.utils.debouncer import Debouncer
 
@@ -56,13 +55,10 @@ class ImageController(QObject):
         self._history_service = history_service or HistoryService()
         self._settings_service = settings_service
         self._use_threading = use_threading
-        
-        # Processors (for synchronous fallback)
-        self._exposure_processor = ExposureProcessor()
-        self._color_processor = ColorProcessor()
-        
+
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
+        self._tonal_params: Dict[str, float] = {}
         self._color_params: Dict[str, float] = {}
         
         # Background processing
@@ -158,8 +154,9 @@ class ImageController(QObject):
             
             # Reset adjustment params
             self._exposure_params = {}
+            self._tonal_params = {}
             self._color_params = {}
-            
+
             # Set image in processing worker for proxy generation
             if self._processing_worker is not None:
                 self._processing_worker.set_image(image)
@@ -220,12 +217,12 @@ class ImageController(QObject):
         if original is None:
             return None
 
-        result = original.copy()
-        if self._exposure_params:
-            result = self._exposure_processor.process(result, **self._exposure_params)
-        if self._color_params:
-            result = self._color_processor.process(result, **self._color_params)
-        return result
+        return apply_basic_adjustments(
+            original,
+            exposure_params=self._exposure_params,
+            tonal_params=self._tonal_params,
+            color_params=self._color_params,
+        )
 
     def refresh_view(self) -> None:
         """Refresh the image view with the current image state."""
@@ -239,6 +236,7 @@ class ImageController(QObject):
         self._image_model.reset_to_original()
         self._history_service.clear_history()
         self._exposure_params = {}
+        self._tonal_params = {}
         self._color_params = {}
         
         # Cancel any pending processing
@@ -312,30 +310,35 @@ class ImageController(QObject):
     def apply_adjustments(
         self,
         exposure_params: Dict[str, float] = None,
+        tonal_params: Dict[str, float] = None,
         color_params: Dict[str, float] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
-        
+
         Args:
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             add_to_history: If True, add command to history for undo
         """
         if not self.has_image():
             return
-        
+
         # Store current params
         if exposure_params:
             self._exposure_params = exposure_params
+        if tonal_params:
+            self._tonal_params = tonal_params
         if color_params:
             self._color_params = color_params
-        
+
         if add_to_history:
             # Create and execute command for undo/redo
             command = CombinedAdjustmentCommand(
                 self._image_model,
                 exposure_params=self._exposure_params,
+                tonal_params=self._tonal_params,
                 color_params=self._color_params
             )
             self._history_service.execute_command(command)
@@ -344,19 +347,14 @@ class ImageController(QObject):
             original = self._image_model.get_original_image()
             if original is None:
                 return
-            
-            result = original.copy()
-            
-            # Apply exposure adjustments
-            if self._exposure_params:
-                result = self._exposure_processor.process(result, **self._exposure_params)
-            
-            # Apply color adjustments
-            if self._color_params:
-                result = self._color_processor.process(result, **self._color_params)
-            
-            self._image_model.current_image = result
-        
+
+            self._image_model.current_image = apply_basic_adjustments(
+                original,
+                exposure_params=self._exposure_params,
+                tonal_params=self._tonal_params,
+                color_params=self._color_params,
+            )
+
         self.refresh_view()
 
     def on_adjustments_changed(self, adjustments: Dict[str, float]) -> None:
@@ -370,46 +368,58 @@ class ImageController(QObject):
         """
         if not self.has_image():
             return
-        
+
         exposure_params = {
             'exposure': adjustments.get('exposure', 0.0),
             'contrast': adjustments.get('contrast', 0.0),
             'brightness': adjustments.get('brightness', 0.0)
         }
+        tonal_params = {
+            'highlights': adjustments.get('highlights', 0.0),
+            'shadows': adjustments.get('shadows', 0.0),
+            'whites': adjustments.get('whites', 0.0),
+            'blacks': adjustments.get('blacks', 0.0)
+        }
         color_params = {
             'saturation': adjustments.get('saturation', 0.0),
             'vibrance': adjustments.get('vibrance', 0.0)
         }
-        
+
         # Store params
         self._exposure_params = exposure_params
+        self._tonal_params = tonal_params
         self._color_params = color_params
-        
+
         if self._use_threading and self._debouncer is not None:
             # Use debounced async processing
             self._debouncer.call({
                 'exposure': exposure_params,
+                'tonal': tonal_params,
                 'color': color_params
             })
         else:
             # Fallback to synchronous processing
-            self.apply_adjustments(exposure_params, color_params, add_to_history=False)
+            self.apply_adjustments(
+                exposure_params, tonal_params, color_params, add_to_history=False
+            )
 
     def _on_debounced_adjustment(self, params: dict) -> None:
         """Handle debounced adjustment (called after slider pause).
-        
+
         Args:
-            params: Dictionary with 'exposure' and 'color' params
+            params: Dictionary with 'exposure', 'tonal', and 'color' params
         """
         if not self.has_image() or self._processing_worker is None:
             return
-        
+
         exposure_params = params.get('exposure', {})
+        tonal_params = params.get('tonal', {})
         color_params = params.get('color', {})
-        
+
         # Submit preview request to worker
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
+            tonal_params=tonal_params,
             color_params=color_params
         )
 
@@ -466,6 +476,7 @@ class ImageController(QObject):
 
         has_changes = (
             any(v != 0 for v in self._exposure_params.values()) or
+            any(v != 0 for v in self._tonal_params.values()) or
             any(v != 0 for v in self._color_params.values())
         )
 
@@ -473,6 +484,7 @@ class ImageController(QObject):
             command = CombinedAdjustmentCommand(
                 self._image_model,
                 exposure_params=self._exposure_params.copy(),
+                tonal_params=self._tonal_params.copy(),
                 color_params=self._color_params.copy(),
                 new_image=image
             )
@@ -512,6 +524,7 @@ class ImageController(QObject):
             # slow regardless of the background worker's own speed.
             self._processing_worker.submit_final_request(
                 exposure_params=self._exposure_params,
+                tonal_params=self._tonal_params,
                 color_params=self._color_params
             )
         else:
@@ -530,13 +543,15 @@ class ImageController(QObject):
         # Only commit if there are actual changes
         has_changes = (
             any(v != 0 for v in self._exposure_params.values()) or
+            any(v != 0 for v in self._tonal_params.values()) or
             any(v != 0 for v in self._color_params.values())
         )
-        
+
         if has_changes:
             command = CombinedAdjustmentCommand(
                 self._image_model,
                 exposure_params=self._exposure_params.copy(),
+                tonal_params=self._tonal_params.copy(),
                 color_params=self._color_params.copy()
             )
             self._history_service.execute_command(command)

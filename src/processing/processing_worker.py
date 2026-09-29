@@ -6,8 +6,7 @@ from PIL import Image
 
 from src.processing.processing_queue import ProcessingRequest, ProcessingQueue
 from src.processing.proxy_manager import ProxyManager
-from src.processors.exposure_processor import ExposureProcessor
-from src.processors.color_processor import ColorProcessor
+from src.processing.adjustment_pipeline import apply_basic_adjustments
 
 
 class ProcessingWorker(QObject):
@@ -39,11 +38,7 @@ class ProcessingWorker(QObject):
         
         self._queue = ProcessingQueue()
         self._proxy_manager = ProxyManager()
-        
-        # Processors
-        self._exposure_processor = ExposureProcessor()
-        self._color_processor = ColorProcessor()
-        
+
         # Thread control
         self._running = False
         self._mutex = QMutex()
@@ -106,66 +101,77 @@ class ProcessingWorker(QObject):
     def submit_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
+        tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True
     ) -> int:
         """Submit a processing request.
-        
+
         Args:
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             use_proxy: Whether to process proxy (fast) or full image
-            
+
         Returns:
             Request ID for tracking
         """
         request = self._queue.create_request(
             exposure_params=exposure_params,
+            tonal_params=tonal_params,
             color_params=color_params,
             use_proxy=use_proxy
         )
         self._queue.enqueue(request)
-        
+
         # Wake up the worker thread
         self._condition.wakeOne()
-        
+
         return request.request_id
-    
+
     def submit_preview_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
+        tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None
     ) -> int:
         """Submit a preview (proxy) processing request.
-        
+
         Convenience method for submitting proxy requests.
-        
+
         Args:
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
-            
+
         Returns:
             Request ID
         """
-        return self.submit_request(exposure_params, color_params, use_proxy=True)
-    
+        return self.submit_request(
+            exposure_params, tonal_params, color_params, use_proxy=True
+        )
+
     def submit_final_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
+        tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None
     ) -> int:
         """Submit a full-resolution processing request.
-        
+
         Convenience method for submitting final render requests.
-        
+
         Args:
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
-            
+
         Returns:
             Request ID
         """
-        return self.submit_request(exposure_params, color_params, use_proxy=False)
+        return self.submit_request(
+            exposure_params, tonal_params, color_params, use_proxy=False
+        )
     
     def cancel_pending(self) -> None:
         """Cancel all pending requests."""
@@ -230,6 +236,7 @@ class ProcessingWorker(QObject):
             result = self._apply_adjustments(
                 source,
                 request.exposure_params,
+                request.tonal_params,
                 request.color_params
             )
             
@@ -250,28 +257,27 @@ class ProcessingWorker(QObject):
         self,
         image: Image.Image,
         exposure_params: Dict[str, float],
+        tonal_params: Dict[str, float],
         color_params: Dict[str, float]
     ) -> Image.Image:
         """Apply all adjustments to an image.
-        
+
         Args:
             image: Source image
             exposure_params: Exposure parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color parameters
-            
+
         Returns:
             Processed image
         """
-        result = image.copy()
-        
-        # Apply exposure adjustments if any non-zero values
-        if exposure_params and any(v != 0 for v in exposure_params.values()):
-            result = self._exposure_processor.process(result, **exposure_params)
-        
-        # Apply color adjustments if any non-zero values
-        if color_params and any(v != 0 for v in color_params.values()):
-            result = self._color_processor.process(result, **color_params)
-        
+        result = apply_basic_adjustments(
+            image,
+            exposure_params=exposure_params,
+            tonal_params=tonal_params,
+            color_params=color_params,
+        )
+
         return result
 
 
@@ -286,6 +292,7 @@ class ProcessingController:
         """Initialize the processing controller."""
         self._worker = ProcessingWorker()
         self._current_exposure_params: Dict[str, float] = {}
+        self._current_tonal_params: Dict[str, float] = {}
         self._current_color_params: Dict[str, float] = {}
     
     @property
@@ -309,44 +316,51 @@ class ProcessingController:
         """
         self._worker.set_image(image)
         self._current_exposure_params = {}
+        self._current_tonal_params = {}
         self._current_color_params = {}
-    
+
     def clear_image(self) -> None:
         """Clear the current image."""
         self._worker.clear_image()
-    
+
     def update_adjustments(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
+        tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None
     ) -> int:
         """Update adjustments and request preview processing.
-        
+
         Args:
             exposure_params: New exposure parameters
+            tonal_params: New Highlights/Shadows/Whites/Blacks parameters
             color_params: New color parameters
-            
+
         Returns:
             Request ID
         """
         if exposure_params is not None:
             self._current_exposure_params = exposure_params
+        if tonal_params is not None:
+            self._current_tonal_params = tonal_params
         if color_params is not None:
             self._current_color_params = color_params
-        
+
         return self._worker.submit_preview_request(
             self._current_exposure_params,
+            self._current_tonal_params,
             self._current_color_params
         )
-    
+
     def finalize_adjustments(self) -> int:
         """Request full-resolution processing with current adjustments.
-        
+
         Returns:
             Request ID
         """
         return self._worker.submit_final_request(
             self._current_exposure_params,
+            self._current_tonal_params,
             self._current_color_params
         )
     

@@ -14,6 +14,7 @@ class ProcessingRequest:
     Attributes:
         request_id: Unique identifier for this request
         exposure_params: Exposure adjustment parameters
+        tonal_params: Highlights/Shadows/Whites/Blacks adjustment parameters
         color_params: Color adjustment parameters
         use_proxy: Whether to process proxy (True) or full-res (False)
         timestamp: When the request was created
@@ -21,6 +22,7 @@ class ProcessingRequest:
     """
     request_id: int
     exposure_params: Dict[str, float] = field(default_factory=dict)
+    tonal_params: Dict[str, float] = field(default_factory=dict)
     color_params: Dict[str, float] = field(default_factory=dict)
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
@@ -74,16 +76,18 @@ class ProcessingQueue:
     def create_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
+        tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True
     ) -> ProcessingRequest:
         """Create a new processing request with auto-incremented ID.
-        
+
         Args:
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             use_proxy: Whether to use proxy image
-            
+
         Returns:
             New ProcessingRequest
         """
@@ -91,6 +95,7 @@ class ProcessingQueue:
             request = ProcessingRequest(
                 request_id=self._next_id,
                 exposure_params=exposure_params or {},
+                tonal_params=tonal_params or {},
                 color_params=color_params or {},
                 use_proxy=use_proxy
             )

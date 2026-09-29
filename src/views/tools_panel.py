@@ -38,6 +38,10 @@ class ToolsPanel(QWidget):
             'exposure': 0.0,
             'contrast': 0.0,
             'brightness': 0.0,
+            'highlights': 0.0,
+            'shadows': 0.0,
+            'whites': 0.0,
+            'blacks': 0.0,
             'saturation': 0.0,
             'vibrance': 0.0
         }
@@ -86,7 +90,27 @@ class ToolsPanel(QWidget):
             "Brightness", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
         )
         light_content_layout.addWidget(self._brightness_slider)
-        
+
+        self._highlights_slider = AdjustmentSlider(
+            "Highlights", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+        )
+        light_content_layout.addWidget(self._highlights_slider)
+
+        self._shadows_slider = AdjustmentSlider(
+            "Shadows", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+        )
+        light_content_layout.addWidget(self._shadows_slider)
+
+        self._whites_slider = AdjustmentSlider(
+            "Whites", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+        )
+        light_content_layout.addWidget(self._whites_slider)
+
+        self._blacks_slider = AdjustmentSlider(
+            "Blacks", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+        )
+        light_content_layout.addWidget(self._blacks_slider)
+
         content_layout.addWidget(light_section)
         
         # Color section
@@ -177,6 +201,18 @@ class ToolsPanel(QWidget):
         self._brightness_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('brightness', v)
         )
+        self._highlights_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('highlights', v)
+        )
+        self._shadows_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('shadows', v)
+        )
+        self._whites_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('whites', v)
+        )
+        self._blacks_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('blacks', v)
+        )
         self._saturation_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('saturation', v)
         )
@@ -188,6 +224,10 @@ class ToolsPanel(QWidget):
         self._exposure_slider.slider_released.connect(self._on_slider_released)
         self._contrast_slider.slider_released.connect(self._on_slider_released)
         self._brightness_slider.slider_released.connect(self._on_slider_released)
+        self._highlights_slider.slider_released.connect(self._on_slider_released)
+        self._shadows_slider.slider_released.connect(self._on_slider_released)
+        self._whites_slider.slider_released.connect(self._on_slider_released)
+        self._blacks_slider.slider_released.connect(self._on_slider_released)
         self._saturation_slider.slider_released.connect(self._on_slider_released)
         self._vibrance_slider.slider_released.connect(self._on_slider_released)
         
@@ -227,6 +267,19 @@ class ToolsPanel(QWidget):
             'brightness': self._adjustments['brightness']
         }
 
+    def get_tonal_params(self) -> Dict[str, float]:
+        """Get Highlights/Shadows/Whites/Blacks adjustment parameters.
+
+        Returns:
+            Dictionary of tonal parameters
+        """
+        return {
+            'highlights': self._adjustments['highlights'],
+            'shadows': self._adjustments['shadows'],
+            'whites': self._adjustments['whites'],
+            'blacks': self._adjustments['blacks']
+        }
+
     def get_color_params(self) -> Dict[str, float]:
         """Get color-related adjustment parameters.
         
@@ -243,18 +296,26 @@ class ToolsPanel(QWidget):
         self._exposure_slider.reset()
         self._contrast_slider.reset()
         self._brightness_slider.reset()
+        self._highlights_slider.reset()
+        self._shadows_slider.reset()
+        self._whites_slider.reset()
+        self._blacks_slider.reset()
         self._saturation_slider.reset()
         self._vibrance_slider.reset()
 
     def set_enabled(self, enabled: bool):
         """Enable or disable all controls.
-        
+
         Args:
             enabled: True to enable, False to disable
         """
         self._exposure_slider.setEnabled(enabled)
         self._contrast_slider.setEnabled(enabled)
         self._brightness_slider.setEnabled(enabled)
+        self._highlights_slider.setEnabled(enabled)
+        self._shadows_slider.setEnabled(enabled)
+        self._whites_slider.setEnabled(enabled)
+        self._blacks_slider.setEnabled(enabled)
         self._saturation_slider.setEnabled(enabled)
         self._vibrance_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)

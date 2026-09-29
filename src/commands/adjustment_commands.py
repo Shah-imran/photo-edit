@@ -4,6 +4,7 @@ from typing import Dict, Any, Optional
 from PIL import Image
 from src.commands.base_command import BaseCommand
 from src.models.image_model import ImageModel
+from src.processing.adjustment_pipeline import apply_basic_adjustments
 from src.processors.exposure_processor import ExposureProcessor
 from src.processors.color_processor import ColorProcessor
 
@@ -95,6 +96,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         self,
         image_model: ImageModel,
         exposure_params: Dict[str, float] = None,
+        tonal_params: Dict[str, float] = None,
         color_params: Dict[str, float] = None,
         new_image: Optional[Image.Image] = None
     ):
@@ -103,6 +105,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         Args:
             image_model: The image model to modify
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
             new_image: Optional pre-computed result for these parameters
                 (e.g. already produced by the background processing worker's
@@ -113,13 +116,10 @@ class CombinedAdjustmentCommand(BaseCommand):
         super().__init__()
         self._image_model = image_model
         self._exposure_params = exposure_params or {}
+        self._tonal_params = tonal_params or {}
         self._color_params = color_params or {}
         self._previous_image = image_model.get_current_image()
         self._new_image: Optional[Image.Image] = new_image
-
-        # Processors
-        self._exposure_processor = ExposureProcessor()
-        self._color_processor = ColorProcessor()
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -130,17 +130,12 @@ class CombinedAdjustmentCommand(BaseCommand):
             if original is None:
                 return
 
-            result = original.copy()
-
-            # Apply exposure adjustments
-            if self._exposure_params:
-                result = self._exposure_processor.process(result, **self._exposure_params)
-
-            # Apply color adjustments
-            if self._color_params:
-                result = self._color_processor.process(result, **self._color_params)
-
-            self._new_image = result
+            self._new_image = apply_basic_adjustments(
+                original,
+                exposure_params=self._exposure_params,
+                tonal_params=self._tonal_params,
+                color_params=self._color_params,
+            )
 
         self._image_model.current_image = self._new_image
         self._image_model.set_modified(True)
