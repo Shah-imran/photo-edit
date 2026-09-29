@@ -2,7 +2,7 @@
 
 from typing import Optional, Dict
 from PyQt6.QtWidgets import QFileDialog, QWidget, QMessageBox
-from PyQt6.QtCore import QObject
+from PyQt6.QtCore import QObject, QSize
 from PIL import Image
 
 from src.models.image_model import ImageModel
@@ -150,6 +150,10 @@ class ImageController(QObject):
             self._image_model.file_path = file_path
             self._image_model.set_original_image(image)
             self._image_view.set_image(image)
+            # Zoom levels (100%, fit-to-window) stay tied to these true
+            # dimensions even while the view is later fed a small proxy for
+            # fast live preview.
+            self._image_view.set_reference_size(QSize(*image.size))
             self._history_service.clear_history()
             
             # Reset adjustment params
@@ -186,11 +190,42 @@ class ImageController(QObject):
 
     def get_current_image(self):
         """Get the current image.
-        
+
         Returns:
             Current PIL Image or None
         """
         return self._image_model.get_current_image()
+
+    def get_export_image(self):
+        """Get the full-resolution image for export.
+
+        Recomputes directly from the original image and the currently active
+        adjustment parameters, rather than returning whatever happens to be
+        cached in ``current_image``. That field is intentionally allowed to
+        hold a lower-resolution proxy frame for a moment while a slider is
+        being dragged (see ``_on_preview_ready``), so reading it directly
+        would risk exporting an undersized image if the user exports before
+        that settles back to full resolution. This always processes the
+        true original at full size, so it is correct regardless of timing,
+        at the cost of a synchronous recompute when called.
+
+        Returns:
+            Full-resolution PIL Image with current adjustments applied, or
+            None if no image is loaded.
+        """
+        if not self.has_image():
+            return None
+
+        original = self._image_model.get_original_image()
+        if original is None:
+            return None
+
+        result = original.copy()
+        if self._exposure_params:
+            result = self._exposure_processor.process(result, **self._exposure_params)
+        if self._color_params:
+            result = self._color_processor.process(result, **self._color_params)
+        return result
 
     def refresh_view(self) -> None:
         """Refresh the image view with the current image state."""
@@ -380,33 +415,70 @@ class ImageController(QObject):
 
     def _on_preview_ready(self, request_id: int, image: Image.Image) -> None:
         """Handle preview image ready from worker.
-        
+
+        The proxy-resolution result is sent straight to ``ImageView`` without
+        ever being resized back up to the original pixel dimensions: that
+        PIL/LANCZOS upscale (previously done on every slider tick) was doing
+        far more work than the actual adjustment math, and was the main
+        cause of visible lag while dragging a slider. ``ImageView`` already
+        knows the true image size (set once via ``set_reference_size`` on
+        load) and scales this small pixmap to the correct on-screen size
+        itself, cheaply, via Qt.
+
+        ``current_image`` is still updated with this result (existing code
+        and tests treat it as "the latest preview", live-drag included), but
+        now at whatever resolution the proxy actually is instead of being
+        forced back up to the original size first. For a small image the
+        proxy already equals the original, so nothing observable changes;
+        for a large one, ``current_image`` is briefly proxy-resolution while
+        a slider is being dragged, settling back to full resolution once
+        ``_on_processing_complete`` runs. Anything that needs a guaranteed
+        full-resolution result regardless of that in-flight state (export)
+        should use :meth:`get_export_image` rather than ``current_image``.
+
         Args:
             request_id: The request ID
-            image: Processed preview image
+            image: Processed preview (proxy-resolution) image
         """
-        # Only update if this is still the latest request
         if self._processing_worker is not None and \
            self._processing_worker.is_latest_request(request_id):
-            # Upscale proxy to display size
-            proxy_manager = self._processing_worker.proxy_manager
-            if proxy_manager.needs_proxy():
-                display_image = proxy_manager.upscale_to_original_size(image)
-            else:
-                display_image = image
-            
-            self._image_model.current_image = display_image
-            self.refresh_view()
+            self._image_model.current_image = image
+            self._image_view.set_image(image, emit_loaded=False)
 
     def _on_processing_complete(self, request_id: int, image: Image.Image) -> None:
         """Handle full-resolution processing complete from worker.
-        
+
+        This is the single point where a full-resolution buffer is produced,
+        and it is used only to commit the edit to history (and thus to
+        ``ImageModel.current_image``, which undo/redo rely on) -- it is
+        deliberately never pushed to ``ImageView``. Converting a full-size
+        image to a ``QPixmap`` on the UI thread is itself slow enough to feel
+        laggy on large images, and the on-screen preview from the proxy path
+        already matches it visually, so there is nothing to gain from
+        displaying it and real responsiveness to lose.
+
         Args:
             request_id: The request ID
             image: Processed full-resolution image
         """
-        self._image_model.current_image = image
-        self.refresh_view()
+        if not self.has_image():
+            return
+
+        has_changes = (
+            any(v != 0 for v in self._exposure_params.values()) or
+            any(v != 0 for v in self._color_params.values())
+        )
+
+        if has_changes:
+            command = CombinedAdjustmentCommand(
+                self._image_model,
+                exposure_params=self._exposure_params.copy(),
+                color_params=self._color_params.copy(),
+                new_image=image
+            )
+            self._history_service.execute_command(command)
+        else:
+            self._image_model.current_image = image
 
     def _on_processing_error(self, request_id: int, error: str) -> None:
         """Handle processing error from worker.
@@ -420,26 +492,32 @@ class ImageController(QObject):
 
     def on_slider_released(self) -> None:
         """Handle slider release - trigger full-resolution processing.
-        
+
         Call this when the user releases a slider to get the final
         high-quality result.
         """
         if not self.has_image():
             return
-        
+
         if self._use_threading and self._processing_worker is not None:
             # Flush any pending debounced calls
             if self._debouncer is not None:
                 self._debouncer.flush()
-            
-            # Request full-resolution processing
+
+            # Request full-resolution processing. The commit to history
+            # happens later, in _on_processing_complete, once that result is
+            # actually ready -- committing here too would recompute the same
+            # full-resolution adjustment a second time, synchronously, on
+            # this (UI) thread, which is what made releasing a slider feel
+            # slow regardless of the background worker's own speed.
             self._processing_worker.submit_final_request(
                 exposure_params=self._exposure_params,
                 color_params=self._color_params
             )
-        
-        # Commit to history
-        self.commit_adjustments()
+        else:
+            # No background worker available: commit synchronously, since
+            # there is no async completion callback to do it for us.
+            self.commit_adjustments()
 
     def commit_adjustments(self) -> None:
         """Commit current adjustments to history.

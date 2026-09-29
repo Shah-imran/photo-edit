@@ -40,10 +40,11 @@ class ImageView(QWidget):
         super().__init__(parent)
         
         self._pixmap: Optional[QPixmap] = None
+        self._reference_size: Optional[QSize] = None
         self._zoom_factor: float = 1.0
         self._pan_start: Optional[QPoint] = None
         self._is_panning: bool = False
-        
+
         self._setup_ui()
 
     def _setup_ui(self):
@@ -71,20 +72,45 @@ class ImageView(QWidget):
 
     def set_image(self, image: Image.Image, emit_loaded: bool = True) -> None:
         """Set the image to display.
-        
+
+        The image passed here does not need to be full resolution: a smaller
+        proxy is converted to a ``QPixmap`` just as cheaply as a full-size one
+        because the conversion cost scales with the buffer's own pixel count,
+        not with ``reference_size``. Zoom levels (100%, fit-to-window) are
+        always computed against ``reference_size`` when one has been set via
+        :meth:`set_reference_size`, so swapping in a low-resolution preview
+        never changes what "100%" or "fit" mean on screen.
+
         Args:
-            image: PIL Image to display
+            image: PIL Image to display (may be a downscaled proxy)
             emit_loaded: Whether to emit the image_loaded signal (default True)
         """
         # Convert PIL Image to QPixmap
         self._pixmap = self._pil_to_pixmap(image)
+        if self._reference_size is None:
+            self._reference_size = self._pixmap.size()
         self._update_display()
         if emit_loaded:
             self.image_loaded.emit()
 
+    def set_reference_size(self, size: QSize) -> None:
+        """Set the logical (full-resolution) size used for zoom calculations.
+
+        Call this once per loaded image, with the true original dimensions.
+        It lets ``set_image`` be given a small, fast-to-convert proxy for live
+        preview while 100%/fit-to-window zoom still means 100%/fit of the
+        real image, not of whatever proxy happens to be on screen.
+
+        Args:
+            size: The original image's (width, height) as a QSize
+        """
+        self._reference_size = size
+        self._update_display()
+
     def clear_image(self) -> None:
         """Clear the currently displayed image."""
         self._pixmap = None
+        self._reference_size = None
         self._image_label.clear()
         self._image_label.setText("No image loaded")
         self._image_label.setStyleSheet("background-color: #1a1a1a; color: #606060;")
@@ -131,8 +157,8 @@ class ImageView(QWidget):
             return
         
         viewport_size = self._scroll_area.viewport().size()
-        pixmap_size = self._pixmap.size()
-        
+        pixmap_size = self._reference_size or self._pixmap.size()
+
         # Calculate zoom to fit
         width_ratio = viewport_size.width() / pixmap_size.width()
         height_ratio = viewport_size.height() / pixmap_size.height()
@@ -149,10 +175,11 @@ class ImageView(QWidget):
         if not self.has_image():
             return
         
-        # Scale the pixmap
-        original_size = self._pixmap.size()
-        scaled_width = int(original_size.width() * self._zoom_factor)
-        scaled_height = int(original_size.height() * self._zoom_factor)
+        # Scale relative to the logical/original size, not the (possibly
+        # much smaller) proxy pixmap actually backing the display right now.
+        reference_size = self._reference_size or self._pixmap.size()
+        scaled_width = int(reference_size.width() * self._zoom_factor)
+        scaled_height = int(reference_size.height() * self._zoom_factor)
         scaled_size = QSize(scaled_width, scaled_height)
         
         scaled_pixmap = self._pixmap.scaled(

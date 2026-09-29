@@ -95,22 +95,28 @@ class CombinedAdjustmentCommand(BaseCommand):
         self,
         image_model: ImageModel,
         exposure_params: Dict[str, float] = None,
-        color_params: Dict[str, float] = None
+        color_params: Dict[str, float] = None,
+        new_image: Optional[Image.Image] = None
     ):
         """Initialize the combined adjustment command.
-        
+
         Args:
             image_model: The image model to modify
             exposure_params: Exposure adjustment parameters
             color_params: Color adjustment parameters
+            new_image: Optional pre-computed result for these parameters
+                (e.g. already produced by the background processing worker's
+                full-resolution render). When provided, ``execute()`` reuses
+                it instead of recomputing the same full-resolution adjustment
+                a second time on the calling thread.
         """
         super().__init__()
         self._image_model = image_model
         self._exposure_params = exposure_params or {}
         self._color_params = color_params or {}
         self._previous_image = image_model.get_current_image()
-        self._new_image: Optional[Image.Image] = None
-        
+        self._new_image: Optional[Image.Image] = new_image
+
         # Processors
         self._exposure_processor = ExposureProcessor()
         self._color_processor = ColorProcessor()
@@ -118,23 +124,25 @@ class CombinedAdjustmentCommand(BaseCommand):
     def execute(self) -> None:
         """Execute the combined adjustment command."""
         super().execute()
-        
-        original = self._image_model.get_original_image()
-        if original is None:
-            return
-        
-        result = original.copy()
-        
-        # Apply exposure adjustments
-        if self._exposure_params:
-            result = self._exposure_processor.process(result, **self._exposure_params)
-        
-        # Apply color adjustments
-        if self._color_params:
-            result = self._color_processor.process(result, **self._color_params)
-        
-        self._new_image = result
-        self._image_model.current_image = result
+
+        if self._new_image is None:
+            original = self._image_model.get_original_image()
+            if original is None:
+                return
+
+            result = original.copy()
+
+            # Apply exposure adjustments
+            if self._exposure_params:
+                result = self._exposure_processor.process(result, **self._exposure_params)
+
+            # Apply color adjustments
+            if self._color_params:
+                result = self._color_processor.process(result, **self._color_params)
+
+            self._new_image = result
+
+        self._image_model.current_image = self._new_image
         self._image_model.set_modified(True)
 
     def undo(self) -> None:

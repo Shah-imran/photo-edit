@@ -225,8 +225,10 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage("No image to export", 2000)
             return
         
-        # Get current image
-        image = self._image_controller.get_current_image()
+        # Get the full-resolution image, not whatever preview frame is
+        # currently cached (which may be a lower-resolution proxy if a
+        # slider is still being dragged).
+        image = self._image_controller.get_export_image()
         if image is None:
             self._status_bar.showMessage("No image to export", 2000)
             return
