@@ -7,9 +7,9 @@ This document complements [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md) Part 1. It an
 ## Quick start (contributors)
 
 1. **Repository root:** clone and `cd` into `PhotoEdit`.
-2. **Install:** `pipenv install --dev` (see root [README.md](../../README.md#-installation); if that anchor fails in your viewer, open the **Installation** section there).
-3. **Run the app:** `pipenv run python -m src.main` (see root [README.md](../../README.md#run-the-application)).
-4. **Run tests:** `pipenv run pytest`.
+2. **Install:** create and activate a virtual environment, then run `python -m pip install -e ".[dev]"` (see root [README.md](../../README.md#-installation); if that anchor fails in your viewer, open the **Installation** section there).
+3. **Run the app:** `python -m src.main` (see root [README.md](../../README.md#run-the-application)).
+4. **Run tests:** `pytest`.
 5. **Pick the next slice** using section 2 (ordering); write and **approve** a detailed implementation note per **section 4** in [implementation-notes/](implementation-notes/) **before** any implementation.
 
 ---

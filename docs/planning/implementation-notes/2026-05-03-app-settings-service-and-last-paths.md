@@ -192,7 +192,7 @@ Use a temporary `QSettings` (IniFormat, custom path) via a pytest fixture to iso
 
 ### 8.3 Manual smoke checklist
 
-1. Launch app: `pipenv run python -m src.main`. Window opens at default size.
+1. Launch app: `python -m src.main`. Window opens at default size.
 2. Resize and move the window; close.
 3. Relaunch -- window appears at the **same** size and position.
 4. File > Open Image: dialog opens at home dir on first launch; choose a file in `Photos/`.
@@ -221,10 +221,10 @@ All must be true before merge:
 - [x] All four `QFileDialog` callsites use the service for default directory and update it after a successful selection.
 - [x] `MainWindow` saves geometry on close and restores on init when present.
 - [x] All new unit tests in 8.1 pass (14/14).
-- [x] Existing test suite still passes (`pipenv run pytest`) -- 225/225.
+- [x] Existing test suite still passes (`pytest`) -- 225/225.
 - [x] Manual smoke checklist (section 8.3) executed by project owner on Windows on 2026-05-04 -- all 9 steps pass.
 - [x] No widget contains direct `QSettings` calls (grep clean -- only `SettingsService` itself imports `QSettings`).
-- [x] No new dependency added to `Pipfile`.
+- [x] No new dependency added to `pyproject.toml`.
 - [x] Implementation note has a final **Implementation summary** subsection added in the same PR or immediate follow-up commit (per workflow section 4.3).
 
 ---

@@ -148,7 +148,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 
 ### Phase C -- RAW import
 
-- `rawpy` path in [`ImageService`](../../src/services/image_service.py) + file filters (documentation already mentions rawpy in [Pipfile](../../Pipfile)).
+- `rawpy` path in [`ImageService`](../../src/services/image_service.py) + file filters (the dependency is declared in [`pyproject.toml`](../../pyproject.toml)).
 
 ### Phase D -- Profiles and presets (PDF 10)
 
