@@ -10,16 +10,19 @@ clear library, canvas, filmstrip, and adjustment hierarchy.
 This slice implements the first visual vertical slice of that direction:
 
 - a centralized dark application theme and design tokens;
+- a full-width workspace header with Library/Develop context and primary actions;
 - compact, fixed-purpose left and right docks;
 - a canvas toolbar for fit, 100%, zoom, and pan affordances;
 - a synchronized bottom filmstrip backed by the current library entries;
-- a navigation-only left library rail, with thumbnails shown exclusively in
-  the bottom filmstrip; and
+- a navigation-only left library rail with icons, smart collection shortcuts,
+  counts, and contiguous named-library rows;
+- an RGB histogram, local-tool affordance strip, semantic section icons,
+  inline reset actions, and compact single-row adjustment controls; and
 - clearer status information and polished panel framing.
 
 Non-goals are processor changes, new adjustment types, before/after image
-rendering, search/filter behavior, album/folder data models, ratings, a new
-histogram processor, icon asset production, and undo/redo state repair. The
+rendering, album/folder data models, full rating/flag workflows, crop/heal/mask/
+transform processors, and undo/redo state repair. The
 toolbar may expose a disabled before/after affordance to communicate future
 placement, but it will not pretend that the feature is implemented.
 
@@ -153,7 +156,7 @@ settings data remain valid because no persisted keys or formats change.
 - Existing image load, edit, export, library, and persistence paths behave as
   before.
 - The bottom filmstrip is the only visible thumbnail browser; the left rail
-  remains a compact library navigator with a current-library count.
+  remains a compact library navigator with smart filters and library counts.
 - Toolbar zoom controls and zoom readout remain synchronized.
 - Tools sections are compact and collapsible without changing adjustment
   payloads.
@@ -168,13 +171,24 @@ implement the approved mockup).**
 Implemented the shared application theme, compact fixed-side dock treatment,
 collapsible adjustment sections, canvas toolbar, richer status readout, and a
 bottom filmstrip synchronized to the active library. The left dock now acts as
-a compact named-library navigator while thumbnail browsing lives in the
-filmstrip, matching the approved second mockup. Existing controller, processor,
+a compact, contiguous named-library list with a persistent active-row
+highlight, while thumbnail browsing lives in the filmstrip. Existing controller, processor,
 catalog, settings, and adjustment-payload contracts were preserved.
+
+The v2 follow-up added a full-width Library/Develop header with working
+workspace switching plus Undo, Redo, and Export actions; code-drawn shell
+icons; All Photos, Favorites, and
+Recently Added filters; persisted per-entry Favorites; filmstrip filter/sort
+controls; an RGB histogram; visible disabled homes for the not-yet-implemented
+Crop, Heal, Mask, Transform, and Compare tools; compact inline adjustment rows
+with borderless numeric entry; per-section reset icons; color gradients; and a
+richer bottom metadata bar. Image navigation now always fits the winning
+full-resolution load once, guarded by file path, instead of restoring an
+apparently random saved per-image zoom or racing preview callbacks.
 
 Added focused toolbar, filmstrip, library-navigation, and main-window tests.
 Library payloads include entry counts so inactive navigation rows remain
-accurate. The final regression run completed with **620 passed**, and `compileall`
+accurate. The final regression run completed with **627 passed**, and `compileall`
 completed successfully. A real offscreen Qt render was inspected at 1400x900;
 accordion checked-state and platform viewport-background leaks found during
 that inspection were corrected. Deferred items remain real before/after

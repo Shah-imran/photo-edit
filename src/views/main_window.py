@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QMessageBox,
     QInputDialog,
+    QToolBar,
 )
 from PyQt6.QtCore import QByteArray, Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QAction
@@ -31,6 +32,7 @@ from src.views.library_view import LibraryView
 from src.views.theme import apply_theme
 from src.views.widgets.filmstrip_view import FilmstripView
 from src.views.widgets.image_toolbar import ImageToolBar
+from src.views.widgets.workspace_header import WorkspaceHeader
 from src.controllers.library_controller import LibraryController
 from src.controllers.image_controller import ImageController
 from src.services.library_catalog_service import LibraryCatalogService
@@ -93,6 +95,7 @@ class MainWindow(QMainWindow):
         self._library_view = LibraryView(show_thumbnail_grid=False)
         self._image_toolbar = ImageToolBar()
         self._filmstrip_view = FilmstripView()
+        self._workspace_header = WorkspaceHeader()
         self._library_controller = LibraryController(
             catalog_service=self._catalog_service,
             thumbnail_cache_service=self._thumbnail_cache_service,
@@ -115,6 +118,7 @@ class MainWindow(QMainWindow):
         # Set up UI
         self._setup_ui()
         self._setup_menu_bar()
+        self._setup_workspace_header()
         self._setup_status_bar()
         self._setup_shortcuts()
         self._connect_signals()
@@ -180,6 +184,9 @@ class MainWindow(QMainWindow):
         action.triggered.connect(callback)
         if shortcut:
             action.setShortcut(QKeySequence(shortcut))
+            # Keep shortcuts active when the classic menu bar is hidden in
+            # favor of the v2 workspace header.
+            self.addAction(action)
         return action
 
     def _setup_menu_bar(self):
@@ -217,6 +224,21 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu("&Help")
         help_menu.addAction(self._create_action("&About PhotoEdit", self._show_about))
 
+    def _setup_workspace_header(self) -> None:
+        """Install the v2 workspace header across the full main window."""
+        self.menuBar().hide()
+        self._header_toolbar = QToolBar("Workspace", self)
+        self._header_toolbar.setObjectName("workspace_toolbar")
+        self._header_toolbar.setMovable(False)
+        self._header_toolbar.setFloatable(False)
+        self._header_toolbar.setContentsMargins(0, 0, 0, 0)
+        self._header_toolbar.setStyleSheet(
+            "QToolBar#workspace_toolbar { border: none; padding: 0; spacing: 0; "
+            "background: #171a1e; }"
+        )
+        self._header_toolbar.addWidget(self._workspace_header)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._header_toolbar)
+
     def _setup_status_bar(self):
         """Set up the status bar."""
         self._status_bar = QStatusBar()
@@ -230,6 +252,15 @@ class MainWindow(QMainWindow):
         self._dimensions_label.setStyleSheet("color: #707070; padding: 0 8px;")
         self._status_bar.addWidget(self._file_label)
         self._status_bar.addWidget(self._dimensions_label)
+        self._format_label = QLabel("—")
+        self._format_label.setStyleSheet("color: #707780; padding: 0 8px;")
+        self._color_space_label = QLabel("sRGB IEC61966-2.1")
+        self._color_space_label.setStyleSheet("color: #707780; padding: 0 8px;")
+        self._megapixels_label = QLabel("—")
+        self._megapixels_label.setStyleSheet("color: #707780; padding: 0 8px;")
+        self._status_bar.addWidget(self._format_label)
+        self._status_bar.addWidget(self._color_space_label)
+        self._status_bar.addWidget(self._megapixels_label)
         
         # Thumbnail import progress (non-modal; hidden when idle)
         self._thumb_import_label = QLabel("Thumbnails")
@@ -299,6 +330,10 @@ class MainWindow(QMainWindow):
         self._image_toolbar.actual_size_requested.connect(self._view_100_percent)
         self._image_toolbar.zoom_in_requested.connect(self._zoom_in)
         self._image_toolbar.zoom_out_requested.connect(self._zoom_out)
+        self._workspace_header.undo_requested.connect(self._undo)
+        self._workspace_header.redo_requested.connect(self._redo)
+        self._workspace_header.export_requested.connect(self._export_image)
+        self._workspace_header.workspace_changed.connect(self._on_workspace_changed)
         self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
         self._tools_panel.curve_changed.connect(self._on_curve_changed)
         self._tools_panel.hsl_changed.connect(self._on_hsl_changed)
@@ -308,6 +343,10 @@ class MainWindow(QMainWindow):
         self._filmstrip_view.image_selected.connect(self._on_library_image_selected)
         self._library_view.import_requested.connect(self._import_images)
         self._library_view.library_selected.connect(self._on_library_selected)
+        self._library_view.collection_selected.connect(self._filmstrip_view.set_filter)
+        self._filmstrip_view.favorite_toggled.connect(
+            self._library_controller.set_entry_favorite
+        )
         self._library_view.create_library_requested.connect(
             self._on_create_library_requested
         )
@@ -355,18 +394,17 @@ class MainWindow(QMainWindow):
         """Handle image loaded event."""
         file_path = self._image_controller.image_model.file_path
         if file_path:
-            self.setWindowTitle(f"PhotoEdit - {file_path}")
+            self.setWindowTitle("PhotoEdit")
             self._status_bar.showMessage(f"Loaded: {file_path}", 3000)
             self._file_label.setText(Path(file_path).name)
             width, height = self._image_controller.image_model.get_image_size()
             self._dimensions_label.setText(f"{width} × {height}")
+            suffix = Path(file_path).suffix.lstrip(".").upper() or "IMAGE"
+            self._format_label.setText(suffix)
+            self._megapixels_label.setText(f"{(width * height) / 1_000_000:.1f} MP")
             self._filmstrip_view.set_current_path(file_path)
             # Enable tools panel
             self._tools_panel.set_enabled(True)
-            if self._pending_zoom_factor is None:
-                # Defer fit until the event loop has laid out the viewport (avoids
-                # inconsistent fit when width/height were still stale on first paint).
-                QTimer.singleShot(0, self._image_view.fit_to_window)
 
     def _on_zoom_changed(self, zoom_factor: float):
         """Handle zoom changed event."""
@@ -417,6 +455,7 @@ class MainWindow(QMainWindow):
             return
         histogram = compute_luminance_histogram(image)
         self._tools_panel.update_curve_histogram(histogram)
+        self._tools_panel.update_histogram(image)
 
     def _on_library_image_selected(self, file_path: str):
         """Handle image selection from library."""
@@ -504,27 +543,22 @@ class MainWindow(QMainWindow):
         self._pending_adjustment_payload = None
         self._tools_panel.set_adjustments(adjustments, emit_signal=False)
         self._image_controller.restore_adjustment_state(adjustments)
-        if self._pending_zoom_factor is not None:
-            self._image_view.set_zoom_factor(self._pending_zoom_factor)
-        else:
-            # No saved zoom for this image (first-ever load, or an entry
-            # that was never zoomed/saved before): fit-to-window is the
-            # intended default view. Without this, the full-resolution
-            # `set_image()` call above resets zoom to 100% and nothing
-            # else corrects it -- the only other fit-to-window call is the
-            # earlier intermediate-preview stage's `QTimer.singleShot(0,
-            # ...)`, which races this full-image swap and only "wins" by
-            # accident of event-queue ordering. That race is exactly why
-            # the image intermittently opened at 100%/zoomed-in instead of
-            # fitted. Deferred the same way for the same reason: layout
-            # must settle before `fit_to_window()` can read a correct
-            # viewport size.
-            QTimer.singleShot(0, self._image_view.fit_to_window)
+        # Image switches always start fitted. Per-image zoom persistence made
+        # navigation appear random (a previously saved 100% view reopened at
+        # full size), while preview/full swaps also queued competing fit calls.
+        # Guard the single final callback by path so a stale load can never
+        # resize the next image.
+        QTimer.singleShot(0, lambda path=file_path: self._fit_image_if_current(path))
         self._pending_zoom_factor = None
         self._image_view.set_loading(False)
         self._settings_service.set_current_image_path(file_path)
         self._settings_service.sync()
         self._refresh_curve_histogram()
+
+    def _fit_image_if_current(self, file_path: str) -> None:
+        if self._image_controller.image_model.file_path != file_path:
+            return
+        self._image_view.fit_to_window()
 
     def _on_create_library_requested(self, default_name: str) -> None:
         self._persist_current_adjustments()
@@ -684,6 +718,11 @@ class MainWindow(QMainWindow):
         """Toggle tools panel visibility."""
         self.tools_dock.setVisible(not self.tools_dock.isVisible())
 
+    def _on_workspace_changed(self, workspace: str) -> None:
+        """Switch between browsing-focused and editing-focused shell layouts."""
+        self.library_dock.setVisible(True)
+        self.tools_dock.setVisible(workspace == "develop")
+
     def _show_about(self) -> None:
         """Show a compact product description without external navigation."""
         QMessageBox.about(
@@ -820,7 +859,8 @@ class MainWindow(QMainWindow):
         cached = self._image_preview_cache_service.load_qimage(cache_key)
         if cached is None:
             return False
-        self._image_view.set_cached_preview_image(cached, self._pending_zoom_factor)
+        self._image_view.set_cached_preview_image(cached, None)
+        QTimer.singleShot(0, self._image_view.fit_to_window)
         return True
 
     def _persist_current_adjustments(self) -> None:

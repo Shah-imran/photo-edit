@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QScrollArea,
     QPushButton,
+    QToolButton,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -18,6 +19,9 @@ from src.views.widgets.color_grading_panel import ColorGradingPanel
 from src.views.widgets.curve_editor import CurveEditor
 from src.views.widgets.hsl_mixer_panel import HslMixerPanel
 from src.views.widgets.collapsible_section import CollapsibleSection
+from src.views.widgets.histogram_widget import HistogramWidget
+from src.views.widgets.workspace_header import EditingToolStrip
+from src.views.icons import line_icon
 
 
 class ToolsPanel(QWidget):
@@ -68,6 +72,7 @@ class ToolsPanel(QWidget):
         self._color_grading_values: Dict[str, float] = default_color_grading_params()
         self._suppress_adjustment_signal = False
         self._sections: Dict[str, CollapsibleSection] = {}
+        self._section_reset_buttons: list[QToolButton] = []
 
         self._setup_ui()
         self._connect_signals()
@@ -77,6 +82,21 @@ class ToolsPanel(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
+
+        histogram_section = CollapsibleSection("Histogram", expanded=True)
+        histogram_section.set_header_icon(line_icon("curve"))
+        histogram_content = QWidget()
+        histogram_layout = QVBoxLayout(histogram_content)
+        histogram_layout.setContentsMargins(10, 2, 10, 8)
+        self._histogram_widget = HistogramWidget()
+        histogram_layout.addWidget(self._histogram_widget)
+        self._histogram_readout = QLabel("R: —    G: —    B: —")
+        self._histogram_readout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._histogram_readout.setStyleSheet("color: #aab2bc; font-size: 10px;")
+        histogram_layout.addWidget(self._histogram_readout)
+        histogram_section.set_content_widget(histogram_content)
+        main_layout.addWidget(histogram_section)
+        main_layout.addWidget(EditingToolStrip())
         
         # Scroll area for controls
         scroll_area = QScrollArea()
@@ -133,6 +153,20 @@ class ToolsPanel(QWidget):
             "Blacks", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
         )
         light_content_layout.addWidget(self._blacks_slider)
+        light_section.add_header_widget(
+            self._reset_button_for(
+                "Reset Light",
+                lambda: self._reset_sliders(
+                    self._exposure_slider,
+                    self._contrast_slider,
+                    self._brightness_slider,
+                    self._highlights_slider,
+                    self._shadows_slider,
+                    self._whites_slider,
+                    self._blacks_slider,
+                ),
+            )
+        )
 
         content_layout.addWidget(light_section)
 
@@ -141,6 +175,9 @@ class ToolsPanel(QWidget):
 
         self._curve_editor = CurveEditor()
         curve_content_layout.addWidget(self._curve_editor)
+        curve_section.add_header_widget(
+            self._reset_button_for("Reset Tone Curve", self._curve_editor.reset)
+        )
 
         content_layout.addWidget(curve_section)
 
@@ -148,24 +185,43 @@ class ToolsPanel(QWidget):
         color_section, color_content_layout = self._create_section("Color")
 
         self._temperature_slider = AdjustmentSlider(
-            "Temperature", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+            "Temperature", min_value=-100.0, max_value=100.0, default_value=0.0,
+            step=1.0, decimals=0,
+            color_gradient="qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #287cff, stop:.5 #e6e6e6, stop:1 #ffd429)",
         )
         color_content_layout.addWidget(self._temperature_slider)
 
         self._tint_slider = AdjustmentSlider(
-            "Tint", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+            "Tint", min_value=-100.0, max_value=100.0, default_value=0.0,
+            step=1.0, decimals=0,
+            color_gradient="qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #36b94c, stop:.5 #e6e6e6, stop:1 #d52ac8)",
         )
         color_content_layout.addWidget(self._tint_slider)
 
         self._saturation_slider = AdjustmentSlider(
-            "Saturation", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+            "Saturation", min_value=-100.0, max_value=100.0, default_value=0.0,
+            step=1.0, decimals=0,
+            color_gradient="qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #777, stop:.35 #ff4b4b, stop:.55 #ffe64b, stop:.75 #40d46d, stop:1 #378eff)",
         )
         color_content_layout.addWidget(self._saturation_slider)
         
         self._vibrance_slider = AdjustmentSlider(
-            "Vibrance", min_value=-100.0, max_value=100.0, default_value=0.0, step=1.0, decimals=0
+            "Vibrance", min_value=-100.0, max_value=100.0, default_value=0.0,
+            step=1.0, decimals=0,
+            color_gradient="qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #777, stop:.35 #ff4b4b, stop:.55 #ffe64b, stop:.75 #40d46d, stop:1 #378eff)",
         )
         color_content_layout.addWidget(self._vibrance_slider)
+        color_section.add_header_widget(
+            self._reset_button_for(
+                "Reset Color",
+                lambda: self._reset_sliders(
+                    self._temperature_slider,
+                    self._tint_slider,
+                    self._saturation_slider,
+                    self._vibrance_slider,
+                ),
+            )
+        )
         
         content_layout.addWidget(color_section)
 
@@ -174,6 +230,9 @@ class ToolsPanel(QWidget):
 
         self._hsl_mixer_panel = HslMixerPanel()
         mixer_content_layout.addWidget(self._hsl_mixer_panel)
+        mixer_section.add_header_widget(
+            self._reset_button_for("Reset Color Mixer", self._reset_hsl)
+        )
 
         content_layout.addWidget(mixer_section)
 
@@ -182,6 +241,9 @@ class ToolsPanel(QWidget):
 
         self._color_grading_panel = ColorGradingPanel()
         grading_content_layout.addWidget(self._color_grading_panel)
+        grading_section.add_header_widget(
+            self._reset_button_for("Reset Color Grading", self._reset_color_grading)
+        )
 
         content_layout.addWidget(grading_section)
 
@@ -191,6 +253,11 @@ class ToolsPanel(QWidget):
             default_value=0.0, step=1.0, decimals=0
         )
         effects_content_layout.addWidget(self._texture_slider)
+        effects_section.add_header_widget(
+            self._reset_button_for(
+                "Reset Effects", lambda: self._reset_sliders(self._texture_slider)
+            )
+        )
         content_layout.addWidget(effects_section)
 
         # Reset button
@@ -229,7 +296,16 @@ class ToolsPanel(QWidget):
         """
         expanded = title in {"Light", "Tone Curve", "Color"}
         section = CollapsibleSection(title, expanded=expanded)
-        section.setObjectName(f"{title.lower().replace(' ', '_')}_section")
+        icon_name = {
+            "Light": "effects",
+            "Tone Curve": "curve",
+            "Color": "color",
+            "Color Mixer": "mixer",
+            "Color Grading": "color",
+            "Effects": "effects",
+        }.get(title, "effects")
+        section.set_header_icon(line_icon(icon_name))
+        section.setProperty("sectionName", title.lower().replace(" ", "_"))
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(8, 6, 4, 8)
@@ -237,6 +313,44 @@ class ToolsPanel(QWidget):
         section.set_content_widget(content)
         self._sections[title] = section
         return section, layout
+
+    def _reset_button_for(self, tooltip: str, callback) -> QToolButton:
+        button = QToolButton()
+        button.setIcon(line_icon("reset", "#9da8b3", 16))
+        button.setToolTip(tooltip)
+        button.setAccessibleName(tooltip)
+        button.setAutoRaise(True)
+        button.clicked.connect(callback)
+        self._section_reset_buttons.append(button)
+        return button
+
+    def _reset_sliders(self, *sliders: AdjustmentSlider) -> None:
+        for slider in sliders:
+            slider.reset()
+        self.slider_released.emit()
+
+    def _reset_hsl(self) -> None:
+        values = default_hsl_params()
+        self._hsl_mixer_panel.set_values(values)
+        self._on_hsl_mixer_changed(values)
+        self.slider_released.emit()
+
+    def _reset_color_grading(self) -> None:
+        values = default_color_grading_params()
+        self._color_grading_panel.set_values(values)
+        self._on_color_grading_changed(values)
+        self.slider_released.emit()
+
+    def update_histogram(self, image) -> None:
+        """Refresh the panel histogram and simple mean-channel readout."""
+        self._histogram_widget.set_image(image)
+        if image is None:
+            self._histogram_readout.setText("R: —    G: —    B: —")
+            return
+        means = image[..., :3].mean(axis=(0, 1)) * 255.0
+        self._histogram_readout.setText(
+            f"R: {int(means[0])}    G: {int(means[1])}    B: {int(means[2])}"
+        )
 
     def _connect_signals(self):
         """Connect slider signals."""
@@ -521,3 +635,5 @@ class ToolsPanel(QWidget):
         self._color_grading_panel.setEnabled(enabled)
         self._texture_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)
+        for button in self._section_reset_buttons:
+            button.setEnabled(enabled)

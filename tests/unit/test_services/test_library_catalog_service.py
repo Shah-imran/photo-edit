@@ -130,3 +130,14 @@ class TestLibraryCatalogService:
         assert payload is not None
         assert payload["version"] == 1
         assert payload["values"]["contrast"] == 20.0
+
+    def test_favorite_state_survives_reload(
+        self, library_catalog_path, sample_image_path
+    ):
+        first = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = first.get_current_library_id()
+        first.add_entries(library_id, [sample_image_path])
+        first.set_entry_favorite(library_id, sample_image_path, True)
+
+        reloaded = LibraryCatalogService(catalog_path=library_catalog_path)
+        assert reloaded.get_entry(library_id, sample_image_path).favorite is True

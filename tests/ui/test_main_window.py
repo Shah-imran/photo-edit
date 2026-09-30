@@ -73,6 +73,8 @@ class TestMainWindowUI:
         assert main_window._image_view is not None
         assert main_window._image_toolbar is not None
         assert main_window._filmstrip_view is not None
+        assert main_window._workspace_header is not None
+        assert main_window._tools_panel._histogram_widget is not None
 
     def test_workspace_entry_data_is_shared_with_filmstrip(self, main_window):
         entries = [
@@ -106,6 +108,14 @@ class TestMainWindowUI:
         tools_panel = main_window._tools_panel
         assert tools_panel._exposure_slider.isEnabled() is False
         assert tools_panel._contrast_slider.isEnabled() is False
+
+    def test_workspace_tabs_switch_panel_focus(self, main_window):
+        main_window._workspace_header._library_tab.click()
+        assert main_window.library_dock.isVisible() is True
+        assert main_window.tools_dock.isVisible() is False
+
+        main_window._workspace_header._develop_tab.click()
+        assert main_window.tools_dock.isVisible() is True
 
     def test_toggle_library_panel(self, main_window, qtbot):
         """Test toggling library panel visibility."""
@@ -148,7 +158,8 @@ class TestImageLoading:
         main_window._image_controller.load_image(sample_image_file)
         qtbot.wait(100)
         
-        assert "test_image.jpg" in main_window.windowTitle()
+        assert main_window.windowTitle() == "PhotoEdit"
+        assert sample_image_file not in main_window.windowTitle()
 
     def test_image_displayed_after_load(self, main_window, sample_image_file, qtbot):
         """Test that image is displayed after loading."""
@@ -317,6 +328,27 @@ class TestZoomControls:
         qtbot.waitUntil(
             lambda: not main_window._image_controller._load_threads, timeout=5000
         )
+
+    def test_image_switch_ignores_saved_full_size_zoom(
+        self, main_window, tmp_path, qtbot
+    ):
+        large_image_path = tmp_path / "saved_full_size.jpg"
+        Image.new("RGB", (3000, 2000), color="green").save(large_image_path)
+        path = str(large_image_path)
+        main_window._library_controller.import_images([path])
+        main_window._library_controller.set_entry_adjustment_state(
+            main_window._library_controller.current_library_id,
+            path,
+            {"version": 1, "values": {}, "zoom_factor": 1.0},
+        )
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=5000
+        ):
+            main_window._on_library_image_selected(path)
+        qtbot.wait(50)
+
+        assert main_window._image_controller.get_zoom_factor() < 1.0
 
 
 class TestUndoRedo:
@@ -501,10 +533,10 @@ class TestLibraryPanel:
         main_window._library_view.set_library_section_expanded(False)
         assert main_window._library_view.is_library_section_expanded() is False
 
-    def test_same_library_header_can_toggle_closed(self, main_window):
+    def test_active_library_list_row_stays_selected(self, main_window):
         current_id = main_window._library_view.get_current_library_id()
         main_window._library_view._library_sections[current_id].set_expanded(False)
-        assert main_window._library_view.is_library_section_expanded() is False
+        assert main_window._library_view.is_library_section_expanded() is True
 
     def test_switching_libraries_persists_current_image_adjustments(
         self, main_window, sample_image_file, tmp_path, qtbot

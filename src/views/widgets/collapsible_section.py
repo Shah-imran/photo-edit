@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QLabel,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -39,6 +41,8 @@ class CollapsibleSection(QFrame):
                 font-size: 12px;
                 font-weight: 600;
                 border: none;
+                outline: none;
+                background: transparent;
                 padding: 7px 2px;
                 text-align: left;
             }
@@ -60,6 +64,11 @@ class CollapsibleSection(QFrame):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(6)
 
+        self._icon_label = QLabel()
+        self._icon_label.setFixedSize(QSize(18, 18))
+        self._icon_label.setVisible(False)
+        header_layout.addWidget(self._icon_label)
+
         self._toggle_button = QToolButton()
         self._toggle_button.setText(title)
         self._toggle_button.setCheckable(True)
@@ -67,6 +76,7 @@ class CollapsibleSection(QFrame):
         self._toggle_button.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         )
+        self._toggle_button.setIconSize(QSize(17, 17))
         self._toggle_button.clicked.connect(self.set_expanded)
         header_layout.addWidget(self._toggle_button)
         header_layout.addStretch(1)
@@ -111,6 +121,11 @@ class CollapsibleSection(QFrame):
 
     def set_header_title(self, title: str) -> None:
         self._toggle_button.setText(title)
+
+    def set_header_icon(self, icon: QIcon) -> None:
+        """Set a semantic icon while retaining the disclosure arrow behavior."""
+        self._icon_label.setPixmap(icon.pixmap(self._icon_label.size()))
+        self._icon_label.setVisible(True)
 
     def set_fill_available_space(self, fill: bool) -> None:
         """Control whether the section should expand vertically."""

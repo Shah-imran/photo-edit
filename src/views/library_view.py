@@ -12,6 +12,8 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QToolButton,
+    QFrame,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -20,6 +22,7 @@ from PyQt6.QtWidgets import (
 
 from src.services.file_service import FileService
 from src.views.widgets.collapsible_section import CollapsibleSection
+from src.views.icons import line_icon
 
 
 class ResponsiveLibraryGrid(QListWidget):
@@ -73,6 +76,7 @@ class LibraryView(QWidget):
     library_selected = pyqtSignal(str)
     create_library_requested = pyqtSignal(str)
     remove_library_requested = pyqtSignal(str)
+    collection_selected = pyqtSignal(str)
 
     THUMBNAIL_SIZE = 80
     THUMB_CELL_WIDTH = 112
@@ -159,6 +163,42 @@ class LibraryView(QWidget):
         header_layout.addWidget(self._add_library_button)
         layout.addLayout(header_layout)
 
+        self._collection_counts: dict[str, QLabel] = {}
+        for key, label, icon_name in (
+            ("all", "All Photos", "folder"),
+            ("favorites", "Favorites", "heart"),
+            ("recent", "Recently Added", "clock"),
+        ):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(2, 0, 8, 0)
+            row_layout.setSpacing(4)
+            button = QToolButton()
+            button.setText(label)
+            button.setIcon(line_icon(icon_name, "#c4ced8", 18))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setStyleSheet(
+                "QToolButton { background: transparent; border: none; padding: 6px 4px; "
+                "text-align: left; } QToolButton:hover { background: #303840; }"
+            )
+            button.setAccessibleName(label)
+            button.clicked.connect(
+                lambda _checked=False, collection=key: self.collection_selected.emit(
+                    collection
+                )
+            )
+            row_layout.addWidget(button, 1)
+            count = QLabel("0")
+            count.setStyleSheet("color: #929ba5;")
+            row_layout.addWidget(count)
+            self._collection_counts[key] = count
+            layout.addWidget(row)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet("color: #3a4149; margin: 2px 8px 2px 0;")
+        layout.addWidget(divider)
+
         self._scroll_area = QScrollArea()
         self._scroll_area.setObjectName("libraryScroll")
         self._scroll_area.setWidgetResizable(True)
@@ -177,7 +217,8 @@ class LibraryView(QWidget):
         self._content_widget.setObjectName("libraryContent")
         self._content_layout = QVBoxLayout(self._content_widget)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
-        self._content_layout.setSpacing(10)
+        self._content_layout.setSpacing(10 if self._show_thumbnail_grid else 0)
+        self._content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._scroll_area.setWidget(self._content_widget)
         layout.addWidget(self._scroll_area, 1)
 
@@ -193,6 +234,19 @@ class LibraryView(QWidget):
 
     def set_libraries(self, libraries: list[dict], current_library_id: str) -> None:
         self._current_library_id = current_library_id
+        active_library = next(
+            (
+                library
+                for library in libraries
+                if str(library.get("id")) == current_library_id
+            ),
+            {},
+        )
+        total = int(active_library.get("count", 0))
+        favorites = int(active_library.get("favorite_count", 0))
+        self._collection_counts["all"].setText(str(total))
+        self._collection_counts["favorites"].setText(str(favorites))
+        self._collection_counts["recent"].setText(str(total))
         self._suppress_section_signal = True
         try:
             self._clear_library_sections()
@@ -238,6 +292,21 @@ class LibraryView(QWidget):
                     section.set_content_widget(grid)
                 else:
                     section.set_content_area_enabled(False)
+                    section.set_header_icon(line_icon("folder", "#8ec9ff", 18))
+                    section.setStyleSheet(
+                        section.styleSheet()
+                        + """
+                        QFrame#collapsibleSection QToolButton {
+                            padding: 8px 7px;
+                        }
+                        QFrame#collapsibleSection QToolButton:checked {
+                            background: #263746;
+                            border-left: 3px solid #0086f0;
+                            color: white;
+                            padding-left: 4px;
+                        }
+                        """
+                    )
                 section.toggled.connect(
                     lambda expanded, lid=library_id: self._on_library_section_toggled(
                         lid, expanded
@@ -344,6 +413,14 @@ class LibraryView(QWidget):
             return
 
         if library_id == self._current_library_id:
+            if not self._show_thumbnail_grid:
+                # In navigation-only mode the rows behave like a list, so the
+                # active row cannot be collapsed/deselected by clicking it.
+                self._suppress_section_signal = True
+                try:
+                    self._library_sections[library_id].set_expanded(True)
+                finally:
+                    self._suppress_section_signal = False
             self._apply_active_section_layout()
 
     def update_entry_thumbnail(self, path: str, payload: dict) -> None:
