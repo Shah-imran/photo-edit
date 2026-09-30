@@ -268,7 +268,11 @@ class LibraryController(QObject):
 
     def _emit_libraries(self) -> None:
         libraries = [
-            {"id": library.id, "name": library.name}
+            {
+                "id": library.id,
+                "name": library.name,
+                "count": len(library.entries),
+            }
             for library in self._catalog_service.list_libraries()
         ]
         self.libraries_changed.emit(libraries, self._current_library_id)

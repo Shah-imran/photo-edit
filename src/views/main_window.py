@@ -1,12 +1,14 @@
 """Main window for PhotoEdit application."""
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
     QHBoxLayout,
+    QVBoxLayout,
     QDockWidget,
     QLabel,
     QStatusBar,
@@ -26,6 +28,9 @@ from src.views.image_view import ImageView
 from src.views.tools_panel import ToolsPanel
 from src.views.export_dialog import ExportDialog
 from src.views.library_view import LibraryView
+from src.views.theme import apply_theme
+from src.views.widgets.filmstrip_view import FilmstripView
+from src.views.widgets.image_toolbar import ImageToolBar
 from src.controllers.library_controller import LibraryController
 from src.controllers.image_controller import ImageController
 from src.services.library_catalog_service import LibraryCatalogService
@@ -61,6 +66,8 @@ class MainWindow(QMainWindow):
                 a default one is created using the application's QSettings.
         """
         super().__init__()
+        apply_theme()
+        self.setObjectName("photoEditMainWindow")
         self.setWindowTitle("PhotoEdit")
         self.setMinimumSize(1200, 800)
         
@@ -83,7 +90,9 @@ class MainWindow(QMainWindow):
         # Initialize components
         self._image_view = ImageView()
         self._tools_panel = ToolsPanel()
-        self._library_view = LibraryView()
+        self._library_view = LibraryView(show_thumbnail_grid=False)
+        self._image_toolbar = ImageToolBar()
+        self._filmstrip_view = FilmstripView()
         self._library_controller = LibraryController(
             catalog_service=self._catalog_service,
             thumbnail_cache_service=self._thumbnail_cache_service,
@@ -120,26 +129,38 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        layout = QHBoxLayout(central_widget)
+        layout = QVBoxLayout(central_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        
-        # Add image view as central widget
-        layout.addWidget(self._image_view)
+
+        # Editing workspace: canvas, local controls, then the active-library strip.
+        layout.addWidget(self._image_view, 1)
+        layout.addWidget(self._image_toolbar)
+        layout.addWidget(self._filmstrip_view)
         
         # Left panel - Library
         self.library_dock = QDockWidget("Library", self)
         self.library_dock.setObjectName("library_dock")
         self.library_dock.setWidget(self._library_view)
-        self.library_dock.setMinimumWidth(200)
+        self.library_dock.setMinimumWidth(230)
+        # Keep enough headroom for a user's persisted custom dock width.
+        self.library_dock.setMaximumWidth(360)
+        self.library_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.library_dock)
         
         # Right panel - Tools
         self.tools_dock = QDockWidget("Adjustments", self)
         self.tools_dock.setObjectName("tools_dock")
         self.tools_dock.setWidget(self._tools_panel)
-        self.tools_dock.setMinimumWidth(280)
+        self.tools_dock.setMinimumWidth(310)
+        self.tools_dock.setMaximumWidth(420)
+        self.tools_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.tools_dock)
+        self.resizeDocks(
+            [self.library_dock, self.tools_dock],
+            [270, 340],
+            Qt.Orientation.Horizontal,
+        )
         
         # Disable tools panel until image is loaded
         self._tools_panel.set_enabled(False)
@@ -193,10 +214,22 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._create_action("Toggle &Library Panel", self._toggle_library_panel, "F5"))
         view_menu.addAction(self._create_action("Toggle &Tools Panel", self._toggle_tools_panel, "F6"))
 
+        help_menu = menubar.addMenu("&Help")
+        help_menu.addAction(self._create_action("&About PhotoEdit", self._show_about))
+
     def _setup_status_bar(self):
         """Set up the status bar."""
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
+
+        self._file_label = QLabel("No image selected")
+        self._file_label.setObjectName("statusFileLabel")
+        self._file_label.setStyleSheet("color: #a0a0a0; padding: 0 8px;")
+        self._dimensions_label = QLabel("—")
+        self._dimensions_label.setObjectName("statusDimensionsLabel")
+        self._dimensions_label.setStyleSheet("color: #707070; padding: 0 8px;")
+        self._status_bar.addWidget(self._file_label)
+        self._status_bar.addWidget(self._dimensions_label)
         
         # Thumbnail import progress (non-modal; hidden when idle)
         self._thumb_import_label = QLabel("Thumbnails")
@@ -262,12 +295,17 @@ class MainWindow(QMainWindow):
         """Connect signals to slots."""
         self._image_view.image_loaded.connect(self._on_image_loaded)
         self._image_view.zoom_changed.connect(self._on_zoom_changed)
+        self._image_toolbar.fit_requested.connect(self._fit_to_window)
+        self._image_toolbar.actual_size_requested.connect(self._view_100_percent)
+        self._image_toolbar.zoom_in_requested.connect(self._zoom_in)
+        self._image_toolbar.zoom_out_requested.connect(self._zoom_out)
         self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
         self._tools_panel.curve_changed.connect(self._on_curve_changed)
         self._tools_panel.hsl_changed.connect(self._on_hsl_changed)
         self._tools_panel.color_grading_changed.connect(self._on_color_grading_changed)
         self._tools_panel.slider_released.connect(self._on_slider_released)
         self._library_view.image_selected.connect(self._on_library_image_selected)
+        self._filmstrip_view.image_selected.connect(self._on_library_image_selected)
         self._library_view.import_requested.connect(self._import_images)
         self._library_view.library_selected.connect(self._on_library_selected)
         self._library_view.create_library_requested.connect(
@@ -283,7 +321,7 @@ class MainWindow(QMainWindow):
             self._on_library_entries_rebuilt
         )
         self._library_controller.entry_thumbnail_updated.connect(
-            self._library_view.update_entry_thumbnail
+            self._on_entry_thumbnail_updated
         )
         self._library_controller.thumbnail_batch_started.connect(
             self._on_thumbnail_batch_started
@@ -299,8 +337,19 @@ class MainWindow(QMainWindow):
         self._image_controller.image_load_finished.connect(self._on_image_load_finished)
 
     def _on_library_entries_rebuilt(self, library_id: str, entries: list[dict]) -> None:
-        del library_id
         self._library_view.set_entries(entries)
+        self._filmstrip_view.set_context(
+            self._library_controller.get_library_name(library_id)
+        )
+        self._filmstrip_view.set_entries(entries)
+        self._filmstrip_view.set_current_path(
+            self._image_controller.image_model.file_path
+        )
+
+    def _on_entry_thumbnail_updated(self, path: str, payload: dict) -> None:
+        """Keep the library grid and filmstrip thumbnail surfaces in sync."""
+        self._library_view.update_entry_thumbnail(path, payload)
+        self._filmstrip_view.update_entry_thumbnail(path, payload)
 
     def _on_image_loaded(self):
         """Handle image loaded event."""
@@ -308,6 +357,10 @@ class MainWindow(QMainWindow):
         if file_path:
             self.setWindowTitle(f"PhotoEdit - {file_path}")
             self._status_bar.showMessage(f"Loaded: {file_path}", 3000)
+            self._file_label.setText(Path(file_path).name)
+            width, height = self._image_controller.image_model.get_image_size()
+            self._dimensions_label.setText(f"{width} × {height}")
+            self._filmstrip_view.set_current_path(file_path)
             # Enable tools panel
             self._tools_panel.set_enabled(True)
             if self._pending_zoom_factor is None:
@@ -317,7 +370,9 @@ class MainWindow(QMainWindow):
 
     def _on_zoom_changed(self, zoom_factor: float):
         """Handle zoom changed event."""
-        self._zoom_label.setText(f"{int(zoom_factor * 100)}%")
+        percent = max(1, int(round(zoom_factor * 100)))
+        self._zoom_label.setText(f"{percent}%")
+        self._image_toolbar.set_zoom_factor(zoom_factor)
 
     def _on_adjustments_changed(self, adjustments: dict):
         """Handle adjustments changed from tools panel."""
@@ -628,6 +683,15 @@ class MainWindow(QMainWindow):
     def _toggle_tools_panel(self):
         """Toggle tools panel visibility."""
         self.tools_dock.setVisible(not self.tools_dock.isVisible())
+
+    def _show_about(self) -> None:
+        """Show a compact product description without external navigation."""
+        QMessageBox.about(
+            self,
+            "About PhotoEdit",
+            "<b>PhotoEdit</b><br>"
+            "A focused, non-destructive photo editing workspace built with PyQt6.",
+        )
 
     def _restore_window_geometry(self) -> None:
         """Restore window size and position from settings (if any)."""

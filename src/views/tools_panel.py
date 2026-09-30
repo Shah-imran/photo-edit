@@ -7,7 +7,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QScrollArea,
     QPushButton,
-    QFrame
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -18,6 +17,7 @@ from src.views.widgets.adjustment_slider import AdjustmentSlider
 from src.views.widgets.color_grading_panel import ColorGradingPanel
 from src.views.widgets.curve_editor import CurveEditor
 from src.views.widgets.hsl_mixer_panel import HslMixerPanel
+from src.views.widgets.collapsible_section import CollapsibleSection
 
 
 class ToolsPanel(QWidget):
@@ -67,6 +67,7 @@ class ToolsPanel(QWidget):
         self._hsl_values: Dict[str, float] = default_hsl_params()
         self._color_grading_values: Dict[str, float] = default_color_grading_params()
         self._suppress_adjustment_signal = False
+        self._sections: Dict[str, CollapsibleSection] = {}
 
         self._setup_ui()
         self._connect_signals()
@@ -92,8 +93,8 @@ class ToolsPanel(QWidget):
         content = QWidget()
         content.setStyleSheet("background-color: #242424;")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(12, 12, 12, 12)
-        content_layout.setSpacing(16)
+        content_layout.setContentsMargins(10, 8, 10, 12)
+        content_layout.setSpacing(4)
         
         # Light section
         light_section, light_content_layout = self._create_section("Light")
@@ -217,7 +218,7 @@ class ToolsPanel(QWidget):
         scroll_area.setWidget(content)
         main_layout.addWidget(scroll_area)
 
-    def _create_section(self, title: str) -> Tuple[QFrame, QVBoxLayout]:
+    def _create_section(self, title: str) -> Tuple[CollapsibleSection, QVBoxLayout]:
         """Create a section frame with title.
         
         Args:
@@ -226,31 +227,15 @@ class ToolsPanel(QWidget):
         Returns:
             Tuple of (QFrame, QVBoxLayout for content)
         """
-        section = QFrame()
-        section.setStyleSheet("""
-            QFrame {
-                background-color: transparent;
-            }
-        """)
-        
-        layout = QVBoxLayout(section)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        
-        # Section title
-        title_label = QLabel(title)
-        title_label.setStyleSheet("""
-            QLabel {
-                color: #a0a0a0;
-                font-size: 12px;
-                font-weight: bold;
-                padding-bottom: 4px;
-                border-bottom: 1px solid #3a3a3a;
-            }
-        """)
-        layout.addWidget(title_label)
-        
-        # Return both the section and the layout to add content to
+        expanded = title in {"Light", "Tone Curve", "Color"}
+        section = CollapsibleSection(title, expanded=expanded)
+        section.setObjectName(f"{title.lower().replace(' ', '_')}_section")
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 6, 4, 8)
+        layout.setSpacing(4)
+        section.set_content_widget(content)
+        self._sections[title] = section
         return section, layout
 
     def _connect_signals(self):

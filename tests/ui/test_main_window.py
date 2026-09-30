@@ -71,6 +71,35 @@ class TestMainWindowUI:
         assert main_window.library_dock is not None
         assert main_window.tools_dock is not None
         assert main_window._image_view is not None
+        assert main_window._image_toolbar is not None
+        assert main_window._filmstrip_view is not None
+
+    def test_workspace_entry_data_is_shared_with_filmstrip(self, main_window):
+        entries = [
+            {
+                "path": "C:/photos/test.jpg",
+                "status": "available",
+                "text": "test.jpg",
+                "tooltip": "C:/photos/test.jpg",
+                "placeholder": "loading",
+            }
+        ]
+        main_window._on_library_entries_rebuilt("default", entries)
+        assert main_window._filmstrip_view.count() == 1
+
+    def test_image_toolbar_invokes_existing_zoom_action(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        main_window._image_view.set_zoom_factor(1.0)
+
+        QTest.mouseClick(
+            main_window._image_toolbar._zoom_in_button,
+            Qt.MouseButton.LeftButton,
+        )
+
+        assert main_window._image_view.get_zoom_factor() > 1.0
+        assert main_window._image_toolbar._zoom_label.text().endswith("%")
 
     def test_tools_panel_disabled_initially(self, main_window):
         """Test that tools panel is disabled until image is loaded."""
@@ -404,7 +433,9 @@ class TestLibraryPanel:
 
         assert main_window._library_view.get_image_count() == 0
 
-    def test_switching_libraries_updates_grid(self, main_window, sample_image_file, tmp_path):
+    def test_switching_libraries_updates_bottom_filmstrip(
+        self, main_window, sample_image_file, tmp_path
+    ):
         other = tmp_path / "other.jpg"
         Image.new("RGB", (40, 40), color="green").save(other)
 
@@ -419,8 +450,11 @@ class TestLibraryPanel:
         controller.import_images([str(other)])
 
         assert library.get_image_count() == 1
-        current_grid = library._grid_by_library_id[second_id]
-        assert current_grid.item(0).data(Qt.ItemDataRole.UserRole) == str(other)
+        assert second_id not in library._grid_by_library_id
+        assert main_window._filmstrip_view.current_path() is None
+        filmstrip_item = main_window._filmstrip_view._list.item(0)
+        assert filmstrip_item.data(Qt.ItemDataRole.UserRole) == str(other)
+        assert main_window._filmstrip_view._source_label.text() == "Travel"
 
     def test_startup_restores_selected_library(self, qapp, qtbot, tmp_path, sample_image_file):
         settings = SettingsService(

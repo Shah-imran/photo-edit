@@ -65,8 +65,8 @@ class AdjustmentSlider(QWidget):
     def _setup_ui(self, label: str):
         """Set up the UI components."""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 6)
+        layout.setSpacing(2)
         
         # Top row: label and value
         top_row = QHBoxLayout()
@@ -83,7 +83,7 @@ class AdjustmentSlider(QWidget):
         self._spin_box.setSingleStep(self._step)
         self._spin_box.setDecimals(self._decimals)
         self._spin_box.setValue(self._default_value)
-        self._spin_box.setFixedWidth(70)
+        self._spin_box.setFixedWidth(58)
         self._spin_box.setStyleSheet("""
             QDoubleSpinBox {
                 background-color: #2d2d2d;
@@ -109,23 +109,25 @@ class AdjustmentSlider(QWidget):
         self._slider.setValue(int(self._default_value * self._scale_factor))
         self._slider.setStyleSheet("""
             QSlider::groove:horizontal {
-                height: 4px;
-                background: #3a3a3a;
-                border-radius: 2px;
+                height: 2px;
+                background: #484848;
+                border-radius: 1px;
             }
             QSlider::handle:horizontal {
-                width: 14px;
-                height: 14px;
-                background: #0078d4;
-                border-radius: 7px;
+                width: 12px;
+                height: 12px;
+                background: #e2e2e2;
+                border: 1px solid #707070;
+                border-radius: 6px;
                 margin: -5px 0;
             }
             QSlider::handle:horizontal:hover {
-                background: #0086f0;
+                background: white;
+                border-color: #0086f0;
             }
             QSlider::sub-page:horizontal {
                 background: #0078d4;
-                border-radius: 2px;
+                border-radius: 1px;
             }
         """)
         layout.addWidget(self._slider)

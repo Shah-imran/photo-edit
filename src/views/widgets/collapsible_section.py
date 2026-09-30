@@ -27,24 +27,33 @@ class CollapsibleSection(QFrame):
         expanded: bool = True,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("collapsibleSection")
         self.setStyleSheet(
             """
-            QFrame {
+            QFrame#collapsibleSection {
                 background-color: transparent;
+                border-bottom: 1px solid #363636;
             }
-            QToolButton {
-                color: #a0a0a0;
+            QFrame#collapsibleSection QToolButton {
+                color: #d8d8d8;
                 font-size: 12px;
-                font-weight: bold;
+                font-weight: 600;
                 border: none;
-                padding: 0 0 4px 0;
+                padding: 7px 2px;
+                text-align: left;
+            }
+            QFrame#collapsibleSection QToolButton:hover { color: white; }
+            QFrame#collapsibleSection QToolButton:checked {
+                background: transparent;
+                border: none;
+                color: #e0e0e0;
             }
             """
         )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
 
         header = QWidget()
         header_layout = QHBoxLayout(header)
@@ -77,6 +86,7 @@ class CollapsibleSection(QFrame):
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Maximum,
         )
+        self._content_area_enabled = True
         self.set_expanded(expanded)
 
     def add_header_widget(self, widget: QWidget) -> None:
@@ -110,12 +120,27 @@ class CollapsibleSection(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Preferred, policy)
         self._content_container.setSizePolicy(QSizePolicy.Policy.Preferred, policy)
 
+    def set_content_area_enabled(self, enabled: bool) -> None:
+        """Allow the section header to act as a compact navigation row."""
+        self._content_area_enabled = enabled
+        self._content_container.setVisible(enabled and self.is_expanded())
+        if not enabled:
+            self._toggle_button.setArrowType(Qt.ArrowType.NoArrow)
+        else:
+            self._toggle_button.setArrowType(
+                Qt.ArrowType.DownArrow
+                if self.is_expanded()
+                else Qt.ArrowType.RightArrow
+            )
+
     def set_expanded(self, expanded: bool) -> None:
         """Show or hide the content area."""
         self._toggle_button.setChecked(expanded)
-        arrow = (
-            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
-        )
+        arrow = Qt.ArrowType.NoArrow
+        if self._content_area_enabled:
+            arrow = (
+                Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+            )
         self._toggle_button.setArrowType(arrow)
-        self._content_container.setVisible(expanded)
+        self._content_container.setVisible(expanded and self._content_area_enabled)
         self.toggled.emit(expanded)

@@ -364,3 +364,22 @@ Verified: full existing suite plus ~90 new/updated tests across
 `MainWindow` all pass (468 passed; one pre-existing, unrelated
 `offscreen`-QPA geometry-restoration flake confirmed present before this
 slice via `git stash`, left untouched).
+
+## 12. Interaction clarification and deferred history work
+
+The master curve intentionally follows the conventional professional point-
+curve model: the black endpoint is pinned at input `x=0` and the white endpoint
+at input `x=1`, so both endpoints move vertically only. Because the identity
+curve starts at `(0, 0)` and `(1, 1)`, the black endpoint can initially move
+only upward (lift blacks) and the white endpoint initially only downward
+(compress whites). Interior points move in both axes subject to neighbor order.
+This is expected behavior, not a drag bug. Separate input-level controls that
+could move effective black/white inputs horizontally remain future scope.
+
+Undo/redo has a separate known limitation: the current history entry restores
+the rendered image buffer but not the curve points or other adjustment state in
+the controller and tools UI. Export and a subsequent preview can therefore use
+the still-current post-edit parameters after an undo. A future state-aware
+history slice must restore the complete before/after payload, controls, render,
+export state, and persistence together; this limitation is tracked in Phase B
+of `PRODUCT_ROADMAP.md`.
