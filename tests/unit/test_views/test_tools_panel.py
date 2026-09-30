@@ -386,3 +386,23 @@ class TestToolsPanelColorGrading:
         assert panel.get_hsl_params() == default_hsl_params()
         assert panel.get_wb_params() == {'temperature': 0.0, 'tint': 0.0}
         assert panel.get_color_params() == {'saturation': 0.0, 'vibrance': 0.0}
+
+
+class TestToolsPanelTexture:
+    def test_texture_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._texture_slider._spin_box.minimum() == -100.0
+        assert panel._texture_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["texture"] == 0.0
+        panel._texture_slider.set_value(-35.0)
+        assert received[-1]["texture"] == -35.0
+
+    def test_texture_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"texture": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["texture"] == 25.0
+        assert received == []

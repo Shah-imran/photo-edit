@@ -60,7 +60,8 @@ class ToolsPanel(QWidget):
             'temperature': 0.0,
             'tint': 0.0,
             'saturation': 0.0,
-            'vibrance': 0.0
+            'vibrance': 0.0,
+            'texture': 0.0
         }
         self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
         self._hsl_values: Dict[str, float] = default_hsl_params()
@@ -183,6 +184,14 @@ class ToolsPanel(QWidget):
 
         content_layout.addWidget(grading_section)
 
+        effects_section, effects_content_layout = self._create_section("Effects")
+        self._texture_slider = AdjustmentSlider(
+            "Texture", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        effects_content_layout.addWidget(self._texture_slider)
+        content_layout.addWidget(effects_section)
+
         # Reset button
         self._reset_button = QPushButton("Reset All")
         self._reset_button.setStyleSheet("""
@@ -281,6 +290,10 @@ class ToolsPanel(QWidget):
             lambda v: self._on_adjustment_changed('vibrance', v)
         )
 
+        self._texture_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('texture', v)
+        )
+
         # Slider released signals (for final processing)
         self._exposure_slider.slider_released.connect(self._on_slider_released)
         self._contrast_slider.slider_released.connect(self._on_slider_released)
@@ -293,6 +306,7 @@ class ToolsPanel(QWidget):
         self._tint_slider.slider_released.connect(self._on_slider_released)
         self._saturation_slider.slider_released.connect(self._on_slider_released)
         self._vibrance_slider.slider_released.connect(self._on_slider_released)
+        self._texture_slider.slider_released.connect(self._on_slider_released)
 
         self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
@@ -450,6 +464,7 @@ class ToolsPanel(QWidget):
             'tint': float(adjustments.get('tint', 0.0)),
             'saturation': float(adjustments.get('saturation', 0.0)),
             'vibrance': float(adjustments.get('vibrance', 0.0)),
+            'texture': float(adjustments.get('texture', 0.0)),
         }
         curve_points = normalize_points(adjustments.get('tone_curve'))
         hsl_values = default_hsl_params()
@@ -483,6 +498,7 @@ class ToolsPanel(QWidget):
             self._tint_slider.set_value(merged['tint'])
             self._saturation_slider.set_value(merged['saturation'])
             self._vibrance_slider.set_value(merged['vibrance'])
+            self._texture_slider.set_value(merged['texture'])
             self._curve_editor.set_points(curve_points)
             self._hsl_mixer_panel.set_values(hsl_values)
             self._color_grading_panel.set_values(color_grading_values)
@@ -518,4 +534,5 @@ class ToolsPanel(QWidget):
         self._curve_editor.setEnabled(enabled)
         self._hsl_mixer_panel.setEnabled(enabled)
         self._color_grading_panel.setEnabled(enabled)
+        self._texture_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)

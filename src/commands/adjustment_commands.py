@@ -11,6 +11,7 @@ from src.processors.exposure_processor import ExposureProcessor
 from src.processors.hsl_mixer_processor import HslMixerProcessor
 from src.processors.tonal_processor import TonalProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
+from src.processors.texture_processor import TextureProcessor
 from src.utils.color_pipeline import LinearImage
 
 
@@ -104,6 +105,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         wb_params: Dict[str, float] = None,
         hsl_params: Dict[str, float] = None,
         color_grading_params: Dict[str, float] = None,
+        texture_params: Dict[str, float] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -136,6 +138,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._color_processor = ColorProcessor()
         self._hsl_processor = HslMixerProcessor()
         self._color_grading_processor = ColorGradingProcessor()
+        self._texture_processor = TextureProcessor()
+        self._texture_params = texture_params or {}
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -168,6 +172,11 @@ class CombinedAdjustmentCommand(BaseCommand):
         if self._color_grading_params:
             result = self._color_grading_processor.process(
                 result, **self._color_grading_params
+            )
+
+        if self._texture_params:
+            result = self._texture_processor.process(
+                result, **self._texture_params
             )
 
         self._new_image = result

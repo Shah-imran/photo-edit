@@ -21,6 +21,7 @@ from src.processors.color_grading_processor import (
     ColorGradingProcessor,
     default_color_grading_params,
 )
+from src.processors.texture_processor import TextureProcessor
 from src.commands.adjustment_commands import (
     CombinedAdjustmentCommand,
     ImageStateChangeCommand,
@@ -97,6 +98,7 @@ class ImageController(QObject):
         "tint": 0.0,
         "saturation": 0.0,
         "vibrance": 0.0,
+        "texture": 0.0,
     }
     # Tone curve control points are not floats, so they are kept out of
     # _ADJUSTMENT_DEFAULTS (which _normalize_adjustment_state float-casts
@@ -152,6 +154,7 @@ class ImageController(QObject):
         self._color_processor = ColorProcessor()
         self._hsl_processor = HslMixerProcessor()
         self._color_grading_processor = ColorGradingProcessor()
+        self._texture_processor = TextureProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
@@ -161,6 +164,7 @@ class ImageController(QObject):
         self._wb_params: Dict[str, float] = {}
         self._hsl_params: Dict[str, float] = {}
         self._color_grading_params: Dict[str, float] = {}
+        self._texture_params: Dict[str, float] = {}
         
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
@@ -393,6 +397,7 @@ class ImageController(QObject):
         self._wb_params = {}
         self._hsl_params = {}
         self._color_grading_params = {}
+        self._texture_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -500,6 +505,8 @@ class ImageController(QObject):
             result = self._color_grading_processor.process(
                 result, **self._color_grading_params
             )
+        if self._texture_params:
+            result = self._texture_processor.process(result, **self._texture_params)
         return result
 
     def refresh_view(self) -> None:
@@ -537,6 +544,7 @@ class ImageController(QObject):
             **self._COLOR_GRADING_DEFAULTS,
             **self._color_grading_params,
         }
+        state.update(self._texture_params)
         return state
 
     def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
@@ -590,6 +598,7 @@ class ImageController(QObject):
         )
         self._hsl_params = hsl_values
         self._color_grading_params = color_grading_values
+        self._texture_params = {"texture": normalized["texture"]}
 
         if not self.has_image():
             return
@@ -623,6 +632,7 @@ class ImageController(QObject):
         result = self._color_grading_processor.process(
             result, **self._color_grading_params
         )
+        result = self._texture_processor.process(result, **self._texture_params)
         self._image_model.current_image = result
         self.refresh_view()
 
@@ -637,6 +647,7 @@ class ImageController(QObject):
         self._wb_params = {}
         self._hsl_params = {}
         self._color_grading_params = {}
+        self._texture_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -721,6 +732,7 @@ class ImageController(QObject):
         wb_params: Dict[str, float] = None,
         hsl_params: Dict[str, float] = None,
         color_grading_params: Dict[str, float] = None,
+        texture_params: Dict[str, float] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -764,6 +776,8 @@ class ImageController(QObject):
             self._hsl_params = hsl_params
         if color_grading_params:
             self._color_grading_params = color_grading_params
+        if texture_params:
+            self._texture_params = texture_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -777,6 +791,7 @@ class ImageController(QObject):
                         wb_params=self._wb_params,
                         hsl_params=self._hsl_params,
                         color_grading_params=self._color_grading_params,
+                        texture_params=self._texture_params,
                     )
                 )
             else:
@@ -790,6 +805,7 @@ class ImageController(QObject):
                         wb_params=self._wb_params,
                         hsl_params=self._hsl_params,
                         color_grading_params=self._color_grading_params,
+                        texture_params=self._texture_params,
                         interactive_preview=True,
                     )
                 )
@@ -806,6 +822,7 @@ class ImageController(QObject):
                 wb_params=self._wb_params,
                 hsl_params=self._hsl_params,
                 color_grading_params=self._color_grading_params,
+                texture_params=self._texture_params,
             )
             self._history_service.execute_command(command)
         else:
@@ -845,6 +862,8 @@ class ImageController(QObject):
                 result = self._color_grading_processor.process(
                     result, **self._color_grading_params
                 )
+            if self._texture_params:
+                result = self._texture_processor.process(result, **self._texture_params)
 
             self._image_model.current_image = result
 
@@ -903,12 +922,14 @@ class ImageController(QObject):
             'saturation': adjustments.get('saturation', 0.0),
             'vibrance': adjustments.get('vibrance', 0.0)
         }
+        texture_params = {"texture": adjustments.get("texture", 0.0)}
 
         # Store params
         self._exposure_params = exposure_params
         self._tonal_params = tonal_params
         self._wb_params = wb_params
         self._color_params = color_params
+        self._texture_params = texture_params
 
         if self._use_threading and self._debouncer is not None:
             # Use throttled + debounced async processing. The curve and
@@ -924,6 +945,7 @@ class ImageController(QObject):
                 'wb': wb_params,
                 'hsl': self._hsl_params,
                 'color_grading': self._color_grading_params,
+                'texture': self._texture_params,
             })
             mode = "debounced-threaded"
         else:
@@ -936,6 +958,7 @@ class ImageController(QObject):
                 wb_params,
                 self._hsl_params,
                 self._color_grading_params,
+                self._texture_params,
                 add_to_history=False,
             )
             mode = "sync-fallback"
@@ -992,6 +1015,7 @@ class ImageController(QObject):
                 'wb': self._wb_params,
                 'hsl': self._hsl_params,
                 'color_grading': self._color_grading_params,
+                'texture': self._texture_params,
             })
         else:
             self.apply_adjustments(
@@ -1039,6 +1063,7 @@ class ImageController(QObject):
                 'wb': self._wb_params,
                 'hsl': self._hsl_params,
                 'color_grading': self._color_grading_params,
+                'texture': self._texture_params,
             })
         else:
             self.apply_adjustments(
@@ -1086,6 +1111,7 @@ class ImageController(QObject):
                 'wb': self._wb_params,
                 'hsl': self._hsl_params,
                 'color_grading': self._color_grading_params,
+                'texture': self._texture_params,
             })
         else:
             self.apply_adjustments(
@@ -1114,6 +1140,7 @@ class ImageController(QObject):
         wb_params = params.get('wb', {})
         hsl_params = params.get('hsl', {})
         color_grading_params = params.get('color_grading', {})
+        texture_params = params.get('texture', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
@@ -1122,6 +1149,7 @@ class ImageController(QObject):
             wb_params=wb_params,
             hsl_params=hsl_params,
             color_grading_params=color_grading_params,
+            texture_params=texture_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1150,6 +1178,7 @@ class ImageController(QObject):
         wb_params = params.get('wb', {})
         hsl_params = params.get('hsl', {})
         color_grading_params = params.get('color_grading', {})
+        texture_params = params.get('texture', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -1161,6 +1190,7 @@ class ImageController(QObject):
             wb_params=wb_params,
             hsl_params=hsl_params,
             color_grading_params=color_grading_params,
+            texture_params=texture_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1268,6 +1298,7 @@ class ImageController(QObject):
                 wb_params=self._wb_params,
                 hsl_params=self._hsl_params,
                 color_grading_params=self._color_grading_params,
+                texture_params=self._texture_params,
                 interactive_preview=False,
             )
 
@@ -1299,6 +1330,7 @@ class ImageController(QObject):
                 self._color_grading_params.get(key, 0.0) != default
                 for key, default in self._COLOR_GRADING_DEFAULTS.items()
             ) or
+            any(v != 0 for v in self._texture_params.values()) or
             not is_identity_curve(self._curve_params.get("points"))
         )
 
@@ -1321,6 +1353,7 @@ class ImageController(QObject):
             wb_params=self._wb_params,
             hsl_params=self._hsl_params,
             color_grading_params=self._color_grading_params,
+            texture_params=self._texture_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -1372,6 +1405,7 @@ class ImageController(QObject):
                 wb_params=self._wb_params.copy(),
                 hsl_params=self._hsl_params.copy(),
                 color_grading_params=self._color_grading_params.copy(),
+                texture_params=self._texture_params.copy(),
             )
             self._history_service.execute_command(command)
 

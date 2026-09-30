@@ -22,6 +22,7 @@ from src.processors.curve_processor import CurveProcessor
 from src.processors.exposure_processor import ExposureProcessor
 from src.processors.hsl_mixer_processor import HslMixerProcessor
 from src.processors.tonal_processor import TonalProcessor
+from src.processors.texture_processor import TextureProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils.color_pipeline import LinearImage
 
@@ -81,6 +82,7 @@ class ProcessingWorker(QObject):
         self._color_processor = ColorProcessor()
         self._hsl_processor = HslMixerProcessor()
         self._color_grading_processor = ColorGradingProcessor()
+        self._texture_processor = TextureProcessor()
 
         # Thread control
         self._running = False
@@ -149,6 +151,7 @@ class ProcessingWorker(QObject):
         wb_params: Optional[Dict[str, float]] = None,
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
+        texture_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -176,6 +179,7 @@ class ProcessingWorker(QObject):
             wb_params=wb_params,
             hsl_params=hsl_params,
             color_grading_params=color_grading_params,
+            texture_params=texture_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -195,6 +199,7 @@ class ProcessingWorker(QObject):
         wb_params: Optional[Dict[str, float]] = None,
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
+        texture_params: Optional[Dict[str, float]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -222,6 +227,7 @@ class ProcessingWorker(QObject):
             wb_params,
             hsl_params,
             color_grading_params,
+            texture_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -235,6 +241,7 @@ class ProcessingWorker(QObject):
         wb_params: Optional[Dict[str, float]] = None,
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
+        texture_params: Optional[Dict[str, float]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -260,6 +267,7 @@ class ProcessingWorker(QObject):
             wb_params,
             hsl_params,
             color_grading_params,
+            texture_params,
             use_proxy=False,
         )
     
@@ -366,6 +374,7 @@ class ProcessingWorker(QObject):
                 request.wb_params,
                 request.hsl_params,
                 request.color_grading_params,
+                request.texture_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -437,6 +446,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.wb_params.items())),
             tuple(sorted(request.hsl_params.items())),
             tuple(sorted(request.color_grading_params.items())),
+            tuple(sorted(request.texture_params.items())),
         )
 
     @staticmethod
@@ -450,6 +460,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.wb_params.items())),
             tuple(sorted(request.hsl_params.items())),
             tuple(sorted(request.color_grading_params.items())),
+            tuple(sorted(request.texture_params.items())),
         )
 
     def _apply_adjustments(
@@ -462,6 +473,7 @@ class ProcessingWorker(QObject):
         wb_params: Optional[Dict[str, float]] = None,
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
+        texture_params: Optional[Dict[str, float]] = None,
     ) -> LinearImage:
         """Apply exposure, tonal, white balance, curve, color, HSL mixer,
         and Color Grading adjustments to a ``LinearImage``."""
@@ -514,10 +526,16 @@ class ProcessingWorker(QObject):
             )
             color_grading_ms = _elapsed_ms(color_grading_start)
 
+        texture_ms = 0.0
+        if texture_params and texture_params.get("texture", 0.0) != 0.0:
+            texture_start = perf_counter()
+            result = self._texture_processor.process(result, **texture_params)
+            texture_ms = _elapsed_ms(texture_start)
+
         logger.info(
             "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
             "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f hsl_ms=%.2f "
-            "color_grading_ms=%.2f total_ms=%.2f",
+            "color_grading_ms=%.2f texture_ms=%.2f total_ms=%.2f",
             image.shape,
             copy_ms,
             exposure_ms,
@@ -527,6 +545,7 @@ class ProcessingWorker(QObject):
             color_ms,
             hsl_ms,
             color_grading_ms,
+            texture_ms,
             _elapsed_ms(total_start),
         )
 
