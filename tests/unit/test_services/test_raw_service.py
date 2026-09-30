@@ -54,6 +54,24 @@ class TestDecodeThumbnailObject:
         assert out.shape == (24, 32, 3)
         assert out.dtype == np.float32
 
+    def test_bitmap_uint8_to_linear(self, raw_svc):
+        import rawpy
+
+        data = np.full((10, 12, 3), 128, dtype=np.uint8)
+        thumb = MagicMock()
+        thumb.format = rawpy.ThumbFormat.BITMAP
+        thumb.data = data
+
+        out = raw_svc._decode_thumbnail_object(thumb)
+        assert out is not None
+        assert out.shape == (10, 12, 3)
+        assert out.dtype == np.float32
+
+        from src.utils.color_pipeline import uint8_srgb_to_linear
+
+        expected = uint8_srgb_to_linear(data)
+        np.testing.assert_allclose(out, expected)
+
 
 @patch("src.services.raw_service.rawpy.imread")
 def test_load_linear_calls_postprocess(mock_imread, raw_svc):

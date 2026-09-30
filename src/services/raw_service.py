@@ -20,7 +20,12 @@ import numpy as np
 import rawpy
 from PIL import Image, ImageOps
 
-from src.utils.color_pipeline import LinearImage, pil_to_linear, srgb_to_linear
+from src.utils.color_pipeline import (
+    LinearImage,
+    pil_to_linear,
+    uint8_srgb_to_linear,
+    uint16_srgb_to_linear,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -93,8 +98,7 @@ class RawService:
                     return None
                 if u8.dtype != np.uint8:
                     u8 = np.clip(u8, 0, 255).astype(np.uint8)
-                srgb = u8.astype(np.float32) / 255.0
-                return srgb_to_linear(srgb).astype(np.float32)
+                return uint8_srgb_to_linear(u8)
 
         return None
 
@@ -112,8 +116,8 @@ class RawService:
 
     @staticmethod
     def _uint16_srgb_to_linear(rgb: np.ndarray) -> LinearImage:
-        arr_srgb = rgb.astype(np.float32) / 65535.0
-        return srgb_to_linear(arr_srgb).astype(np.float32)
+        arr_u16 = rgb if rgb.dtype == np.uint16 else rgb.astype(np.uint16)
+        return uint16_srgb_to_linear(arr_u16)
 
     @staticmethod
     def _resize_max_side(arr: LinearImage, max_side: int) -> LinearImage:

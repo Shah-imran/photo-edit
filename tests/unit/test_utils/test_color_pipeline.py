@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -15,6 +17,8 @@ from src.utils.color_pipeline import (
     pil_to_linear,
     srgb_to_linear,
     to_linear,
+    uint8_srgb_to_linear,
+    uint16_srgb_to_linear,
 )
 
 
@@ -191,3 +195,57 @@ class TestToLinearCoercion:
     def test_rejects_unknown_type(self):
         with pytest.raises(TypeError, match="to_linear"):
             to_linear("not-an-image")
+
+
+class TestUint8SrgbToLinearLut:
+    """The uint8 LUT must be exact, not an approximation, per every value.
+
+    Regression coverage for a measured ~3.4s-per-6MP-image cost: the
+    previous ``pil_to_linear`` computed ``srgb_to_linear`` (a per-pixel
+    ``np.power()``) over the full decoded array on every single image
+    load. Since an 8-bit source only ever takes one of 256 values per
+    channel, a 256-entry LUT (built once from the same ``srgb_to_linear``
+    formula) is not an approximation -- it must match the direct formula
+    exactly for every possible byte value.
+    """
+
+    def test_matches_direct_formula_for_every_byte_value(self):
+        values = np.arange(256, dtype=np.uint8)
+        direct = srgb_to_linear(values.astype(np.float32) / 255.0)
+        via_lut = uint8_srgb_to_linear(values)
+        np.testing.assert_allclose(via_lut, direct, atol=1e-6)
+
+    def test_preserves_shape_and_dtype(self):
+        arr = np.random.randint(0, 256, (4, 5, 3), dtype=np.uint8)
+        result = uint8_srgb_to_linear(arr)
+        assert result.shape == arr.shape
+        assert result.dtype == np.float32
+
+
+class TestUint16SrgbToLinearLut:
+    """Same exactness guarantee as the uint8 LUT, sized for RAW's 16-bit output."""
+
+    def test_matches_direct_formula_for_sampled_values(self):
+        values = np.linspace(0, 65535, 200, dtype=np.uint16)
+        direct = srgb_to_linear(values.astype(np.float32) / 65535.0)
+        via_lut = uint16_srgb_to_linear(values)
+        np.testing.assert_allclose(via_lut, direct, atol=1e-6)
+
+    def test_preserves_shape_and_dtype(self):
+        arr = np.random.randint(0, 65536, (4, 5, 3)).astype(np.uint16)
+        result = uint16_srgb_to_linear(arr)
+        assert result.shape == arr.shape
+        assert result.dtype == np.float32
+
+
+class TestPilToLinearUsesLut:
+    """``pil_to_linear`` must go through the fast LUT, not per-pixel power()."""
+
+    def test_uses_uint8_lut(self):
+        pil = Image.new("RGB", (4, 4), color=(10, 20, 30))
+        with patch(
+            "src.utils.color_pipeline.uint8_srgb_to_linear",
+            wraps=uint8_srgb_to_linear,
+        ) as mocked:
+            pil_to_linear(pil)
+        assert mocked.called

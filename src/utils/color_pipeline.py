@@ -72,6 +72,62 @@ def linear_to_srgb(arr: np.ndarray) -> np.ndarray:
     return np.where(arr <= _SRGB_THRESHOLD_LIN, low, high).astype(np.float32)
 
 
+_UINT8_TO_LINEAR_LUT: Optional[np.ndarray] = None
+_UINT16_TO_LINEAR_LUT: Optional[np.ndarray] = None
+
+
+def _uint8_to_linear_lut() -> np.ndarray:
+    """Cached exact sRGB-uint8 -> linear-light LUT (256 entries).
+
+    An 8-bit source only ever takes one of 256 values per channel, so
+    unlike a display-side LUT this is not an approximation -- it holds
+    the exact ``srgb_to_linear`` result for every possible input byte,
+    computed once and reused for every image load. Measured cost of the
+    ``np.power()`` path this replaces: ~3.4s for a single 6-megapixel
+    JPEG in this environment's profiling (see
+    docs/planning/implementation-notes/2026-09-30-srgb-decode-lut.md).
+    """
+    global _UINT8_TO_LINEAR_LUT
+    if _UINT8_TO_LINEAR_LUT is None:
+        srgb = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        _UINT8_TO_LINEAR_LUT = srgb_to_linear(srgb)
+    return _UINT8_TO_LINEAR_LUT
+
+
+def uint8_srgb_to_linear(arr_u8: np.ndarray) -> LinearImage:
+    """Convert an sRGB-encoded uint8 array to linear-light via an exact LUT.
+
+    Equivalent to ``srgb_to_linear(arr_u8.astype(np.float32) / 255.0)``
+    but avoids a per-pixel ``power()`` call -- see
+    :func:`_uint8_to_linear_lut`.
+    """
+    return _uint8_to_linear_lut()[arr_u8].astype(np.float32, copy=False)
+
+
+def _uint16_to_linear_lut() -> np.ndarray:
+    """Cached exact sRGB-uint16 -> linear-light LUT (65536 entries).
+
+    Same reasoning as :func:`_uint8_to_linear_lut`, sized for RAW
+    ``rawpy`` postprocess's 16-bit output (65536 possible values per
+    channel) -- exact, not an approximation.
+    """
+    global _UINT16_TO_LINEAR_LUT
+    if _UINT16_TO_LINEAR_LUT is None:
+        srgb = np.linspace(0.0, 1.0, 65536, dtype=np.float32)
+        _UINT16_TO_LINEAR_LUT = srgb_to_linear(srgb)
+    return _UINT16_TO_LINEAR_LUT
+
+
+def uint16_srgb_to_linear(arr_u16: np.ndarray) -> LinearImage:
+    """Convert an sRGB-encoded uint16 array to linear-light via an exact LUT.
+
+    Equivalent to ``srgb_to_linear(arr_u16.astype(np.float32) / 65535.0)``
+    but avoids a per-pixel ``power()`` call -- see
+    :func:`_uint16_to_linear_lut`.
+    """
+    return _uint16_to_linear_lut()[arr_u16].astype(np.float32, copy=False)
+
+
 def pil_to_linear(pil: Image.Image) -> LinearImage:
     """Convert an sRGB-encoded uint8 PIL image to a LinearImage.
 
@@ -93,8 +149,7 @@ def pil_to_linear(pil: Image.Image) -> LinearImage:
         pil = pil.convert("RGB")
 
     arr_u8 = np.asarray(pil, dtype=np.uint8)
-    arr_srgb = arr_u8.astype(np.float32) / 255.0
-    return srgb_to_linear(arr_srgb)
+    return uint8_srgb_to_linear(arr_u8)
 
 
 def linear_to_pil(arr: LinearImage) -> Image.Image:
@@ -173,6 +228,8 @@ __all__ = [
     "LinearImage",
     "srgb_to_linear",
     "linear_to_srgb",
+    "uint8_srgb_to_linear",
+    "uint16_srgb_to_linear",
     "pil_to_linear",
     "linear_to_pil",
     "linear_to_qimage",
