@@ -96,6 +96,18 @@ class TestProcessingQueue:
 
         assert request.wb_params == {}
 
+    def test_create_request_threads_hsl_params(self):
+        queue = ProcessingQueue()
+        request = queue.create_request(hsl_params={'red_sat': 40.0})
+
+        assert request.hsl_params == {'red_sat': 40.0}
+
+    def test_create_request_defaults_hsl_params_to_empty_dict(self):
+        queue = ProcessingQueue()
+        request = queue.create_request()
+
+        assert request.hsl_params == {}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

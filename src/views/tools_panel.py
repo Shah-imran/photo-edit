@@ -11,24 +11,28 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from src.processors.hsl_mixer_processor import default_hsl_params
 from src.utils.curve_math import normalize_points
 from src.views.widgets.adjustment_slider import AdjustmentSlider
 from src.views.widgets.curve_editor import CurveEditor
+from src.views.widgets.hsl_mixer_panel import HslMixerPanel
 
 
 class ToolsPanel(QWidget):
     """Panel containing adjustment controls for image editing.
 
     Signals:
-        adjustments_changed: Emitted when any (non-curve) adjustment changes
+        adjustments_changed: Emitted when any (non-curve, non-HSL) adjustment changes
         curve_changed: Emitted when the tone curve changes (list of [x, y]
             control points)
-        slider_released: Emitted when any slider or the curve editor is
-            released (for final processing)
+        hsl_changed: Emitted when the HSL Color Mixer changes (24-key flat dict)
+        slider_released: Emitted when any slider, the curve editor, or the
+            HSL mixer is released (for final processing)
     """
 
     adjustments_changed = pyqtSignal(dict)
     curve_changed = pyqtSignal(list)
+    hsl_changed = pyqtSignal(dict)
     slider_released = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -54,6 +58,7 @@ class ToolsPanel(QWidget):
             'vibrance': 0.0
         }
         self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
+        self._hsl_values: Dict[str, float] = default_hsl_params()
         self._suppress_adjustment_signal = False
 
         self._setup_ui()
@@ -155,7 +160,15 @@ class ToolsPanel(QWidget):
         color_content_layout.addWidget(self._vibrance_slider)
         
         content_layout.addWidget(color_section)
-        
+
+        # Color Mixer section
+        mixer_section, mixer_content_layout = self._create_section("Color Mixer")
+
+        self._hsl_mixer_panel = HslMixerPanel()
+        mixer_content_layout.addWidget(self._hsl_mixer_panel)
+
+        content_layout.addWidget(mixer_section)
+
         # Reset button
         self._reset_button = QPushButton("Reset All")
         self._reset_button.setStyleSheet("""
@@ -270,6 +283,9 @@ class ToolsPanel(QWidget):
         self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
 
+        self._hsl_mixer_panel.values_changed.connect(self._on_hsl_mixer_changed)
+        self._hsl_mixer_panel.slider_released.connect(self.slider_released)
+
         self._reset_button.clicked.connect(self.reset_all)
     
     def _on_slider_released(self, value: float):
@@ -286,6 +302,12 @@ class ToolsPanel(QWidget):
         """Handle the tone curve gesture being committed."""
         if not self._suppress_adjustment_signal:
             self.slider_released.emit()
+
+    def _on_hsl_mixer_changed(self, values: dict):
+        """Handle the HSL Color Mixer changing (continuous, during drag)."""
+        self._hsl_values = dict(values)
+        if not self._suppress_adjustment_signal:
+            self.hsl_changed.emit(dict(self._hsl_values))
 
     def _on_adjustment_changed(self, name: str, value: float):
         """Handle adjustment value change.
@@ -366,6 +388,15 @@ class ToolsPanel(QWidget):
         """Set the histogram backdrop drawn behind the tone curve."""
         self._curve_editor.set_histogram(counts)
 
+    def get_hsl_params(self) -> Dict[str, float]:
+        """Get the HSL Color Mixer parameters.
+
+        Returns:
+            Flat 24-key dict (``"<band>_hue"``/``"<band>_sat"``/
+            ``"<band>_lum"`` for each of the 8 color bands).
+        """
+        return dict(self._hsl_values)
+
     def reset_all(self):
         """Reset all adjustments to default values."""
         self.set_adjustments({}, emit_signal=True)
@@ -386,6 +417,14 @@ class ToolsPanel(QWidget):
             'vibrance': float(adjustments.get('vibrance', 0.0)),
         }
         curve_points = normalize_points(adjustments.get('tone_curve'))
+        hsl_values = default_hsl_params()
+        raw_hsl = adjustments.get('hsl')
+        if raw_hsl:
+            for key in hsl_values:
+                try:
+                    hsl_values[key] = float(raw_hsl.get(key, 0.0))
+                except (TypeError, ValueError):
+                    hsl_values[key] = 0.0
         self._suppress_adjustment_signal = True
         try:
             self._exposure_slider.set_value(merged['exposure'])
@@ -400,13 +439,16 @@ class ToolsPanel(QWidget):
             self._saturation_slider.set_value(merged['saturation'])
             self._vibrance_slider.set_value(merged['vibrance'])
             self._curve_editor.set_points(curve_points)
+            self._hsl_mixer_panel.set_values(hsl_values)
         finally:
             self._suppress_adjustment_signal = False
         self._adjustments = merged
         self._curve_points = list(curve_points)
+        self._hsl_values = hsl_values
         if emit_signal:
             self.adjustments_changed.emit(self._adjustments.copy())
             self.curve_changed.emit([list(p) for p in self._curve_points])
+            self.hsl_changed.emit(dict(self._hsl_values))
 
     def set_enabled(self, enabled: bool):
         """Enable or disable all controls.
@@ -426,4 +468,5 @@ class ToolsPanel(QWidget):
         self._saturation_slider.setEnabled(enabled)
         self._vibrance_slider.setEnabled(enabled)
         self._curve_editor.setEnabled(enabled)
+        self._hsl_mixer_panel.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)

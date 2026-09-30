@@ -4,6 +4,7 @@ Blacks sliders added alongside TonalProcessor."""
 import pytest
 from PyQt6.QtWidgets import QApplication
 
+from src.processors.hsl_mixer_processor import default_hsl_params
 from src.views.tools_panel import ToolsPanel
 
 
@@ -253,3 +254,68 @@ class TestToolsPanelWhiteBalance:
             {'temperature': 25.0, 'tint': -10.0}, emit_signal=False
         )
         assert panel.get_wb_params() == {'temperature': 25.0, 'tint': -10.0}
+
+
+class TestToolsPanelHslMixer:
+    """Tests for the Color Mixer section."""
+
+    def test_hsl_defaults_to_identity(self, qapp):
+        panel = ToolsPanel()
+        assert panel.get_hsl_params() == default_hsl_params()
+
+    def test_hsl_mixer_change_updates_params_and_emits(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.hsl_changed.connect(received.append)
+
+        panel._hsl_mixer_panel._sliders["red_sat"].set_value(40.0)
+
+        assert panel.get_hsl_params()["red_sat"] == 40.0
+        assert received[-1]["red_sat"] == 40.0
+
+    def test_hsl_release_emits_slider_released(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.slider_released.connect(lambda: received.append(True))
+        panel._hsl_mixer_panel.slider_released.emit()
+        assert received == [True]
+
+    def test_reset_all_resets_hsl_mixer(self, qapp):
+        panel = ToolsPanel()
+        panel._hsl_mixer_panel._sliders["red_sat"].set_value(40.0)
+
+        panel.reset_all()
+
+        assert panel.get_hsl_params() == default_hsl_params()
+
+    def test_set_adjustments_restores_hsl_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.hsl_changed.connect(received.append)
+
+        panel.set_adjustments({'hsl': {'green_lum': 20.0}}, emit_signal=False)
+
+        assert panel.get_hsl_params()['green_lum'] == 20.0
+        assert received == []
+
+    def test_set_adjustments_missing_hsl_defaults_to_identity(self, qapp):
+        panel = ToolsPanel()
+        panel._hsl_mixer_panel._sliders["red_sat"].set_value(40.0)
+
+        panel.set_adjustments({'exposure': 1.0}, emit_signal=False)
+
+        assert panel.get_hsl_params() == default_hsl_params()
+
+    def test_set_enabled_false_disables_hsl_mixer(self, qapp):
+        panel = ToolsPanel()
+        panel.set_enabled(False)
+        assert panel._hsl_mixer_panel.isEnabled() is False
+
+    def test_hsl_change_does_not_affect_other_params(self, qapp):
+        panel = ToolsPanel()
+        panel._hsl_mixer_panel._sliders["red_sat"].set_value(40.0)
+        assert panel.get_exposure_params() == {
+            'exposure': 0.0, 'contrast': 0.0, 'brightness': 0.0
+        }
+        assert panel.get_wb_params() == {'temperature': 0.0, 'tint': 0.0}
+        assert panel.get_color_params() == {'saturation': 0.0, 'vibrance': 0.0}

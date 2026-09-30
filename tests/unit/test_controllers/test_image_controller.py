@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QApplication
 from unittest.mock import Mock, patch
 from src.controllers.image_controller import ImageController
 from src.processing.display_frame import DisplayFrame
+from src.processors.hsl_mixer_processor import default_hsl_params
 from src.views.image_view import ImageView
 from src.models.image_model import ImageModel
 from src.services.image_service import ImageService
@@ -163,6 +164,7 @@ class TestImageController:
             "saturation": 0.0,
             "vibrance": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
+            "hsl": default_hsl_params(),
         }
         controller.cleanup()
 
@@ -194,6 +196,7 @@ class TestImageController:
             "saturation": 20.0,
             "vibrance": 8.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
+            "hsl": default_hsl_params(),
         }
         assert controller.image_model.get_current_image() is not None
         assert controller.can_undo() is False
@@ -240,6 +243,55 @@ class TestImageController:
         state = controller.get_adjustment_state()
         assert state["temperature"] == 0.0
         assert state["tint"] == 0.0
+        controller.cleanup()
+
+    def test_restore_adjustment_state_applies_hsl_mixer(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"hsl": {"red_sat": 40.0}})
+
+        state = controller.get_adjustment_state()
+        assert state["hsl"]["red_sat"] == 40.0
+        assert state["hsl"]["orange_hue"] == 0.0
+        assert controller.image_model.get_current_image() is not None
+        controller.cleanup()
+
+    def test_restore_adjustment_state_tolerates_malformed_hsl(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"hsl": "not a dict"})
+
+        assert controller.get_adjustment_state()["hsl"] == default_hsl_params()
+        controller.cleanup()
+
+    def test_on_hsl_changed_reaches_export_image(self, qapp):
+        import numpy as np
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        mid_gray = np.full((4, 4, 3), 0.5, dtype=np.float32)
+        controller._apply_loaded_image("sample.jpg", mid_gray)
+
+        controller.on_hsl_changed({"red_lum": 50.0})
+
+        exported = controller.get_export_image()
+        original = controller.image_model.get_original_image()
+        assert not (exported == original).all()
+        controller.cleanup()
+
+    def test_reset_to_original_clears_hsl_mixer(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_hsl_changed({"red_hue": 30.0})
+
+        controller.reset_to_original()
+
+        assert controller.get_adjustment_state()["hsl"] == default_hsl_params()
         controller.cleanup()
 
     def test_restore_adjustment_state_applies_tone_curve(self, qapp, sample_image):

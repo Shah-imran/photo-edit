@@ -16,6 +16,7 @@ from src.processors.tonal_processor import TonalProcessor
 from src.processors.color_processor import ColorProcessor
 from src.processors.curve_processor import CurveProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
+from src.processors.hsl_mixer_processor import HslMixerProcessor, default_hsl_params
 from src.commands.adjustment_commands import (
     CombinedAdjustmentCommand,
     ImageStateChangeCommand,
@@ -98,6 +99,12 @@ class ImageController(QObject):
     # every value of) and threaded as a separate, parallel parameter --
     # see docs/planning/implementation-notes/2026-09-29-tone-curve.md.
     _CURVE_DEFAULT_POINTS = DEFAULT_CURVE_POINTS
+    # The HSL Color Mixer's 24 keys are plain floats, but are kept out of
+    # the top-level get_adjustment_state()/_ADJUSTMENT_DEFAULTS contract
+    # (nested under one "hsl" key instead) so persistence/exact-dict tests
+    # don't have to list 24 extra entries -- see
+    # docs/planning/implementation-notes/2026-09-30-hsl-color-mixer.md.
+    _HSL_DEFAULTS = default_hsl_params()
 
     def __init__(
         self,
@@ -135,6 +142,7 @@ class ImageController(QObject):
         self._curve_processor = CurveProcessor()
         self._wb_processor = WhiteBalanceProcessor()
         self._color_processor = ColorProcessor()
+        self._hsl_processor = HslMixerProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
@@ -142,6 +150,7 @@ class ImageController(QObject):
         self._color_params: Dict[str, float] = {}
         self._curve_params: Dict[str, Any] = {}
         self._wb_params: Dict[str, float] = {}
+        self._hsl_params: Dict[str, float] = {}
         
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
@@ -345,6 +354,7 @@ class ImageController(QObject):
         self._color_params = {}
         self._curve_params = {}
         self._wb_params = {}
+        self._hsl_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -446,6 +456,8 @@ class ImageController(QObject):
             result = self._curve_processor.process(result, **self._curve_params)
         if self._color_params:
             result = self._color_processor.process(result, **self._color_params)
+        if self._hsl_params:
+            result = self._hsl_processor.process(result, **self._hsl_params)
         return result
 
     def refresh_view(self) -> None:
@@ -462,9 +474,12 @@ class ImageController(QObject):
     def get_adjustment_state(self) -> Dict[str, Any]:
         """Return the current normalized adjustment payload.
 
-        Includes one non-float key, ``"tone_curve"`` (a JSON-plain list of
-        ``[x, y]`` control points), alongside the nine float keys -- see
-        docs/planning/implementation-notes/2026-09-29-tone-curve.md section 4.
+        Includes two non-flat keys alongside the eleven float keys:
+        ``"tone_curve"`` (a JSON-plain list of ``[x, y]`` control points --
+        see docs/planning/implementation-notes/2026-09-29-tone-curve.md
+        section 4) and ``"hsl"`` (a flat 24-key dict for the Color Mixer --
+        see docs/planning/implementation-notes/2026-09-30-hsl-color-mixer.md
+        section 4).
         """
         state: Dict[str, Any] = self._ADJUSTMENT_DEFAULTS.copy()
         state.update(self._exposure_params)
@@ -473,6 +488,7 @@ class ImageController(QObject):
         state.update(self._color_params)
         curve_points = self._curve_params.get("points", self._CURVE_DEFAULT_POINTS)
         state["tone_curve"] = [list(point) for point in curve_points]
+        state["hsl"] = {**self._HSL_DEFAULTS, **self._hsl_params}
         return state
 
     def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
@@ -480,6 +496,9 @@ class ImageController(QObject):
         normalized = self._normalize_adjustment_state(adjustments)
         curve_points = normalize_points(
             adjustments.get("tone_curve") if adjustments else None
+        )
+        hsl_values = self._normalize_hsl_state(
+            adjustments.get("hsl") if adjustments else None
         )
         self._history_service.clear_history()
         self._pending_history_previous_image = None
@@ -518,6 +537,7 @@ class ImageController(QObject):
         self._curve_params = (
             {"points": curve_points} if not is_identity_curve(curve_points) else {}
         )
+        self._hsl_params = hsl_values
 
         if not self.has_image():
             return
@@ -525,6 +545,7 @@ class ImageController(QObject):
         has_changes = (
             any(value != 0.0 for value in normalized.values())
             or not is_identity_curve(curve_points)
+            or any(value != 0.0 for value in hsl_values.values())
         )
         if not has_changes:
             self._image_model.reset_to_original()
@@ -542,6 +563,7 @@ class ImageController(QObject):
         if self._curve_params:
             result = self._curve_processor.process(result, **self._curve_params)
         result = self._color_processor.process(result, **self._color_params)
+        result = self._hsl_processor.process(result, **self._hsl_params)
         self._image_model.current_image = result
         self.refresh_view()
 
@@ -554,6 +576,7 @@ class ImageController(QObject):
         self._color_params = {}
         self._curve_params = {}
         self._wb_params = {}
+        self._hsl_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -636,6 +659,7 @@ class ImageController(QObject):
         color_params: Dict[str, float] = None,
         curve_params: Dict[str, Any] = None,
         wb_params: Dict[str, float] = None,
+        hsl_params: Dict[str, float] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -646,6 +670,7 @@ class ImageController(QObject):
             color_params: Color adjustment parameters
             curve_params: Tone curve parameters (``{"points": [...]}`)
             wb_params: White balance (Temperature/Tint) parameters
+            hsl_params: HSL Color Mixer parameters (24-key flat dict)
             add_to_history: If True, add command to history for undo
         """
         if not self.has_image():
@@ -673,6 +698,8 @@ class ImageController(QObject):
             self._curve_params = curve_params
         if wb_params:
             self._wb_params = wb_params
+        if hsl_params:
+            self._hsl_params = hsl_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -684,6 +711,7 @@ class ImageController(QObject):
                         color_params=self._color_params,
                         curve_params=self._curve_params,
                         wb_params=self._wb_params,
+                        hsl_params=self._hsl_params,
                     )
                 )
             else:
@@ -695,6 +723,7 @@ class ImageController(QObject):
                         color_params=self._color_params,
                         curve_params=self._curve_params,
                         wb_params=self._wb_params,
+                        hsl_params=self._hsl_params,
                         interactive_preview=True,
                     )
                 )
@@ -709,6 +738,7 @@ class ImageController(QObject):
                 color_params=self._color_params,
                 curve_params=self._curve_params,
                 wb_params=self._wb_params,
+                hsl_params=self._hsl_params,
             )
             self._history_service.execute_command(command)
         else:
@@ -738,6 +768,10 @@ class ImageController(QObject):
             # Apply color adjustments
             if self._color_params:
                 result = self._color_processor.process(result, **self._color_params)
+
+            # Apply HSL Color Mixer
+            if self._hsl_params:
+                result = self._hsl_processor.process(result, **self._hsl_params)
 
             self._image_model.current_image = result
 
@@ -804,17 +838,18 @@ class ImageController(QObject):
         self._color_params = color_params
 
         if self._use_threading and self._debouncer is not None:
-            # Use throttled + debounced async processing. The curve is not
-            # part of this signal's payload, so re-send the currently
-            # stored curve params -- ThrottledDebouncer.call() replaces the
-            # whole pending dict, so omitting it here would revert an
-            # in-progress curve edit on the next slider move.
+            # Use throttled + debounced async processing. The curve and
+            # HSL mixer are not part of this signal's payload, so re-send
+            # their currently stored params -- ThrottledDebouncer.call()
+            # replaces the whole pending dict, so omitting them here would
+            # revert an in-progress curve/HSL edit on the next slider move.
             self._debouncer.call({
                 'exposure': exposure_params,
                 'tonal': tonal_params,
                 'color': color_params,
                 'curve': self._curve_params,
                 'wb': wb_params,
+                'hsl': self._hsl_params,
             })
             mode = "debounced-threaded"
         else:
@@ -825,6 +860,7 @@ class ImageController(QObject):
                 color_params,
                 self._curve_params,
                 wb_params,
+                self._hsl_params,
                 add_to_history=False,
             )
             mode = "sync-fallback"
@@ -879,6 +915,7 @@ class ImageController(QObject):
                 'color': self._color_params,
                 'curve': self._curve_params,
                 'wb': self._wb_params,
+                'hsl': self._hsl_params,
             })
         else:
             self.apply_adjustments(
@@ -887,6 +924,52 @@ class ImageController(QObject):
                 self._color_params,
                 self._curve_params,
                 self._wb_params,
+                self._hsl_params,
+                add_to_history=False,
+            )
+
+    def on_hsl_changed(self, values: Dict[str, float]) -> None:
+        """Handle HSL Color Mixer changes from the tools panel.
+
+        Mirrors :meth:`on_curve_changed` but for the HSL mixer, which also
+        travels on its own signal/parameter rather than the main flat
+        adjustments dict (see
+        docs/planning/implementation-notes/2026-09-30-hsl-color-mixer.md).
+        """
+        if not self.has_image():
+            return
+
+        if self._pending_history_previous_image is None:
+            current = self._image_model.get_current_image()
+            if current is not None:
+                self._pending_history_previous_image = current
+
+        self._final_render_timer.stop()
+        self._pending_final_request_id = -1
+        if self._final_processing_worker is not None and hasattr(
+            self._final_processing_worker, "cancel_pending"
+        ):
+            self._final_processing_worker.cancel_pending()
+
+        self._hsl_params = self._normalize_hsl_state(values)
+
+        if self._use_threading and self._debouncer is not None:
+            self._debouncer.call({
+                'exposure': self._exposure_params,
+                'tonal': self._tonal_params,
+                'color': self._color_params,
+                'curve': self._curve_params,
+                'wb': self._wb_params,
+                'hsl': self._hsl_params,
+            })
+        else:
+            self.apply_adjustments(
+                self._exposure_params,
+                self._tonal_params,
+                self._color_params,
+                self._curve_params,
+                self._wb_params,
+                self._hsl_params,
                 add_to_history=False,
             )
 
@@ -903,12 +986,14 @@ class ImageController(QObject):
         color_params = params.get('color', {})
         curve_params = params.get('curve', {})
         wb_params = params.get('wb', {})
+        hsl_params = params.get('hsl', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
             color_params=color_params,
             curve_params=curve_params,
             wb_params=wb_params,
+            hsl_params=hsl_params,
             interactive_preview=True,
         )
         logger.info(
@@ -935,6 +1020,7 @@ class ImageController(QObject):
         color_params = params.get('color', {})
         curve_params = params.get('curve', {})
         wb_params = params.get('wb', {})
+        hsl_params = params.get('hsl', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -944,6 +1030,7 @@ class ImageController(QObject):
             color_params=color_params,
             curve_params=curve_params,
             wb_params=wb_params,
+            hsl_params=hsl_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1049,6 +1136,7 @@ class ImageController(QObject):
                 color_params=self._color_params,
                 curve_params=self._curve_params,
                 wb_params=self._wb_params,
+                hsl_params=self._hsl_params,
                 interactive_preview=False,
             )
 
@@ -1075,6 +1163,7 @@ class ImageController(QObject):
             any(v != 0 for v in self._tonal_params.values()) or
             any(v != 0 for v in self._wb_params.values()) or
             any(v != 0 for v in self._color_params.values()) or
+            any(v != 0 for v in self._hsl_params.values()) or
             not is_identity_curve(self._curve_params.get("points"))
         )
 
@@ -1095,6 +1184,7 @@ class ImageController(QObject):
             color_params=self._color_params,
             curve_params=self._curve_params,
             wb_params=self._wb_params,
+            hsl_params=self._hsl_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -1144,6 +1234,7 @@ class ImageController(QObject):
                 color_params=self._color_params.copy(),
                 curve_params=dict(self._curve_params),
                 wb_params=self._wb_params.copy(),
+                hsl_params=self._hsl_params.copy(),
             )
             self._history_service.execute_command(command)
 
@@ -1152,11 +1243,32 @@ class ImageController(QObject):
         adjustments: Optional[Dict[str, float]],
     ) -> Dict[str, float]:
         """Return a complete adjustment-state payload with defaulted values."""
-        normalized = self._ADJUSTMENT_DEFAULTS.copy()
-        if not adjustments:
+        return self._normalize_floats(adjustments, self._ADJUSTMENT_DEFAULTS)
+
+    def _normalize_hsl_state(
+        self,
+        raw_hsl: Optional[Dict[str, float]],
+    ) -> Dict[str, float]:
+        """Return a complete 24-key HSL Color Mixer payload, defaulted to 0."""
+        return self._normalize_floats(raw_hsl, self._HSL_DEFAULTS)
+
+    @staticmethod
+    def _normalize_floats(
+        values: Optional[Dict[str, float]],
+        defaults: Dict[str, float],
+    ) -> Dict[str, float]:
+        """Coerce ``values`` to floats against ``defaults``, tolerating bad input.
+
+        Shared by :meth:`_normalize_adjustment_state` and
+        :meth:`_normalize_hsl_state` so the float-coercion tolerance (bad
+        types/missing keys fall back to the default rather than raising)
+        is defined once.
+        """
+        normalized = defaults.copy()
+        if not values or not isinstance(values, dict):
             return normalized
         for key, default in normalized.items():
-            value = adjustments.get(key, default)
+            value = values.get(key, default)
             try:
                 normalized[key] = float(value)
             except (TypeError, ValueError):
