@@ -217,16 +217,43 @@ class ImageController(QObject):
         pass  # Signals will be connected as needed
 
     def cleanup(self) -> None:
-        """Clean up resources (call before destroying)."""
+        """Clean up resources (call before destroying).
+
+        A load thread runs an uninterruptible, unbounded-length decode
+        (``_ImageLoadWorker.run()`` has no cancellation check), so
+        ``thread.wait(2000)`` can time out while it is still mid-decode --
+        e.g. a large RAW file, or simply a slow machine. The previous
+        version unconditionally cleared ``_load_threads``/``_load_workers``
+        regardless of whether ``wait()`` actually succeeded, dropping the
+        last Python reference to a ``QThread``/worker pair whose native
+        thread was still running. Garbage-collecting that pair while the
+        background thread still touches it is a use-after-free at the Qt
+        C++ level -- reproduced directly as a ``Fatal Python error:
+        Aborted`` crash when a slow load thread was still in flight at
+        teardown. Only threads that actually stopped in time are
+        forgotten here; a still-running one is left tracked so it stays
+        referenced until its own ``finished`` handlers (already connected
+        in :meth:`load_image_async`) tear it down once the decode
+        completes on its own.
+        """
         if self._processing_worker is not None:
             self._processing_worker.stop()
         if self._final_processing_worker is not None:
             self._final_processing_worker.stop()
-        for thread in self._load_threads:
+
+        still_running_threads: list[QThread] = []
+        still_running_workers: list[_ImageLoadWorker] = []
+        for thread, worker in zip(self._load_threads, self._load_workers):
             thread.quit()
-            thread.wait(2000)
-        self._load_threads.clear()
-        self._load_workers.clear()
+            if not thread.wait(2000):
+                logger.warning(
+                    "Image load thread still running after cleanup timeout; "
+                    "leaving it tracked until it finishes on its own"
+                )
+                still_running_threads.append(thread)
+                still_running_workers.append(worker)
+        self._load_threads = still_running_threads
+        self._load_workers = still_running_workers
 
     @property
     def image_model(self) -> ImageModel:

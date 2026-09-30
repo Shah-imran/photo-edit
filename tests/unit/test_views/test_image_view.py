@@ -1,11 +1,13 @@
 """Unit tests for ImageView widget."""
 
+from unittest.mock import patch
+
 import pytest
 import numpy as np
 from PIL import Image
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
-from src.processing.display_frame import DisplayFrame
+from src.processing.display_frame import DisplayFrame, linear_to_display_rgb
 from src.views.image_view import ImageView
 
 
@@ -127,3 +129,25 @@ class TestImageView:
         view.set_zoom_factor(2.0)
         assert len(zoom_values) == 1
         assert zoom_values[0] == 2.0
+
+    def test_set_image_uses_lut_display_conversion(self, qapp, sample_image):
+        """``set_image`` must use the cheap LUT encode, not per-pixel ``power()``.
+
+        Regression test: ``ImageView._set_array`` used to call
+        ``linear_to_qimage`` (exact but does a ``np.power()`` pass over
+        the whole image), synchronously on the UI thread, for every
+        full-resolution image load or switch. On a real photo this was a
+        measurable synchronous hitch -- the intermittent "micro freeze"
+        reported when loading the app or switching images. It must
+        instead go through ``linear_to_display_rgb``, the same O(1)
+        -per-pixel LUT already used for every background-worker-produced
+        preview, so the initial full-image display costs the same as any
+        other redraw.
+        """
+        view = ImageView()
+        with patch(
+            "src.views.image_view.linear_to_display_rgb",
+            wraps=linear_to_display_rgb,
+        ) as mocked:
+            view.set_image(sample_image)
+        assert mocked.called

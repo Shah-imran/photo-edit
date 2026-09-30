@@ -445,6 +445,20 @@ class MainWindow(QMainWindow):
         self._image_controller.restore_adjustment_state(adjustments)
         if self._pending_zoom_factor is not None:
             self._image_view.set_zoom_factor(self._pending_zoom_factor)
+        else:
+            # No saved zoom for this image (first-ever load, or an entry
+            # that was never zoomed/saved before): fit-to-window is the
+            # intended default view. Without this, the full-resolution
+            # `set_image()` call above resets zoom to 100% and nothing
+            # else corrects it -- the only other fit-to-window call is the
+            # earlier intermediate-preview stage's `QTimer.singleShot(0,
+            # ...)`, which races this full-image swap and only "wins" by
+            # accident of event-queue ordering. That race is exactly why
+            # the image intermittently opened at 100%/zoomed-in instead of
+            # fitted. Deferred the same way for the same reason: layout
+            # must settle before `fit_to_window()` can read a correct
+            # viewport size.
+            QTimer.singleShot(0, self._image_view.fit_to_window)
         self._pending_zoom_factor = None
         self._image_view.set_loading(False)
         self._settings_service.set_current_image_path(file_path)

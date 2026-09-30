@@ -940,3 +940,56 @@ class TestImageControllerOpenImageSettings:
         args, _ = dialog.call_args
         assert args[2] == ""
         controller.cleanup()
+
+
+class TestImageControllerCleanupThreadSafety:
+    """``cleanup()`` must not drop a still-running load thread's references.
+
+    Regression coverage for a reproduced crash: a load thread runs an
+    uninterruptible decode with no cancellation check, so
+    ``thread.wait(2000)`` inside ``cleanup()`` can time out while it is
+    still mid-decode. The previous version unconditionally cleared
+    ``_load_threads``/``_load_workers`` regardless of whether ``wait()``
+    actually succeeded -- dropping the last Python reference to a
+    ``QThread``/worker pair whose native thread was still alive. Garbage
+    collecting that pair while the background thread still touched it
+    reproduced as ``Fatal Python error: Aborted`` when a slow load was
+    still in flight at teardown (observed running the real async image
+    load path back-to-back with other Qt-object-heavy tests).
+    """
+
+    def test_cleanup_keeps_tracking_a_thread_that_times_out(self, qapp):
+        """A thread whose ``wait()`` times out must stay tracked, not be lost."""
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+
+        fake_thread = Mock()
+        fake_thread.quit = Mock()
+        fake_thread.wait = Mock(return_value=False)  # simulates a timeout
+        fake_worker = Mock()
+        controller._load_threads.append(fake_thread)
+        controller._load_workers.append(fake_worker)
+
+        controller.cleanup()
+
+        fake_thread.quit.assert_called_once()
+        fake_thread.wait.assert_called_once_with(2000)
+        assert fake_thread in controller._load_threads
+        assert fake_worker in controller._load_workers
+
+    def test_cleanup_untracks_a_thread_that_finishes_in_time(self, qapp):
+        """A thread whose ``wait()`` succeeds must be forgotten, as before."""
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+
+        fake_thread = Mock()
+        fake_thread.quit = Mock()
+        fake_thread.wait = Mock(return_value=True)
+        fake_worker = Mock()
+        controller._load_threads.append(fake_thread)
+        controller._load_workers.append(fake_worker)
+
+        controller.cleanup()
+
+        assert fake_thread not in controller._load_threads
+        assert fake_worker not in controller._load_workers

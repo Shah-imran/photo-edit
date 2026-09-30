@@ -252,6 +252,43 @@ class TestZoomControls:
         zoom = main_window._image_controller.get_zoom_factor()
         assert 0.05 <= zoom <= 10.0
 
+    def test_async_load_fits_to_window_when_no_saved_zoom(
+        self, main_window, tmp_path, qtbot
+    ):
+        """An async load with no saved per-image zoom must fit-to-window.
+
+        Regression test: ``_on_image_load_finished`` used to leave the
+        zoom factor at the 100% reset ``_set_array`` applies (via
+        ``ImageView.set_image()``) whenever ``_pending_zoom_factor`` was
+        ``None`` -- true for a first-ever open or any library entry that
+        was never zoomed/saved before. The image would then intermittently
+        open at 100% (or whatever the earlier intermediate-preview stage's
+        raced ``fit_to_window`` singleShot happened to leave it at) instead
+        of fitted, exactly as reported by the user ("sometimes ... it
+        would come at its full size or zoomed in state"). Uses an image
+        much larger than the test window so a correct fit-to-window is
+        unambiguously distinguishable (zoom < 1.0) from the bug (zoom
+        staying at the 1.0 reset value).
+        """
+        large_image_path = tmp_path / "large_test_image.jpg"
+        Image.new('RGB', (3000, 2000), color='blue').save(large_image_path, 'JPEG')
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=5000
+        ):
+            main_window._image_controller.load_image_async(str(large_image_path))
+        qtbot.wait(50)  # flush the deferred QTimer.singleShot(0, fit_to_window)
+
+        zoom = main_window._image_controller.get_zoom_factor()
+        assert zoom < 1.0
+
+        # Let the background load thread fully wind down (it quits itself
+        # right after emitting `loaded`) so no thread from this test is
+        # still alive when the next test's fixture tears this window down.
+        qtbot.waitUntil(
+            lambda: not main_window._image_controller._load_threads, timeout=5000
+        )
+
 
 class TestUndoRedo:
     """UI tests for undo/redo functionality."""

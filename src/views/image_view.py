@@ -15,8 +15,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from src.utils.color_pipeline import LinearImage, linear_to_qimage, to_linear
-from src.processing.display_frame import DisplayFrame
+from src.utils.color_pipeline import LinearImage, to_linear
+from src.processing.display_frame import DisplayFrame, linear_to_display_rgb
 
 
 logger = logging.getLogger(__name__)
@@ -243,7 +243,19 @@ class ImageView(QWidget):
             self.image_loaded.emit()
 
     def _set_array(self, arr: LinearImage, preserve_view_scale: bool = False) -> None:
-        """Build a QPixmap from a ``LinearImage`` and update the display."""
+        """Build a QPixmap from a ``LinearImage`` and update the display.
+
+        Uses the same LUT-based ``linear_to_display_rgb`` encode the
+        background processing worker already uses for every adjustment
+        preview, instead of the exact but per-pixel-``power()``
+        ``linear_to_qimage``. This path runs synchronously on the UI
+        thread (there is no worker hop for the initial decode or a raw
+        ``set_image`` call), so on a full-resolution image it was a
+        measurable synchronous hitch on every image load/switch -- the
+        intermittent "micro freeze" between images. The LUT trades
+        imperceptible quantization error (already accepted for every
+        other on-screen redraw in the app) for an O(1)-per-pixel lookup.
+        """
         total_start = perf_counter()
         if not preserve_view_scale:
             self._zoom_factor = 1.0
@@ -256,7 +268,15 @@ class ImageView(QWidget):
             old_w, old_h = old_size.width(), old_size.height()
 
         qimage_start = perf_counter()
-        qimage = linear_to_qimage(arr)
+        rgb = np.ascontiguousarray(linear_to_display_rgb(arr))
+        height, width, _ = rgb.shape
+        qimage = QImage(
+            rgb.data,
+            width,
+            height,
+            rgb.strides[0],
+            QImage.Format.Format_RGB888,
+        ).copy()
         qimage_ms = _elapsed_ms(qimage_start)
         pixmap_start = perf_counter()
         self._display_frame = None
