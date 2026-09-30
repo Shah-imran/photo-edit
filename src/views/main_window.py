@@ -265,6 +265,7 @@ class MainWindow(QMainWindow):
         self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
         self._tools_panel.curve_changed.connect(self._on_curve_changed)
         self._tools_panel.hsl_changed.connect(self._on_hsl_changed)
+        self._tools_panel.color_grading_changed.connect(self._on_color_grading_changed)
         self._tools_panel.slider_released.connect(self._on_slider_released)
         self._library_view.image_selected.connect(self._on_library_image_selected)
         self._library_view.import_requested.connect(self._import_images)
@@ -331,6 +332,11 @@ class MainWindow(QMainWindow):
     def _on_hsl_changed(self, values: dict):
         """Handle HSL Color Mixer changes from the tools panel."""
         self._image_controller.on_hsl_changed(values)
+        self._adjustment_persist_timer.start()
+
+    def _on_color_grading_changed(self, values: dict):
+        """Handle Color Grading changes from the tools panel."""
+        self._image_controller.on_color_grading_changed(values)
         self._adjustment_persist_timer.start()
 
     def _on_slider_released(self):
@@ -713,6 +719,7 @@ class MainWindow(QMainWindow):
             "vibrance": float(values.get("vibrance", 0.0)),
             "tone_curve": values.get("tone_curve"),
             "hsl": values.get("hsl"),
+            "color_grading": values.get("color_grading"),
         }
 
     def _zoom_factor_from_payload(self, payload: Optional[dict]) -> Optional[float]:

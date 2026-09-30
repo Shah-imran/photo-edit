@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 
 from src.commands.base_command import BaseCommand
 from src.models.image_model import ImageModel
+from src.processors.color_grading_processor import ColorGradingProcessor
 from src.processors.color_processor import ColorProcessor
 from src.processors.curve_processor import CurveProcessor
 from src.processors.exposure_processor import ExposureProcessor
@@ -102,6 +103,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         curve_params: Dict[str, Any] = None,
         wb_params: Dict[str, float] = None,
         hsl_params: Dict[str, float] = None,
+        color_grading_params: Dict[str, float] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -113,6 +115,7 @@ class CombinedAdjustmentCommand(BaseCommand):
             curve_params: Tone curve parameters (``{"points": [...]}``)
             wb_params: White balance (Temperature/Tint) parameters
             hsl_params: HSL Color Mixer parameters (24-key flat dict)
+            color_grading_params: Color Grading parameters (11-key flat dict)
         """
         super().__init__()
         self._image_model = image_model
@@ -122,6 +125,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._curve_params = curve_params or {}
         self._wb_params = wb_params or {}
         self._hsl_params = hsl_params or {}
+        self._color_grading_params = color_grading_params or {}
         self._previous_image = image_model.get_current_image()
         self._new_image: Optional[LinearImage] = None
 
@@ -131,6 +135,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._wb_processor = WhiteBalanceProcessor()
         self._color_processor = ColorProcessor()
         self._hsl_processor = HslMixerProcessor()
+        self._color_grading_processor = ColorGradingProcessor()
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -159,6 +164,11 @@ class CombinedAdjustmentCommand(BaseCommand):
 
         if self._hsl_params:
             result = self._hsl_processor.process(result, **self._hsl_params)
+
+        if self._color_grading_params:
+            result = self._color_grading_processor.process(
+                result, **self._color_grading_params
+            )
 
         self._new_image = result
         self._image_model.current_image = result

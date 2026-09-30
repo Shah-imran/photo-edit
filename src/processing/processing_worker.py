@@ -16,6 +16,7 @@ from PyQt6.QtCore import QMutex, QObject, QThread, QWaitCondition, pyqtSignal
 from src.processing.display_frame import DisplayFrame
 from src.processing.processing_queue import ProcessingQueue, ProcessingRequest
 from src.processing.proxy_manager import ProxyManager
+from src.processors.color_grading_processor import ColorGradingProcessor
 from src.processors.color_processor import ColorProcessor
 from src.processors.curve_processor import CurveProcessor
 from src.processors.exposure_processor import ExposureProcessor
@@ -79,6 +80,7 @@ class ProcessingWorker(QObject):
         self._wb_processor = WhiteBalanceProcessor()
         self._color_processor = ColorProcessor()
         self._hsl_processor = HslMixerProcessor()
+        self._color_grading_processor = ColorGradingProcessor()
 
         # Thread control
         self._running = False
@@ -146,6 +148,7 @@ class ProcessingWorker(QObject):
         curve_params: Optional[Dict[str, Any]] = None,
         wb_params: Optional[Dict[str, float]] = None,
         hsl_params: Optional[Dict[str, float]] = None,
+        color_grading_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -158,6 +161,7 @@ class ProcessingWorker(QObject):
             curve_params: Tone curve parameters
             wb_params: White balance (Temperature/Tint) parameters
             hsl_params: HSL Color Mixer parameters
+            color_grading_params: Color Grading parameters
             use_proxy: Whether to process proxy (fast) or full image
             interactive_preview: Whether to use the lower-cost interactive proxy
 
@@ -171,6 +175,7 @@ class ProcessingWorker(QObject):
             curve_params=curve_params,
             wb_params=wb_params,
             hsl_params=hsl_params,
+            color_grading_params=color_grading_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -189,6 +194,7 @@ class ProcessingWorker(QObject):
         curve_params: Optional[Dict[str, Any]] = None,
         wb_params: Optional[Dict[str, float]] = None,
         hsl_params: Optional[Dict[str, float]] = None,
+        color_grading_params: Optional[Dict[str, float]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -202,6 +208,7 @@ class ProcessingWorker(QObject):
             curve_params: Tone curve parameters
             wb_params: White balance (Temperature/Tint) parameters
             hsl_params: HSL Color Mixer parameters
+            color_grading_params: Color Grading parameters
             interactive_preview: Use smaller interactive proxy for drag updates.
 
         Returns:
@@ -214,6 +221,7 @@ class ProcessingWorker(QObject):
             curve_params,
             wb_params,
             hsl_params,
+            color_grading_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -226,6 +234,7 @@ class ProcessingWorker(QObject):
         curve_params: Optional[Dict[str, Any]] = None,
         wb_params: Optional[Dict[str, float]] = None,
         hsl_params: Optional[Dict[str, float]] = None,
+        color_grading_params: Optional[Dict[str, float]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -238,6 +247,7 @@ class ProcessingWorker(QObject):
             curve_params: Tone curve parameters
             wb_params: White balance (Temperature/Tint) parameters
             hsl_params: HSL Color Mixer parameters
+            color_grading_params: Color Grading parameters
 
         Returns:
             Request ID
@@ -249,6 +259,7 @@ class ProcessingWorker(QObject):
             curve_params,
             wb_params,
             hsl_params,
+            color_grading_params,
             use_proxy=False,
         )
     
@@ -354,6 +365,7 @@ class ProcessingWorker(QObject):
                 request.curve_params,
                 request.wb_params,
                 request.hsl_params,
+                request.color_grading_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -424,6 +436,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.curve_params.items())),
             tuple(sorted(request.wb_params.items())),
             tuple(sorted(request.hsl_params.items())),
+            tuple(sorted(request.color_grading_params.items())),
         )
 
     @staticmethod
@@ -436,6 +449,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.curve_params.items())),
             tuple(sorted(request.wb_params.items())),
             tuple(sorted(request.hsl_params.items())),
+            tuple(sorted(request.color_grading_params.items())),
         )
 
     def _apply_adjustments(
@@ -447,9 +461,10 @@ class ProcessingWorker(QObject):
         curve_params: Optional[Dict[str, Any]] = None,
         wb_params: Optional[Dict[str, float]] = None,
         hsl_params: Optional[Dict[str, float]] = None,
+        color_grading_params: Optional[Dict[str, float]] = None,
     ) -> LinearImage:
-        """Apply exposure, tonal, white balance, curve, color, and HSL
-        mixer adjustments to a ``LinearImage``."""
+        """Apply exposure, tonal, white balance, curve, color, HSL mixer,
+        and Color Grading adjustments to a ``LinearImage``."""
         total_start = perf_counter()
         copy_start = perf_counter()
         result = image.copy()
@@ -460,6 +475,7 @@ class ProcessingWorker(QObject):
         curve_ms = 0.0
         color_ms = 0.0
         hsl_ms = 0.0
+        color_grading_ms = 0.0
 
         if exposure_params and any(v != 0 for v in exposure_params.values()):
             exposure_start = perf_counter()
@@ -491,10 +507,17 @@ class ProcessingWorker(QObject):
             result = self._hsl_processor.process(result, **hsl_params)
             hsl_ms = _elapsed_ms(hsl_start)
 
+        if color_grading_params:
+            color_grading_start = perf_counter()
+            result = self._color_grading_processor.process(
+                result, **color_grading_params
+            )
+            color_grading_ms = _elapsed_ms(color_grading_start)
+
         logger.info(
             "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
             "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f hsl_ms=%.2f "
-            "total_ms=%.2f",
+            "color_grading_ms=%.2f total_ms=%.2f",
             image.shape,
             copy_ms,
             exposure_ms,
@@ -503,6 +526,7 @@ class ProcessingWorker(QObject):
             curve_ms,
             color_ms,
             hsl_ms,
+            color_grading_ms,
             _elapsed_ms(total_start),
         )
 

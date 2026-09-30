@@ -11,9 +11,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from src.processors.color_grading_processor import default_color_grading_params
 from src.processors.hsl_mixer_processor import default_hsl_params
 from src.utils.curve_math import normalize_points
 from src.views.widgets.adjustment_slider import AdjustmentSlider
+from src.views.widgets.color_grading_panel import ColorGradingPanel
 from src.views.widgets.curve_editor import CurveEditor
 from src.views.widgets.hsl_mixer_panel import HslMixerPanel
 
@@ -26,13 +28,16 @@ class ToolsPanel(QWidget):
         curve_changed: Emitted when the tone curve changes (list of [x, y]
             control points)
         hsl_changed: Emitted when the HSL Color Mixer changes (24-key flat dict)
-        slider_released: Emitted when any slider, the curve editor, or the
-            HSL mixer is released (for final processing)
+        color_grading_changed: Emitted when Color Grading changes (11-key
+            flat dict)
+        slider_released: Emitted when any slider, the curve editor, the
+            HSL mixer, or Color Grading is released (for final processing)
     """
 
     adjustments_changed = pyqtSignal(dict)
     curve_changed = pyqtSignal(list)
     hsl_changed = pyqtSignal(dict)
+    color_grading_changed = pyqtSignal(dict)
     slider_released = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -59,6 +64,7 @@ class ToolsPanel(QWidget):
         }
         self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
         self._hsl_values: Dict[str, float] = default_hsl_params()
+        self._color_grading_values: Dict[str, float] = default_color_grading_params()
         self._suppress_adjustment_signal = False
 
         self._setup_ui()
@@ -168,6 +174,14 @@ class ToolsPanel(QWidget):
         mixer_content_layout.addWidget(self._hsl_mixer_panel)
 
         content_layout.addWidget(mixer_section)
+
+        # Color Grading section
+        grading_section, grading_content_layout = self._create_section("Color Grading")
+
+        self._color_grading_panel = ColorGradingPanel()
+        grading_content_layout.addWidget(self._color_grading_panel)
+
+        content_layout.addWidget(grading_section)
 
         # Reset button
         self._reset_button = QPushButton("Reset All")
@@ -286,6 +300,11 @@ class ToolsPanel(QWidget):
         self._hsl_mixer_panel.values_changed.connect(self._on_hsl_mixer_changed)
         self._hsl_mixer_panel.slider_released.connect(self.slider_released)
 
+        self._color_grading_panel.values_changed.connect(
+            self._on_color_grading_changed
+        )
+        self._color_grading_panel.slider_released.connect(self.slider_released)
+
         self._reset_button.clicked.connect(self.reset_all)
     
     def _on_slider_released(self, value: float):
@@ -308,6 +327,12 @@ class ToolsPanel(QWidget):
         self._hsl_values = dict(values)
         if not self._suppress_adjustment_signal:
             self.hsl_changed.emit(dict(self._hsl_values))
+
+    def _on_color_grading_changed(self, values: dict):
+        """Handle Color Grading changing (continuous, during drag)."""
+        self._color_grading_values = dict(values)
+        if not self._suppress_adjustment_signal:
+            self.color_grading_changed.emit(dict(self._color_grading_values))
 
     def _on_adjustment_changed(self, name: str, value: float):
         """Handle adjustment value change.
@@ -397,6 +422,16 @@ class ToolsPanel(QWidget):
         """
         return dict(self._hsl_values)
 
+    def get_color_grading_params(self) -> Dict[str, float]:
+        """Get the Color Grading parameters.
+
+        Returns:
+            Flat 11-key dict (per-range ``"<range>_hue"``/``"<range>_sat"``/
+            ``"<range>_lum"`` for Shadows/Midtones/Highlights, plus
+            ``"blending"``/``"balance"``).
+        """
+        return dict(self._color_grading_values)
+
     def reset_all(self):
         """Reset all adjustments to default values."""
         self.set_adjustments({}, emit_signal=True)
@@ -425,6 +460,16 @@ class ToolsPanel(QWidget):
                     hsl_values[key] = float(raw_hsl.get(key, 0.0))
                 except (TypeError, ValueError):
                     hsl_values[key] = 0.0
+        color_grading_values = default_color_grading_params()
+        raw_color_grading = adjustments.get('color_grading')
+        if raw_color_grading:
+            for key in color_grading_values:
+                try:
+                    color_grading_values[key] = float(
+                        raw_color_grading.get(key, color_grading_values[key])
+                    )
+                except (TypeError, ValueError):
+                    pass
         self._suppress_adjustment_signal = True
         try:
             self._exposure_slider.set_value(merged['exposure'])
@@ -440,15 +485,18 @@ class ToolsPanel(QWidget):
             self._vibrance_slider.set_value(merged['vibrance'])
             self._curve_editor.set_points(curve_points)
             self._hsl_mixer_panel.set_values(hsl_values)
+            self._color_grading_panel.set_values(color_grading_values)
         finally:
             self._suppress_adjustment_signal = False
         self._adjustments = merged
         self._curve_points = list(curve_points)
         self._hsl_values = hsl_values
+        self._color_grading_values = color_grading_values
         if emit_signal:
             self.adjustments_changed.emit(self._adjustments.copy())
             self.curve_changed.emit([list(p) for p in self._curve_points])
             self.hsl_changed.emit(dict(self._hsl_values))
+            self.color_grading_changed.emit(dict(self._color_grading_values))
 
     def set_enabled(self, enabled: bool):
         """Enable or disable all controls.
@@ -469,4 +517,5 @@ class ToolsPanel(QWidget):
         self._vibrance_slider.setEnabled(enabled)
         self._curve_editor.setEnabled(enabled)
         self._hsl_mixer_panel.setEnabled(enabled)
+        self._color_grading_panel.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)

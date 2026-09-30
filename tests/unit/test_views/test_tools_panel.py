@@ -4,6 +4,7 @@ Blacks sliders added alongside TonalProcessor."""
 import pytest
 from PyQt6.QtWidgets import QApplication
 
+from src.processors.color_grading_processor import default_color_grading_params
 from src.processors.hsl_mixer_processor import default_hsl_params
 from src.views.tools_panel import ToolsPanel
 
@@ -317,5 +318,71 @@ class TestToolsPanelHslMixer:
         assert panel.get_exposure_params() == {
             'exposure': 0.0, 'contrast': 0.0, 'brightness': 0.0
         }
+
+
+class TestToolsPanelColorGrading:
+    """Tests for the Color Grading section."""
+
+    def test_color_grading_defaults_to_identity(self, qapp):
+        panel = ToolsPanel()
+        assert panel.get_color_grading_params() == default_color_grading_params()
+
+    def test_color_grading_change_updates_params_and_emits(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.color_grading_changed.connect(received.append)
+
+        panel._color_grading_panel._sliders["shadows_sat"].set_value(40.0)
+
+        assert panel.get_color_grading_params()["shadows_sat"] == 40.0
+        assert received[-1]["shadows_sat"] == 40.0
+
+    def test_color_grading_release_emits_slider_released(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.slider_released.connect(lambda: received.append(True))
+        panel._color_grading_panel.slider_released.emit()
+        assert received == [True]
+
+    def test_reset_all_resets_color_grading(self, qapp):
+        panel = ToolsPanel()
+        panel._color_grading_panel._sliders["shadows_sat"].set_value(40.0)
+
+        panel.reset_all()
+
+        assert panel.get_color_grading_params() == default_color_grading_params()
+
+    def test_set_adjustments_restores_color_grading_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.color_grading_changed.connect(received.append)
+
+        panel.set_adjustments(
+            {'color_grading': {'midtones_lum': 20.0}}, emit_signal=False
+        )
+
+        assert panel.get_color_grading_params()['midtones_lum'] == 20.0
+        assert received == []
+
+    def test_set_adjustments_missing_color_grading_defaults_to_identity(self, qapp):
+        panel = ToolsPanel()
+        panel._color_grading_panel._sliders["shadows_sat"].set_value(40.0)
+
+        panel.set_adjustments({'exposure': 1.0}, emit_signal=False)
+
+        assert panel.get_color_grading_params() == default_color_grading_params()
+
+    def test_set_enabled_false_disables_color_grading(self, qapp):
+        panel = ToolsPanel()
+        panel.set_enabled(False)
+        assert panel._color_grading_panel.isEnabled() is False
+
+    def test_color_grading_change_does_not_affect_other_params(self, qapp):
+        panel = ToolsPanel()
+        panel._color_grading_panel._sliders["shadows_sat"].set_value(40.0)
+        assert panel.get_exposure_params() == {
+            'exposure': 0.0, 'contrast': 0.0, 'brightness': 0.0
+        }
+        assert panel.get_hsl_params() == default_hsl_params()
         assert panel.get_wb_params() == {'temperature': 0.0, 'tint': 0.0}
         assert panel.get_color_params() == {'saturation': 0.0, 'vibrance': 0.0}

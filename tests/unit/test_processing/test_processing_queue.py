@@ -108,6 +108,18 @@ class TestProcessingQueue:
 
         assert request.hsl_params == {}
 
+    def test_create_request_threads_color_grading_params(self):
+        queue = ProcessingQueue()
+        request = queue.create_request(color_grading_params={'shadows_sat': 40.0})
+
+        assert request.color_grading_params == {'shadows_sat': 40.0}
+
+    def test_create_request_defaults_color_grading_params_to_empty_dict(self):
+        queue = ProcessingQueue()
+        request = queue.create_request()
+
+        assert request.color_grading_params == {}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

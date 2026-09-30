@@ -205,6 +205,36 @@ class TestCombinedAdjustmentCommand:
         assert cmd.is_executed() is False
         assert model.get_current_image() is previous
 
+    def test_color_grading_only(self, sample_linear_image):
+        """Test with only a Color Grading adjustment."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+
+        cmd = CombinedAdjustmentCommand(
+            model,
+            color_grading_params={'shadows_sat': 40.0, 'shadows_hue': 200.0},
+        )
+        cmd.execute()
+
+        assert cmd.is_executed() is True
+        assert model.is_modified() is True
+
+    def test_undo_color_grading_only(self, sample_linear_image):
+        """Test undoing a color-grading-only adjustment restores the previous image."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+        previous = model.get_current_image()
+
+        cmd = CombinedAdjustmentCommand(
+            model,
+            color_grading_params={'shadows_sat': 40.0, 'shadows_hue': 200.0},
+        )
+        cmd.execute()
+        cmd.undo()
+
+        assert cmd.is_executed() is False
+        assert model.get_current_image() is previous
+
     def test_hsl_only(self, sample_linear_image):
         """Test with only an HSL Color Mixer adjustment."""
         model = ImageModel()

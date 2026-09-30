@@ -286,3 +286,65 @@ class TestProcessingWorkerHslMixer:
         key_b = worker._cache_key(request_b, source)
 
         assert key_a != key_b
+
+
+class TestProcessingWorkerColorGrading:
+    """Color Grading threading through the worker's apply/cache-key paths."""
+
+    def test_color_grading_params_reach_color_grading_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        calls = []
+
+        def fake_process(image, **kwargs):
+            calls.append(kwargs)
+            return image
+
+        monkeypatch.setattr(worker._color_grading_processor, "process", fake_process)
+
+        request = ProcessingRequest(
+            request_id=1,
+            color_grading_params={"shadows_sat": 40.0},
+            use_proxy=False,
+        )
+        worker._process_request(request)
+
+        assert calls == [{"shadows_sat": 40.0}]
+
+    def test_empty_color_grading_params_skip_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        calls = []
+        monkeypatch.setattr(
+            worker._color_grading_processor,
+            "process",
+            lambda image, **kw: calls.append(kw),
+        )
+
+        request = ProcessingRequest(
+            request_id=1,
+            color_grading_params={},
+            use_proxy=False,
+        )
+        worker._process_request(request)
+
+        assert calls == []
+
+    def test_different_color_grading_params_produce_different_cache_keys(self):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        request_a = ProcessingRequest(
+            request_id=1, color_grading_params={"shadows_sat": 0.0}, use_proxy=True
+        )
+        request_b = ProcessingRequest(
+            request_id=2, color_grading_params={"shadows_sat": 40.0}, use_proxy=True
+        )
+        source = worker._proxy_manager.get_proxy(interactive=True)
+
+        key_a = worker._cache_key(request_a, source)
+        key_b = worker._cache_key(request_b, source)
+
+        assert key_a != key_b
