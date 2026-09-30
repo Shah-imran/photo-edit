@@ -48,6 +48,7 @@ class LibraryEntry:
     status: str
     thumbnail_cache_key: Optional[str] = None
     adjustment_state: Optional[dict] = None
+    favorite: bool = False
 
     @property
     def normalized_path(self) -> str:
@@ -63,6 +64,7 @@ class LibraryEntry:
             "status": self.status,
             "thumbnail_cache_key": self.thumbnail_cache_key,
             "adjustment_state": self.adjustment_state,
+            "favorite": self.favorite,
         }
 
     @classmethod
@@ -76,6 +78,7 @@ class LibraryEntry:
             status=str(payload.get("status", "missing")),
             thumbnail_cache_key=_optional_str(payload.get("thumbnail_cache_key")),
             adjustment_state=_optional_dict(payload.get("adjustment_state")),
+            favorite=bool(payload.get("favorite", False)),
         )
 
 
@@ -312,6 +315,20 @@ class LibraryCatalogService:
         if entry.adjustment_state == normalized:
             return entry
         entry.adjustment_state = normalized
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def set_entry_favorite(
+        self, library_id: str, path: str, favorite: bool
+    ) -> LibraryEntry:
+        """Persist whether an entry belongs to the Favorites smart collection."""
+        library = self._require_library(library_id)
+        entry = self._require_entry(library, path)
+        favorite = bool(favorite)
+        if entry.favorite == favorite:
+            return entry
+        entry.favorite = favorite
         library.updated_at = _utc_now_iso()
         self._save_catalog()
         return entry

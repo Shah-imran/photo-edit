@@ -52,6 +52,72 @@ class TestLibraryView:
             == QSizePolicy.Policy.Expanding
         )
 
+    def test_navigation_only_mode_hides_thumbnail_grid_and_shows_count(
+        self, qapp, qtbot, sample_image_path
+    ):
+        navigation = LibraryView(show_thumbnail_grid=False)
+        qtbot.addWidget(navigation)
+        navigation.set_libraries(
+            [{"id": "one", "name": "Landscapes"}],
+            current_library_id="one",
+        )
+        navigation.set_entries(
+            [
+                {
+                    "path": sample_image_path,
+                    "filename": "test_image.jpg",
+                    "status": "available",
+                    "text": "test_image.jpg",
+                    "tooltip": "test_image.jpg",
+                    "thumbnail": None,
+                    "placeholder": "loading",
+                }
+            ]
+        )
+
+        assert "one" not in navigation._grid_by_library_id
+        assert navigation._count_label_by_library_id["one"].text() == "1"
+        assert navigation.get_image_count() == 1
+
+    def test_navigation_only_mode_shows_counts_for_inactive_libraries(
+        self, qapp, qtbot
+    ):
+        navigation = LibraryView(show_thumbnail_grid=False)
+        qtbot.addWidget(navigation)
+        navigation.set_libraries(
+            [
+                {"id": "one", "name": "Landscapes", "count": 4},
+                {"id": "two", "name": "Portraits", "count": 7},
+            ],
+            current_library_id="one",
+        )
+
+        assert navigation._count_label_by_library_id["one"].text() == "4"
+        assert navigation._count_label_by_library_id["two"].text() == "7"
+
+    def test_navigation_only_mode_behaves_as_compact_selection_list(
+        self, qapp, qtbot
+    ):
+        navigation = LibraryView(show_thumbnail_grid=False)
+        qtbot.addWidget(navigation)
+        navigation.set_libraries(
+            [
+                {"id": "one", "name": "Landscapes", "count": 4},
+                {"id": "two", "name": "Portraits", "count": 7},
+            ],
+            current_library_id="one",
+        )
+
+        assert navigation._content_layout.spacing() == 0
+        assert navigation._library_sections["one"].is_expanded() is True
+        navigation._library_sections["one"].set_expanded(False)
+        assert navigation._library_sections["one"].is_expanded() is True
+
+        navigation._library_sections["two"].set_expanded(True)
+        assert navigation.get_current_library_id() == "two"
+        assert navigation._library_sections["one"].is_expanded() is False
+        assert navigation._library_sections["two"].is_expanded() is True
+
     def test_set_entries_renders_grid(self, view, sample_image_path):
         view.set_libraries(
             [{"id": "one", "name": "Library 1"}],

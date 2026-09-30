@@ -84,7 +84,7 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | PDF # | Status | Notes |
 |-------|--------|--------|
 | 1 | Partial | Open/Import/Export/Exit exist [`main_window.py`](../../src/views/main_window.py). Missing: Search My Photos, Import Presets, Export with Previous, Edit in Photoshop, Migrate catalogs. |
-| 2 | Partial | Undo/Redo exist; Reset adjustments. Missing: Copy/Paste, Select All/None, Next/Prev photo, albums/stacks/share, most Edit-menu album ops, Preferences dialog. |
+| 2 | Partial | Undo/Redo currently swap rendered image buffers only; they do **not** restore controller parameters, slider/curve UI, export state, or persisted adjustment state. A future state-aware history slice must fix this before undo/redo is considered complete. Reset adjustments exists. Missing: Copy/Paste, Select All/None, Next/Prev photo, albums/stacks/share, most Edit-menu album ops, Preferences dialog. |
 | 3 | Gap | No preferences UI; no account/cloud (acceptable deferral for desktop MVP). |
 | 4 | Gap | No ratings, flags, keywords, album actions, date/time, Photo Merge, Enhance, Versions, Copy/Paste **edit settings** (only partial overlap with undo stack). |
 | 5-6 | Gap / unknown | View/Help menus minimal today (PDF Sections 5-6). |
@@ -96,7 +96,7 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | 12 | Gap | No curve or histogram-in-curve. |
 | 13 | Partial | Saturation, Vibrance; no Temperature/Tint or WB presets. |
 | 14-15 | Done | HSL Color Mixer (8 bands x Hue/Sat/Lum) and Color Grading (Shadows/Midtones/Highlights + Blending/Balance) both implemented; wheels approximated with sliders (see the respective implementation notes). |
-| 16 | Gap | No Texture, Clarity, Dehaze, Vignette, Grain in UI. |
+| 16 | Partial | Texture implemented; Clarity, Dehaze, Vignette, and Grain remain. |
 | 17 | Gap | No sharpening / NR panels. |
 | 18 | Gap | No Optics panel. |
 | 19-20 | Gap | No Geometry/Upright; no Crop tool / overlays. |
@@ -141,6 +141,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 
 ### Phase B -- Edit/File workflow and preferences MVP (PDF 1--2, 3 subset, 7)
 
+- **Complete state-aware Undo/Redo:** each history entry must retain before/after adjustment payloads as well as rendered results; undo and redo must atomically synchronize controller parameters, all sliders/curve controls, displayed image, export output, and persisted per-image state. The current image-buffer-only history is an acknowledged interim implementation.
 - **App-level persistence (do early; separate from Phase K project files):** `SettingsService` wrapping `QSettings` -- last open/import directory, last export directory, optional recent-files list, window geometry / dock state, theme name. See [INCREMENTAL_WORKFLOW.md](INCREMENTAL_WORKFLOW.md) section 6. Today this is **missing** in `src/` and is required for a professional feel.
 - **Copy/Paste edit settings** between images (requires serializable adjustment dict; feeds Phase K).
 - **Export with Previous** (remember last export options; ties to app-level persistence above).

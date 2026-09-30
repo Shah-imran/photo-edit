@@ -259,6 +259,16 @@ class LibraryController(QObject):
                 library_id,
             )
 
+    def set_entry_favorite(self, file_path: str, favorite: bool) -> None:
+        """Update favorite state for the current library and refresh its views."""
+        if not self._current_library_id or not file_path:
+            return
+        self._catalog_service.set_entry_favorite(
+            self._current_library_id, file_path, favorite
+        )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
     def referenced_adjustment_preview_cache_keys(self) -> set[str]:
         return self._catalog_service.referenced_adjustment_preview_cache_keys()
 
@@ -268,7 +278,12 @@ class LibraryController(QObject):
 
     def _emit_libraries(self) -> None:
         libraries = [
-            {"id": library.id, "name": library.name}
+            {
+                "id": library.id,
+                "name": library.name,
+                "count": len(library.entries),
+                "favorite_count": sum(1 for entry in library.entries if entry.favorite),
+            }
             for library in self._catalog_service.list_libraries()
         ]
         self.libraries_changed.emit(libraries, self._current_library_id)
@@ -303,6 +318,8 @@ class LibraryController(QObject):
             "tooltip": entry.filename if entry.status == "available" else f"{entry.path}\nMissing",
             "thumbnail": None,
             "placeholder": "missing" if entry.status != "available" else "loading",
+            "added_at": entry.added_at,
+            "favorite": entry.favorite,
         }
 
         if entry.status != "available":
@@ -382,6 +399,8 @@ class LibraryController(QObject):
             "tooltip": entry.filename,
             "thumbnail": QImage(str(self._thumbnail_cache_service.path_for_key(cache_key))),
             "placeholder": None,
+            "added_at": entry.added_at,
+            "favorite": entry.favorite,
         }
         if library_id == self._current_library_id:
             self.entry_thumbnail_updated.emit(file_path, payload)

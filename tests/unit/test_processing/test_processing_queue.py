@@ -120,6 +120,10 @@ class TestProcessingQueue:
 
         assert request.color_grading_params == {}
 
+    def test_create_request_threads_texture_params(self):
+        request = ProcessingQueue().create_request(texture_params={"texture": 35.0})
+        assert request.texture_params == {"texture": 35.0}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

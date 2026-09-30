@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QApplication
 
 from src.utils.logging_config import configure_logging
 from src.views.main_window import MainWindow
+from src.views.theme import apply_theme
 
 
 def main():
@@ -16,6 +17,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("PhotoEdit")
     app.setOrganizationName("PhotoEdit")
+    apply_theme(app)
 
     # Keep logs project-local during active development so performance traces
     # are easy to inspect after a slider interaction.

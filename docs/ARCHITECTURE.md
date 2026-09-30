@@ -285,6 +285,14 @@ PhotoEdit/
 6. Model updated
 7. View refreshed
 
+**Current implementation gap / future work:** the present history command
+restores only a rendered image buffer. Controller adjustment parameters,
+sliders and curve controls, export recomputation, and persisted per-image state
+remain at their post-edit values. Professional undo/redo must store before/after
+adjustment payloads and restore all of those consumers atomically. Until that
+state-aware history slice lands, the workflow above describes the target
+architecture rather than complete current behavior.
+
 ---
 
 ## 7. Dependency Recommendations

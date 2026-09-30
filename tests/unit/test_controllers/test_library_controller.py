@@ -79,6 +79,19 @@ class TestLibraryController:
         assert len(entries) == 1
         assert entries[0]["path"] == sample_image_path
 
+    def test_libraries_changed_includes_entry_counts(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.libraries_changed, timeout=1000) as changed:
+            controller.create_library("Empty")
+
+        libraries, _current_id = changed.args
+        populated = next(item for item in libraries if item["name"] == "Library 1")
+        assert populated["count"] == 1
+
     def test_remove_library_restores_remaining_library(
         self,
         controller,

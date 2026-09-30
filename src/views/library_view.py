@@ -12,6 +12,8 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QToolButton,
+    QFrame,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -20,6 +22,7 @@ from PyQt6.QtWidgets import (
 
 from src.services.file_service import FileService
 from src.views.widgets.collapsible_section import CollapsibleSection
+from src.views.icons import line_icon
 
 
 class ResponsiveLibraryGrid(QListWidget):
@@ -73,32 +76,53 @@ class LibraryView(QWidget):
     library_selected = pyqtSignal(str)
     create_library_requested = pyqtSignal(str)
     remove_library_requested = pyqtSignal(str)
+    collection_selected = pyqtSignal(str)
 
     THUMBNAIL_SIZE = 80
     THUMB_CELL_WIDTH = 112
     THUMB_CELL_HEIGHT = 118
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        show_thumbnail_grid: bool = True,
+    ):
         super().__init__(parent)
+        self._show_thumbnail_grid = show_thumbnail_grid
         self._file_service = FileService()
         self._item_by_path: dict[str, QListWidgetItem] = {}
         self._current_library_id = ""
         self._library_sections: dict[str, CollapsibleSection] = {}
         self._grid_by_library_id: dict[str, QListWidget] = {}
         self._delete_button_by_library_id: dict[str, QPushButton] = {}
+        self._count_label_by_library_id: dict[str, QLabel] = {}
         self._suppress_section_signal = False
+        self._entry_count = 0
 
         self._setup_ui()
         self._connect_signals()
 
     def _setup_ui(self) -> None:
+        self.setObjectName("libraryView")
+        self.setStyleSheet(
+            """
+            QWidget#libraryView { background: #242424; }
+            QWidget#libraryContent { background: #242424; }
+            QScrollArea#libraryScroll, QScrollArea#libraryScroll > QWidget > QWidget {
+                background: #242424;
+            }
+            """
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 0, 8)
         layout.setSpacing(8)
 
         header_layout = QHBoxLayout()
-        title = QLabel("Library")
-        title.setStyleSheet("color: #a0a0a0; font-weight: bold; font-size: 12px;")
+        title = QLabel("MY LIBRARY")
+        title.setStyleSheet(
+            "color: #a0a0a0; font-weight: 600; font-size: 10px; letter-spacing: 1px;"
+        )
         header_layout.addWidget(title)
         header_layout.addStretch()
 
@@ -139,7 +163,44 @@ class LibraryView(QWidget):
         header_layout.addWidget(self._add_library_button)
         layout.addLayout(header_layout)
 
+        self._collection_counts: dict[str, QLabel] = {}
+        for key, label, icon_name in (
+            ("all", "All Photos", "folder"),
+            ("favorites", "Favorites", "heart"),
+            ("recent", "Recently Added", "clock"),
+        ):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(2, 0, 8, 0)
+            row_layout.setSpacing(4)
+            button = QToolButton()
+            button.setText(label)
+            button.setIcon(line_icon(icon_name, "#c4ced8", 18))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setStyleSheet(
+                "QToolButton { background: transparent; border: none; padding: 6px 4px; "
+                "text-align: left; } QToolButton:hover { background: #303840; }"
+            )
+            button.setAccessibleName(label)
+            button.clicked.connect(
+                lambda _checked=False, collection=key: self.collection_selected.emit(
+                    collection
+                )
+            )
+            row_layout.addWidget(button, 1)
+            count = QLabel("0")
+            count.setStyleSheet("color: #929ba5;")
+            row_layout.addWidget(count)
+            self._collection_counts[key] = count
+            layout.addWidget(row)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet("color: #3a4149; margin: 2px 8px 2px 0;")
+        layout.addWidget(divider)
+
         self._scroll_area = QScrollArea()
+        self._scroll_area.setObjectName("libraryScroll")
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -153,15 +214,18 @@ class LibraryView(QWidget):
             """
         )
         self._content_widget = QWidget()
+        self._content_widget.setObjectName("libraryContent")
         self._content_layout = QVBoxLayout(self._content_widget)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
-        self._content_layout.setSpacing(10)
+        self._content_layout.setSpacing(10 if self._show_thumbnail_grid else 0)
+        self._content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._scroll_area.setWidget(self._content_widget)
         layout.addWidget(self._scroll_area, 1)
 
         self._info_label = QLabel("No images")
         self._info_label.setStyleSheet("color: #606060; font-size: 10px;")
         self._info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._info_label.setVisible(self._show_thumbnail_grid)
         layout.addWidget(self._info_label)
 
     def _connect_signals(self) -> None:
@@ -170,6 +234,19 @@ class LibraryView(QWidget):
 
     def set_libraries(self, libraries: list[dict], current_library_id: str) -> None:
         self._current_library_id = current_library_id
+        active_library = next(
+            (
+                library
+                for library in libraries
+                if str(library.get("id")) == current_library_id
+            ),
+            {},
+        )
+        total = int(active_library.get("count", 0))
+        favorites = int(active_library.get("favorite_count", 0))
+        self._collection_counts["all"].setText(str(total))
+        self._collection_counts["favorites"].setText(str(favorites))
+        self._collection_counts["recent"].setText(str(total))
         self._suppress_section_signal = True
         try:
             self._clear_library_sections()
@@ -203,26 +280,56 @@ class LibraryView(QWidget):
                         lid
                     )
                 )
+                count_label = QLabel(str(library.get("count", 0)))
+                count_label.setObjectName("libraryCountLabel")
+                count_label.setStyleSheet("color: #92979f; padding: 0 4px;")
+                count_label.setToolTip("Images in this library")
+                section.add_header_widget(count_label)
                 section.add_header_widget(delete_button)
-                grid = self._create_image_grid()
-                section.set_content_widget(grid)
+                grid = None
+                if self._show_thumbnail_grid:
+                    grid = self._create_image_grid()
+                    section.set_content_widget(grid)
+                else:
+                    section.set_content_area_enabled(False)
+                    section.set_header_icon(line_icon("folder", "#8ec9ff", 18))
+                    section.setStyleSheet(
+                        section.styleSheet()
+                        + """
+                        QFrame#collapsibleSection QToolButton {
+                            padding: 8px 7px;
+                        }
+                        QFrame#collapsibleSection QToolButton:checked {
+                            background: #263746;
+                            border-left: 3px solid #0086f0;
+                            color: white;
+                            padding-left: 4px;
+                        }
+                        """
+                    )
                 section.toggled.connect(
                     lambda expanded, lid=library_id: self._on_library_section_toggled(
                         lid, expanded
                     )
                 )
                 self._library_sections[library_id] = section
-                self._grid_by_library_id[library_id] = grid
+                if grid is not None:
+                    self._grid_by_library_id[library_id] = grid
                 self._delete_button_by_library_id[library_id] = delete_button
+                self._count_label_by_library_id[library_id] = count_label
                 self._content_layout.insertWidget(index, section)
             self._apply_active_section_layout()
         finally:
             self._suppress_section_signal = False
 
     def set_entries(self, entries: list[dict]) -> None:
+        self._entry_count = len(entries)
         self._item_by_path.clear()
         grid = self._grid_by_library_id.get(self._current_library_id)
         if grid is None:
+            count_label = self._count_label_by_library_id.get(self._current_library_id)
+            if count_label is not None:
+                count_label.setText(str(len(entries)))
             self._update_info_label()
             return
         grid.clear()
@@ -235,6 +342,9 @@ class LibraryView(QWidget):
             grid.addItem(item)
             self._item_by_path[payload["path"]] = item
         grid.refresh_layout_metrics()
+        count_label = self._count_label_by_library_id.get(self._current_library_id)
+        if count_label is not None:
+            count_label.setText(str(len(entries)))
         self._update_info_label()
 
     def _create_image_grid(self) -> ResponsiveLibraryGrid:
@@ -284,6 +394,7 @@ class LibraryView(QWidget):
         self._library_sections.clear()
         self._grid_by_library_id.clear()
         self._delete_button_by_library_id.clear()
+        self._count_label_by_library_id.clear()
 
     def _on_library_section_toggled(self, library_id: str, expanded: bool) -> None:
         if self._suppress_section_signal:
@@ -302,6 +413,14 @@ class LibraryView(QWidget):
             return
 
         if library_id == self._current_library_id:
+            if not self._show_thumbnail_grid:
+                # In navigation-only mode the rows behave like a list, so the
+                # active row cannot be collapsed/deselected by clicking it.
+                self._suppress_section_signal = True
+                try:
+                    self._library_sections[library_id].set_expanded(True)
+                finally:
+                    self._suppress_section_signal = False
             self._apply_active_section_layout()
 
     def update_entry_thumbnail(self, path: str, payload: dict) -> None:
@@ -375,7 +494,7 @@ class LibraryView(QWidget):
 
     def _update_info_label(self) -> None:
         grid = self._grid_by_library_id.get(self._current_library_id)
-        count = grid.count() if grid is not None else 0
+        count = grid.count() if grid is not None else self._entry_count
         if count == 0:
             self._info_label.setText("No images")
         elif count == 1:
@@ -385,7 +504,7 @@ class LibraryView(QWidget):
 
     def get_image_count(self) -> int:
         grid = self._grid_by_library_id.get(self._current_library_id)
-        return grid.count() if grid is not None else 0
+        return grid.count() if grid is not None else self._entry_count
 
     def get_library_count(self) -> int:
         return len(self._library_sections)
@@ -431,10 +550,16 @@ class LibraryView(QWidget):
 
     def _apply_active_section_layout(self) -> None:
         for library_id, section in self._library_sections.items():
-            is_active = library_id == self._current_library_id and section.is_expanded()
+            is_active = (
+                self._show_thumbnail_grid
+                and library_id == self._current_library_id
+                and section.is_expanded()
+            )
             section.set_fill_available_space(is_active)
+            grid = self._grid_by_library_id.get(library_id)
+            if grid is not None:
+                grid.setVisible(is_active)
             if is_active:
-                grid = self._grid_by_library_id.get(library_id)
                 if grid is not None:
                     grid.refresh_layout_metrics()
         self._content_widget.updateGeometry()

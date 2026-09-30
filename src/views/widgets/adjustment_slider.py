@@ -4,7 +4,6 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget,
     QHBoxLayout,
-    QVBoxLayout,
     QLabel,
     QSlider,
     QDoubleSpinBox
@@ -37,6 +36,7 @@ class AdjustmentSlider(QWidget):
         default_value: float = 0.0,
         step: float = 1.0,
         decimals: int = 1,
+        color_gradient: Optional[str] = None,
         parent: Optional[QWidget] = None
     ):
         """Initialize the adjustment slider.
@@ -59,76 +59,69 @@ class AdjustmentSlider(QWidget):
         self._decimals = decimals
         self._scale_factor = 10 ** decimals  # For slider integer conversion
         
+        self._color_gradient = color_gradient
         self._setup_ui(label)
         self._connect_signals()
 
     def _setup_ui(self, label: str):
         """Set up the UI components."""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 8)
-        layout.setSpacing(4)
-        
-        # Top row: label and value
-        top_row = QHBoxLayout()
-        top_row.setSpacing(8)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 2, 0, 4)
+        layout.setSpacing(8)
         
         self._label = QLabel(label)
         self._label.setStyleSheet("color: #e0e0e0; font-size: 11px;")
-        top_row.addWidget(self._label)
-        
-        top_row.addStretch()
-        
-        self._spin_box = QDoubleSpinBox()
-        self._spin_box.setRange(self._min_value, self._max_value)
-        self._spin_box.setSingleStep(self._step)
-        self._spin_box.setDecimals(self._decimals)
-        self._spin_box.setValue(self._default_value)
-        self._spin_box.setFixedWidth(70)
-        self._spin_box.setStyleSheet("""
-            QDoubleSpinBox {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: 1px solid #3a3a3a;
-                border-radius: 3px;
-                padding: 2px 4px;
-            }
-            QDoubleSpinBox:focus {
-                border-color: #0078d4;
-            }
-        """)
-        top_row.addWidget(self._spin_box)
-        
-        layout.addLayout(top_row)
-        
-        # Slider
+        self._label.setMinimumWidth(70)
+        layout.addWidget(self._label)
+
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setRange(
             int(self._min_value * self._scale_factor),
             int(self._max_value * self._scale_factor)
         )
         self._slider.setValue(int(self._default_value * self._scale_factor))
-        self._slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #3a3a3a;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                width: 14px;
-                height: 14px;
-                background: #0078d4;
-                border-radius: 7px;
+        groove = self._color_gradient or "#59616a"
+        sub_page = "transparent" if self._color_gradient else "#168cff"
+        self._slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 2px;
+                background: {groove};
+                border-radius: 1px;
+            }}
+            QSlider::handle:horizontal {{
+                width: 11px;
+                height: 11px;
+                background: #e8edf2;
+                border: 1px solid #168cff;
+                border-radius: 6px;
                 margin: -5px 0;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #0086f0;
-            }
-            QSlider::sub-page:horizontal {
-                background: #0078d4;
-                border-radius: 2px;
-            }
+            }}
+            QSlider::handle:horizontal:hover {{ background: white; }}
+            QSlider::sub-page:horizontal {{
+                background: {sub_page};
+                border-radius: 1px;
+            }}
         """)
-        layout.addWidget(self._slider)
+        layout.addWidget(self._slider, 1)
+
+        self._spin_box = QDoubleSpinBox()
+        self._spin_box.setRange(self._min_value, self._max_value)
+        self._spin_box.setSingleStep(self._step)
+        self._spin_box.setDecimals(self._decimals)
+        self._spin_box.setValue(self._default_value)
+        self._spin_box.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+        self._spin_box.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._spin_box.setFixedWidth(52)
+        self._spin_box.setStyleSheet("""
+            QDoubleSpinBox {
+                background: transparent;
+                color: #e0e0e0;
+                border: none;
+                padding: 0;
+            }
+            QDoubleSpinBox:focus { color: white; }
+        """)
+        layout.addWidget(self._spin_box)
 
     def _connect_signals(self):
         """Connect internal signals."""

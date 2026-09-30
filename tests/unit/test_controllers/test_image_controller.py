@@ -164,6 +164,7 @@ class TestImageController:
             "tint": 0.0,
             "saturation": 0.0,
             "vibrance": 0.0,
+            "texture": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -197,6 +198,7 @@ class TestImageController:
             "tint": 0.0,
             "saturation": 20.0,
             "vibrance": 8.0,
+            "texture": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -1055,3 +1057,20 @@ class TestImageControllerCleanupThreadSafety:
 
         assert fake_thread not in controller._load_threads
         assert fake_worker not in controller._load_workers
+
+
+class TestImageControllerTexture:
+    def test_texture_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original = controller.image_model.get_original_image().copy()
+        original[40:60, 40:60] *= 0.6
+        controller.image_model.set_original_image(original)
+        controller.restore_adjustment_state({"texture": 45.0})
+        assert controller.get_adjustment_state()["texture"] == 45.0
+        assert not np.array_equal(controller.get_export_image(), original)
+
+    def test_missing_texture_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["texture"] == 0.0

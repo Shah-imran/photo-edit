@@ -348,3 +348,33 @@ class TestProcessingWorkerColorGrading:
         key_b = worker._cache_key(request_b, source)
 
         assert key_a != key_b
+
+
+class TestProcessingWorkerTexture:
+    def test_texture_params_reach_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._texture_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1, texture_params={"texture": 40.0}, use_proxy=False
+        ))
+        assert calls == [{"texture": 40.0}]
+
+    def test_zero_texture_skips_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._texture_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1, texture_params={"texture": 0.0}, use_proxy=False
+        ))
+        assert calls == []
