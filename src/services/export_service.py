@@ -1,9 +1,16 @@
 """Export service for saving edited images."""
 
-from typing import Optional, Dict, Any, List
-from pathlib import Path
-from PIL import Image
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
 from src.services.image_service import ImageService
+from src.utils.color_pipeline import LinearImage
+
+
+logger = logging.getLogger(__name__)
 
 
 class ExportService:
@@ -23,67 +30,67 @@ class ExportService:
 
     def export_image(
         self,
-        image: Image.Image,
+        image: LinearImage,
         output_path: str,
         format: Optional[str] = None,
         quality: int = 95,
-        resize: Optional[tuple] = None,
+        resize: Optional[Tuple[int, int]] = None,
         preserve_aspect: bool = True,
-        **kwargs
+        **kwargs,
     ) -> bool:
-        """Export an image to a file.
-        
+        """Export a ``LinearImage`` to disk.
+
         Args:
-            image: PIL Image to export
-            output_path: Output file path
-            format: Image format (JPEG, PNG, TIFF). If None, inferred from extension
-            quality: JPEG quality (1-100, default 95)
-            resize: Optional (width, height) to resize to
-            preserve_aspect: If True, preserve aspect ratio when resizing
-            **kwargs: Additional format-specific options
-            
-        Returns:
-            True if export successful, False otherwise
+            image: ``LinearImage`` (float32, ``(H, W, 3)``, linear sRGB).
+            output_path: Output file path.
+            format: PIL format name (``"JPEG"``, ``"PNG"``, ``"TIFF"``).
+                When ``None``, inferred from the file extension.
+            quality: JPEG quality (1-100).
+            resize: Optional ``(width, height)`` target.
+            preserve_aspect: When True, downscale fits inside the box.
+            **kwargs: Forwarded to ``PIL.Image.save``.
         """
         try:
-            # Apply resize if specified
             if resize:
                 image = self._resize_image(image, resize, preserve_aspect)
-            
-            # Save the image
+
             self._image_service.save_image(
                 image,
                 output_path,
                 format=format,
                 quality=quality,
-                **kwargs
+                **kwargs,
             )
             return True
-        except Exception as e:
-            print(f"Export failed: {e}")
+        except Exception:
+            logger.exception("Export failed for %s", output_path)
             return False
 
     def _resize_image(
         self,
-        image: Image.Image,
-        size: tuple,
-        preserve_aspect: bool = True
-    ) -> Image.Image:
-        """Resize an image.
-        
-        Args:
-            image: PIL Image to resize
-            size: Target (width, height)
-            preserve_aspect: If True, preserve aspect ratio
-            
-        Returns:
-            Resized image
-        """
+        image: LinearImage,
+        size: Tuple[int, int],
+        preserve_aspect: bool = True,
+    ) -> LinearImage:
+        """Resize a ``LinearImage`` using ``cv2.resize``."""
+        target_w, target_h = size
+        h, w = image.shape[:2]
+
         if preserve_aspect:
-            image.thumbnail(size, Image.Resampling.LANCZOS)
-            return image.copy()
+            scale = min(target_w / float(w), target_h / float(h), 1.0)
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
         else:
-            return image.resize(size, Image.Resampling.LANCZOS)
+            new_w, new_h = target_w, target_h
+
+        if (new_w, new_h) == (w, h):
+            return image.copy()
+
+        # ``INTER_AREA`` is the canonical choice for downscale;
+        # ``INTER_LANCZOS4`` is the canonical choice for upscale.
+        interp = cv2.INTER_AREA if (new_w * new_h) <= (w * h) else cv2.INTER_LANCZOS4
+        resized = cv2.resize(image, (new_w, new_h), interpolation=interp)
+        return resized.astype(np.float32, copy=False)
 
     def get_export_formats(self) -> List[Dict[str, Any]]:
         """Get available export formats with their options.

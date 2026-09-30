@@ -1,13 +1,44 @@
-"""Background processing worker using QThread."""
+"""Background processing worker using QThread.
 
-from typing import Optional, Dict
-from PyQt6.QtCore import QObject, QThread, pyqtSignal, QMutex, QWaitCondition
-from PIL import Image
+Operates on the canonical pipeline format
+(:data:`src.utils.color_pipeline.LinearImage`). Qt signals carry the
+arrays as ``object`` payloads (Qt cannot statically type ndarrays).
+"""
 
-from src.processing.processing_queue import ProcessingRequest, ProcessingQueue
+from collections import OrderedDict
+from dataclasses import dataclass
+import logging
+from time import perf_counter
+from typing import Any, Dict, Optional, Tuple
+
+from PyQt6.QtCore import QMutex, QObject, QThread, QWaitCondition, pyqtSignal
+
+from src.processing.display_frame import DisplayFrame
+from src.processing.processing_queue import ProcessingQueue, ProcessingRequest
 from src.processing.proxy_manager import ProxyManager
-from src.processors.exposure_processor import ExposureProcessor
+from src.processors.color_grading_processor import ColorGradingProcessor
 from src.processors.color_processor import ColorProcessor
+from src.processors.curve_processor import CurveProcessor
+from src.processors.exposure_processor import ExposureProcessor
+from src.processors.hsl_mixer_processor import HslMixerProcessor
+from src.processors.tonal_processor import TonalProcessor
+from src.processors.white_balance_processor import WhiteBalanceProcessor
+from src.utils.color_pipeline import LinearImage
+
+
+logger = logging.getLogger(__name__)
+
+
+def _elapsed_ms(start: float) -> float:
+    return (perf_counter() - start) * 1000.0
+
+
+@dataclass
+class _CachedPreview:
+    """Cached preview image and its already-converted display buffer."""
+
+    linear_image: LinearImage
+    rgb: object
 
 
 class ProcessingWorker(QObject):
@@ -19,14 +50,14 @@ class ProcessingWorker(QObject):
     
     Signals:
         processing_started: Emitted when processing begins (request_id)
-        preview_ready: Emitted when proxy preview is ready (request_id, image)
+        preview_ready: Emitted when proxy preview is ready (request_id, DisplayFrame)
         processing_complete: Emitted when full processing is done (request_id, image)
         error_occurred: Emitted on processing error (request_id, error_message)
     """
     
     processing_started = pyqtSignal(int)
-    preview_ready = pyqtSignal(int, object)  # request_id, PIL Image
-    processing_complete = pyqtSignal(int, object)  # request_id, PIL Image
+    preview_ready = pyqtSignal(int, object)  # request_id, DisplayFrame
+    processing_complete = pyqtSignal(int, object)  # request_id, LinearImage
     error_occurred = pyqtSignal(int, str)
     
     def __init__(self, parent: Optional[QObject] = None):
@@ -39,11 +70,18 @@ class ProcessingWorker(QObject):
         
         self._queue = ProcessingQueue()
         self._proxy_manager = ProxyManager()
+        self._result_cache: OrderedDict[Tuple, _CachedPreview] = OrderedDict()
+        self._max_cache_entries = 16
         
         # Processors
         self._exposure_processor = ExposureProcessor()
+        self._tonal_processor = TonalProcessor()
+        self._curve_processor = CurveProcessor()
+        self._wb_processor = WhiteBalanceProcessor()
         self._color_processor = ColorProcessor()
-        
+        self._hsl_processor = HslMixerProcessor()
+        self._color_grading_processor = ColorGradingProcessor()
+
         # Thread control
         self._running = False
         self._mutex = QMutex()
@@ -88,84 +126,142 @@ class ProcessingWorker(QObject):
         """
         return self._thread is not None and self._thread.isRunning()
     
-    def set_image(self, image: Image.Image) -> None:
-        """Set the source image for processing.
-        
-        This should be called from the main thread when a new image is loaded.
-        
-        Args:
-            image: The source PIL Image
+    def set_image(self, image: LinearImage) -> None:
+        """Set the source ``LinearImage`` for processing.
+
+        Should be called from the main thread when a new image is loaded.
         """
         self._proxy_manager.set_image(image)
+        self._result_cache.clear()
     
     def clear_image(self) -> None:
         """Clear the current image."""
         self._proxy_manager.clear()
         self._queue.clear()
+        self._result_cache.clear()
     
     def submit_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
+        tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
-        use_proxy: bool = True
+        curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
+        hsl_params: Optional[Dict[str, float]] = None,
+        color_grading_params: Optional[Dict[str, float]] = None,
+        use_proxy: bool = True,
+        interactive_preview: bool = True,
     ) -> int:
         """Submit a processing request.
-        
+
         Args:
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
+            curve_params: Tone curve parameters
+            wb_params: White balance (Temperature/Tint) parameters
+            hsl_params: HSL Color Mixer parameters
+            color_grading_params: Color Grading parameters
             use_proxy: Whether to process proxy (fast) or full image
-            
+            interactive_preview: Whether to use the lower-cost interactive proxy
+
         Returns:
             Request ID for tracking
         """
         request = self._queue.create_request(
             exposure_params=exposure_params,
+            tonal_params=tonal_params,
             color_params=color_params,
-            use_proxy=use_proxy
+            curve_params=curve_params,
+            wb_params=wb_params,
+            hsl_params=hsl_params,
+            color_grading_params=color_grading_params,
+            use_proxy=use_proxy,
+            interactive_preview=interactive_preview,
         )
         self._queue.enqueue(request)
-        
+
         # Wake up the worker thread
         self._condition.wakeOne()
-        
+
         return request.request_id
-    
+
     def submit_preview_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
-        color_params: Optional[Dict[str, float]] = None
+        tonal_params: Optional[Dict[str, float]] = None,
+        color_params: Optional[Dict[str, float]] = None,
+        curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
+        hsl_params: Optional[Dict[str, float]] = None,
+        color_grading_params: Optional[Dict[str, float]] = None,
+        interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
-        
+
         Convenience method for submitting proxy requests.
-        
+
         Args:
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
-            
+            curve_params: Tone curve parameters
+            wb_params: White balance (Temperature/Tint) parameters
+            hsl_params: HSL Color Mixer parameters
+            color_grading_params: Color Grading parameters
+            interactive_preview: Use smaller interactive proxy for drag updates.
+
         Returns:
             Request ID
         """
-        return self.submit_request(exposure_params, color_params, use_proxy=True)
-    
+        return self.submit_request(
+            exposure_params,
+            tonal_params,
+            color_params,
+            curve_params,
+            wb_params,
+            hsl_params,
+            color_grading_params,
+            use_proxy=True,
+            interactive_preview=interactive_preview,
+        )
+
     def submit_final_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
-        color_params: Optional[Dict[str, float]] = None
+        tonal_params: Optional[Dict[str, float]] = None,
+        color_params: Optional[Dict[str, float]] = None,
+        curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
+        hsl_params: Optional[Dict[str, float]] = None,
+        color_grading_params: Optional[Dict[str, float]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
-        
+
         Convenience method for submitting final render requests.
-        
+
         Args:
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
-            
+            curve_params: Tone curve parameters
+            wb_params: White balance (Temperature/Tint) parameters
+            hsl_params: HSL Color Mixer parameters
+            color_grading_params: Color Grading parameters
+
         Returns:
             Request ID
         """
-        return self.submit_request(exposure_params, color_params, use_proxy=False)
+        return self.submit_request(
+            exposure_params,
+            tonal_params,
+            color_params,
+            curve_params,
+            wb_params,
+            hsl_params,
+            color_grading_params,
+            use_proxy=False,
+        )
     
     def cancel_pending(self) -> None:
         """Cancel all pending requests."""
@@ -209,14 +305,20 @@ class ProcessingWorker(QObject):
         Args:
             request: The request to process
         """
+        total_start = perf_counter()
+        tier = self._request_tier(request)
         try:
             self.processing_started.emit(request.request_id)
             
             # Get source image (proxy or full)
+            source_start = perf_counter()
             if request.use_proxy:
-                source = self._proxy_manager.get_proxy()
+                source = self._proxy_manager.get_proxy(
+                    interactive=request.interactive_preview
+                )
             else:
                 source = self._proxy_manager.get_original()
+            source_ms = _elapsed_ms(source_start)
             
             if source is None:
                 self.error_occurred.emit(request.request_id, "No image available")
@@ -225,13 +327,72 @@ class ProcessingWorker(QObject):
             # Check if still valid before heavy processing
             if not request.should_process():
                 return
+
+            cache_key = self._cache_key(request, source)
+            if cache_key is not None and cache_key in self._result_cache:
+                cache_start = perf_counter()
+                cached = self._result_cache[cache_key]
+                result = cached.linear_image.copy()
+                frame = DisplayFrame(
+                    request_id=request.request_id,
+                    tier=tier,
+                    adjustment_signature=self._adjustment_signature(request),
+                    rgb=cached.rgb.copy(),
+                    linear_image=result,
+                )
+                self._result_cache.move_to_end(cache_key)
+                cache_ms = _elapsed_ms(cache_start)
+                self.preview_ready.emit(request.request_id, frame)
+                logger.info(
+                    "PERF worker request=%s tier=%s cache=hit "
+                    "source_ms=%.2f cache_copy_ms=%.2f total_ms=%.2f shape=%s",
+                    request.request_id,
+                    tier,
+                    source_ms,
+                    cache_ms,
+                    _elapsed_ms(total_start),
+                    source.shape,
+                )
+                return
             
             # Apply adjustments
+            apply_start = perf_counter()
             result = self._apply_adjustments(
                 source,
                 request.exposure_params,
-                request.color_params
+                request.tonal_params,
+                request.color_params,
+                request.curve_params,
+                request.wb_params,
+                request.hsl_params,
+                request.color_grading_params,
             )
+            apply_ms = _elapsed_ms(apply_start)
+
+            frame = None
+            display_ms = 0.0
+            if request.use_proxy:
+                display_start = perf_counter()
+                frame = DisplayFrame.from_linear(
+                    request.request_id,
+                    tier,
+                    self._adjustment_signature(request),
+                    result,
+                )
+                display_ms = _elapsed_ms(display_start)
+
+            if cache_key is not None:
+                cache_store_start = perf_counter()
+                self._result_cache[cache_key] = _CachedPreview(
+                    linear_image=result.copy(),
+                    rgb=frame.rgb.copy() if frame is not None else None,
+                )
+                self._result_cache.move_to_end(cache_key)
+                while len(self._result_cache) > self._max_cache_entries:
+                    self._result_cache.popitem(last=False)
+                cache_store_ms = _elapsed_ms(cache_store_start)
+            else:
+                cache_store_ms = 0.0
             
             # Check again after processing
             if not request.should_process():
@@ -239,40 +400,143 @@ class ProcessingWorker(QObject):
             
             # Emit appropriate signal
             if request.use_proxy:
-                self.preview_ready.emit(request.request_id, result)
+                self.preview_ready.emit(request.request_id, frame)
             else:
                 self.processing_complete.emit(request.request_id, result)
+
+            logger.info(
+                "PERF worker request=%s tier=%s cache=miss source_ms=%.2f "
+                "apply_ms=%.2f display_ms=%.2f cache_store_ms=%.2f "
+                "total_ms=%.2f shape=%s",
+                request.request_id,
+                tier,
+                source_ms,
+                apply_ms,
+                display_ms,
+                cache_store_ms,
+                _elapsed_ms(total_start),
+                source.shape,
+            )
                 
         except Exception as e:
             self.error_occurred.emit(request.request_id, str(e))
-    
+
+    def _cache_key(
+        self, request: ProcessingRequest, source: LinearImage
+    ) -> Optional[Tuple]:
+        """Return a small preview-cache key, or None for full-res renders."""
+        if not request.use_proxy:
+            return None
+        return (
+            bool(request.interactive_preview),
+            tuple(source.shape),
+            tuple(sorted(request.exposure_params.items())),
+            tuple(sorted(request.tonal_params.items())),
+            tuple(sorted(request.color_params.items())),
+            tuple(sorted(request.curve_params.items())),
+            tuple(sorted(request.wb_params.items())),
+            tuple(sorted(request.hsl_params.items())),
+            tuple(sorted(request.color_grading_params.items())),
+        )
+
+    @staticmethod
+    def _adjustment_signature(request: ProcessingRequest) -> Tuple:
+        """Return a stable signature for request parameters."""
+        return (
+            tuple(sorted(request.exposure_params.items())),
+            tuple(sorted(request.tonal_params.items())),
+            tuple(sorted(request.color_params.items())),
+            tuple(sorted(request.curve_params.items())),
+            tuple(sorted(request.wb_params.items())),
+            tuple(sorted(request.hsl_params.items())),
+            tuple(sorted(request.color_grading_params.items())),
+        )
+
     def _apply_adjustments(
         self,
-        image: Image.Image,
+        image: LinearImage,
         exposure_params: Dict[str, float],
-        color_params: Dict[str, float]
-    ) -> Image.Image:
-        """Apply all adjustments to an image.
-        
-        Args:
-            image: Source image
-            exposure_params: Exposure parameters
-            color_params: Color parameters
-            
-        Returns:
-            Processed image
-        """
+        tonal_params: Dict[str, float],
+        color_params: Dict[str, float],
+        curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
+        hsl_params: Optional[Dict[str, float]] = None,
+        color_grading_params: Optional[Dict[str, float]] = None,
+    ) -> LinearImage:
+        """Apply exposure, tonal, white balance, curve, color, HSL mixer,
+        and Color Grading adjustments to a ``LinearImage``."""
+        total_start = perf_counter()
+        copy_start = perf_counter()
         result = image.copy()
-        
-        # Apply exposure adjustments if any non-zero values
+        copy_ms = _elapsed_ms(copy_start)
+        exposure_ms = 0.0
+        tonal_ms = 0.0
+        wb_ms = 0.0
+        curve_ms = 0.0
+        color_ms = 0.0
+        hsl_ms = 0.0
+        color_grading_ms = 0.0
+
         if exposure_params and any(v != 0 for v in exposure_params.values()):
+            exposure_start = perf_counter()
             result = self._exposure_processor.process(result, **exposure_params)
-        
-        # Apply color adjustments if any non-zero values
+            exposure_ms = _elapsed_ms(exposure_start)
+
+        if tonal_params and any(v != 0 for v in tonal_params.values()):
+            tonal_start = perf_counter()
+            result = self._tonal_processor.process(result, **tonal_params)
+            tonal_ms = _elapsed_ms(tonal_start)
+
+        if wb_params and any(v != 0 for v in wb_params.values()):
+            wb_start = perf_counter()
+            result = self._wb_processor.process(result, **wb_params)
+            wb_ms = _elapsed_ms(wb_start)
+
+        if curve_params:
+            curve_start = perf_counter()
+            result = self._curve_processor.process(result, **curve_params)
+            curve_ms = _elapsed_ms(curve_start)
+
         if color_params and any(v != 0 for v in color_params.values()):
+            color_start = perf_counter()
             result = self._color_processor.process(result, **color_params)
-        
+            color_ms = _elapsed_ms(color_start)
+
+        if hsl_params and any(v != 0 for v in hsl_params.values()):
+            hsl_start = perf_counter()
+            result = self._hsl_processor.process(result, **hsl_params)
+            hsl_ms = _elapsed_ms(hsl_start)
+
+        if color_grading_params:
+            color_grading_start = perf_counter()
+            result = self._color_grading_processor.process(
+                result, **color_grading_params
+            )
+            color_grading_ms = _elapsed_ms(color_grading_start)
+
+        logger.info(
+            "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
+            "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f hsl_ms=%.2f "
+            "color_grading_ms=%.2f total_ms=%.2f",
+            image.shape,
+            copy_ms,
+            exposure_ms,
+            tonal_ms,
+            wb_ms,
+            curve_ms,
+            color_ms,
+            hsl_ms,
+            color_grading_ms,
+            _elapsed_ms(total_start),
+        )
+
         return result
+
+    @staticmethod
+    def _request_tier(request: ProcessingRequest) -> str:
+        if not request.use_proxy:
+            return "full"
+        return "interactive" if request.interactive_preview else "quality"
 
 
 class ProcessingController:
@@ -286,6 +550,7 @@ class ProcessingController:
         """Initialize the processing controller."""
         self._worker = ProcessingWorker()
         self._current_exposure_params: Dict[str, float] = {}
+        self._current_tonal_params: Dict[str, float] = {}
         self._current_color_params: Dict[str, float] = {}
     
     @property
@@ -301,52 +566,55 @@ class ProcessingController:
         """Stop the processing system."""
         self._worker.stop()
     
-    def set_image(self, image: Image.Image) -> None:
-        """Set the source image.
-        
-        Args:
-            image: Source PIL Image
-        """
+    def set_image(self, image: LinearImage) -> None:
+        """Set the source ``LinearImage``."""
         self._worker.set_image(image)
         self._current_exposure_params = {}
+        self._current_tonal_params = {}
         self._current_color_params = {}
-    
+
     def clear_image(self) -> None:
         """Clear the current image."""
         self._worker.clear_image()
-    
+
     def update_adjustments(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
+        tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None
     ) -> int:
         """Update adjustments and request preview processing.
-        
+
         Args:
             exposure_params: New exposure parameters
+            tonal_params: New Highlights/Shadows/Whites/Blacks parameters
             color_params: New color parameters
-            
+
         Returns:
             Request ID
         """
         if exposure_params is not None:
             self._current_exposure_params = exposure_params
+        if tonal_params is not None:
+            self._current_tonal_params = tonal_params
         if color_params is not None:
             self._current_color_params = color_params
-        
+
         return self._worker.submit_preview_request(
             self._current_exposure_params,
+            self._current_tonal_params,
             self._current_color_params
         )
-    
+
     def finalize_adjustments(self) -> int:
         """Request full-resolution processing with current adjustments.
-        
+
         Returns:
             Request ID
         """
         return self._worker.submit_final_request(
             self._current_exposure_params,
+            self._current_tonal_params,
             self._current_color_params
         )
     

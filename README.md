@@ -24,13 +24,13 @@ A professional photo editing application built with Python and PyQt6, inspired b
 From the **repository root** (`PhotoEdit/`), with dependencies installed:
 
 ```bash
-pipenv run python -m src.main
+python -m src.main
 ```
 
-If you already activated the virtual environment (`pipenv shell`):
+If you installed the project, you can also use its console command:
 
 ```bash
-python -m src.main
+photoedit
 ```
 
 **Windows (PowerShell):** use the same commands from the project root. The Qt window must run on a machine with a display (not headless).
@@ -44,7 +44,7 @@ python -m src.main
 Aligned with [docs/planning/INCREMENTAL_WORKFLOW.md](docs/planning/INCREMENTAL_WORKFLOW.md):
 
 1. **Smoke run** -- Run the app and open a sample image; confirm sliders and undo work.
-2. **Run tests** -- `pipenv run pytest` (fix any failures before new work).
+2. **Run tests** -- `pytest` (fix any failures before new work).
 3. **Optional early slice:** **App settings** (`QSettings` + `SettingsService`) for last open/export paths and window state -- see [INCREMENTAL_WORKFLOW.md](docs/planning/INCREMENTAL_WORKFLOW.md) section 6; style and layout stay swappable per section 5.1 in that doc. **Write the full detailed plan (section 4) and approve it before coding.**
 4. **K0 (first real slice)** -- Add an **approved** implementation note under `docs/planning/implementation-notes/` for the **versioned adjustment / project JSON schema** (contract only, minimal code if any), following **section 4.1** depth in the workflow doc.
 5. **Validate K0** -- Review the note; agree on field names and `version` before **Phase B / K** persistence or copy-paste settings.
@@ -149,18 +149,21 @@ See [docs/planning/PRODUCT_ROADMAP.md](docs/planning/PRODUCT_ROADMAP.md#part-2-f
 
 ### Prerequisites
 - Python 3.10+
-- pipenv (recommended) or pip
+- pip
 
 ### Setup
 ```bash
-# Install dependencies
-pipenv install
+# Create a virtual environment
+python -m venv .venv
 
-# Install dev dependencies
-pipenv install --dev
+# Activate it on Windows (PowerShell)
+.venv\Scripts\Activate.ps1
 
-# Activate virtual environment
-pipenv shell
+# Or activate it on macOS/Linux
+source .venv/bin/activate
+
+# Install the application and development dependencies
+python -m pip install -e ".[dev]"
 ```
 
 The **Run the application** section above describes how to start the GUI after this setup.
@@ -168,20 +171,18 @@ The **Run the application** section above describes how to start the GUI after t
 ## 🧪 Running Tests
 
 ```bash
-# Run all tests (from repo root; same environment as the app)
-pipenv run pytest
+# Run all tests (from repo root with the virtual environment activated)
+pytest
 
 # Run with coverage
-pipenv run pytest --cov=src --cov-report=html
+pytest --cov=src --cov-report=html
 
 # Run specific test file
-pipenv run pytest tests/unit/test_image_service.py
+pytest tests/unit/test_services/test_image_service.py
 
 # Run with verbose output
-pipenv run pytest -v
+pytest -v
 ```
-
-If you are already inside `pipenv shell`, you can run `pytest` without the `pipenv run` prefix.
 
 ## 📁 Project Structure
 

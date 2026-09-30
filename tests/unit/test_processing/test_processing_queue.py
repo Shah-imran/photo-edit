@@ -60,9 +60,65 @@ class TestProcessingQueue:
         request = queue.create_request(
             exposure_params={'exposure': 1.0}
         )
-        
+
         assert request.request_id == 0
         assert request.exposure_params == {'exposure': 1.0}
+
+    def test_create_request_threads_curve_params(self):
+        """Curve params must thread through create_request like the other
+        adjustment categories."""
+        queue = ProcessingQueue()
+        request = queue.create_request(
+            curve_params={'points': ((0.0, 0.0), (0.5, 0.7), (1.0, 1.0))}
+        )
+
+        assert request.curve_params == {
+            'points': ((0.0, 0.0), (0.5, 0.7), (1.0, 1.0))
+        }
+
+    def test_create_request_defaults_curve_params_to_empty_dict(self):
+        queue = ProcessingQueue()
+        request = queue.create_request()
+
+        assert request.curve_params == {}
+
+    def test_create_request_threads_wb_params(self):
+        queue = ProcessingQueue()
+        request = queue.create_request(
+            wb_params={'temperature': 30.0, 'tint': -10.0}
+        )
+
+        assert request.wb_params == {'temperature': 30.0, 'tint': -10.0}
+
+    def test_create_request_defaults_wb_params_to_empty_dict(self):
+        queue = ProcessingQueue()
+        request = queue.create_request()
+
+        assert request.wb_params == {}
+
+    def test_create_request_threads_hsl_params(self):
+        queue = ProcessingQueue()
+        request = queue.create_request(hsl_params={'red_sat': 40.0})
+
+        assert request.hsl_params == {'red_sat': 40.0}
+
+    def test_create_request_defaults_hsl_params_to_empty_dict(self):
+        queue = ProcessingQueue()
+        request = queue.create_request()
+
+        assert request.hsl_params == {}
+
+    def test_create_request_threads_color_grading_params(self):
+        queue = ProcessingQueue()
+        request = queue.create_request(color_grading_params={'shadows_sat': 40.0})
+
+        assert request.color_grading_params == {'shadows_sat': 40.0}
+
+    def test_create_request_defaults_color_grading_params_to_empty_dict(self):
+        queue = ProcessingQueue()
+        request = queue.create_request()
+
+        assert request.color_grading_params == {}
 
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""

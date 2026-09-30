@@ -14,17 +14,28 @@ class ProcessingRequest:
     Attributes:
         request_id: Unique identifier for this request
         exposure_params: Exposure adjustment parameters
+        tonal_params: Highlights/Shadows/Whites/Blacks adjustment parameters
         color_params: Color adjustment parameters
+        curve_params: Tone curve parameters (``{"points": [(x, y), ...]}``)
+        wb_params: White balance (Temperature/Tint) adjustment parameters
+        hsl_params: HSL Color Mixer adjustment parameters (24-key flat dict)
+        color_grading_params: Color Grading adjustment parameters (11-key flat dict)
         use_proxy: Whether to process proxy (True) or full-res (False)
         timestamp: When the request was created
         cancelled: Whether this request has been cancelled
     """
     request_id: int
     exposure_params: Dict[str, float] = field(default_factory=dict)
+    tonal_params: Dict[str, float] = field(default_factory=dict)
     color_params: Dict[str, float] = field(default_factory=dict)
+    curve_params: Dict[str, Any] = field(default_factory=dict)
+    wb_params: Dict[str, float] = field(default_factory=dict)
+    hsl_params: Dict[str, float] = field(default_factory=dict)
+    color_grading_params: Dict[str, float] = field(default_factory=dict)
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
     cancelled: bool = False
+    interactive_preview: bool = True
     
     def cancel(self) -> None:
         """Mark this request as cancelled."""
@@ -74,16 +85,27 @@ class ProcessingQueue:
     def create_request(
         self,
         exposure_params: Optional[Dict[str, float]] = None,
+        tonal_params: Optional[Dict[str, float]] = None,
         color_params: Optional[Dict[str, float]] = None,
-        use_proxy: bool = True
+        curve_params: Optional[Dict[str, Any]] = None,
+        wb_params: Optional[Dict[str, float]] = None,
+        hsl_params: Optional[Dict[str, float]] = None,
+        color_grading_params: Optional[Dict[str, float]] = None,
+        use_proxy: bool = True,
+        interactive_preview: bool = True,
     ) -> ProcessingRequest:
         """Create a new processing request with auto-incremented ID.
-        
+
         Args:
             exposure_params: Exposure adjustment parameters
+            tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
+            curve_params: Tone curve parameters
+            wb_params: White balance (Temperature/Tint) parameters
+            hsl_params: HSL Color Mixer parameters
+            color_grading_params: Color Grading parameters
             use_proxy: Whether to use proxy image
-            
+
         Returns:
             New ProcessingRequest
         """
@@ -91,8 +113,14 @@ class ProcessingQueue:
             request = ProcessingRequest(
                 request_id=self._next_id,
                 exposure_params=exposure_params or {},
+                tonal_params=tonal_params or {},
                 color_params=color_params or {},
-                use_proxy=use_proxy
+                curve_params=curve_params or {},
+                wb_params=wb_params or {},
+                hsl_params=hsl_params or {},
+                color_grading_params=color_grading_params or {},
+                use_proxy=use_proxy,
+                interactive_preview=interactive_preview,
             )
             self._next_id += 1
             return request

@@ -35,6 +35,12 @@ class TestSettingsServiceDefaults:
     def test_default_window_geometry_is_none(self, service):
         assert service.get_window_geometry() is None
 
+    def test_default_window_state_is_none(self, service):
+        assert service.get_window_state() is None
+
+    def test_default_current_image_path_is_none(self, service):
+        assert service.get_current_image_path() is None
+
 
 class TestSettingsServiceLastOpenDir:
     """Round-trips and edge cases for last_open_dir."""
@@ -110,6 +116,39 @@ class TestSettingsServiceWindowGeometry:
 
     def test_get_geometry_returns_none_when_absent(self, service):
         assert service.get_window_geometry() is None
+
+
+class TestSettingsServiceWindowState:
+    """Dock-state blob round-trip."""
+
+    def test_set_and_get_window_state(self, service):
+        blob = b"\x05\x06dock-state"
+        service.set_window_state(blob)
+        assert service.get_window_state() == blob
+
+
+class TestSettingsServiceCurrentImagePath:
+    """Current-image session path handling."""
+
+    def test_set_and_get_current_image_path(self, service, tmp_path):
+        image_path = tmp_path / "current.jpg"
+        image_path.touch()
+        service.set_current_image_path(str(image_path))
+        assert service.get_current_image_path() == str(image_path)
+
+    def test_missing_current_image_path_returns_none(self, service, tmp_path):
+        image_path = tmp_path / "gone.jpg"
+        image_path.touch()
+        service.set_current_image_path(str(image_path))
+        image_path.unlink()
+        assert service.get_current_image_path() is None
+
+    def test_set_current_image_path_none_clears_value(self, service, tmp_path):
+        image_path = tmp_path / "clear.jpg"
+        image_path.touch()
+        service.set_current_image_path(str(image_path))
+        service.set_current_image_path(None)
+        assert service.get_current_image_path() is None
 
 
 class TestSettingsServiceSync:

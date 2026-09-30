@@ -5,9 +5,15 @@ import time
 from pathlib import Path
 from PIL import Image
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtTest import QTest
 
+from src.services.library_catalog_service import LibraryCatalogService
+from src.services.library_image_preview_cache_service import (
+    LibraryImagePreviewCacheService,
+)
+from src.services.library_thumbnail_cache_service import LibraryThumbnailCacheService
+from src.services.settings_service import SettingsService
 from src.views.main_window import MainWindow
 
 
@@ -33,9 +39,27 @@ def large_image_file(tmp_path):
 class TestIntegratedPerformance:
     """Test performance of complete adjustment workflows."""
 
-    def test_slider_response_time(self, qapp, qtbot, large_image_file):
+    @staticmethod
+    def _build_window(tmp_path):
+        return MainWindow(
+            settings_service=SettingsService(
+                QSettings(
+                    str(tmp_path / "performance.ini"),
+                    QSettings.Format.IniFormat,
+                )
+            ),
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(
+                cache_dir=tmp_path / "cache"
+            ),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
+
+    def test_slider_response_time(self, qapp, qtbot, large_image_file, tmp_path):
         """Test that slider adjustments respond using proxy (faster than full-res)."""
-        window = MainWindow()
+        window = self._build_window(tmp_path)
         qtbot.addWidget(window)
         window.show()
         qtbot.waitExposed(window)
@@ -76,9 +100,11 @@ class TestIntegratedPerformance:
         
         window.close()
 
-    def test_rapid_slider_movement_performance(self, qapp, qtbot, large_image_file):
+    def test_rapid_slider_movement_performance(
+        self, qapp, qtbot, large_image_file, tmp_path
+    ):
         """Test that debouncing reduces processing during rapid movements."""
-        window = MainWindow()
+        window = self._build_window(tmp_path)
         qtbot.addWidget(window)
         window.show()
         qtbot.waitExposed(window)
@@ -116,9 +142,11 @@ class TestIntegratedPerformance:
         
         window.close()
 
-    def test_full_resolution_processing_time(self, qapp, qtbot, large_image_file):
+    def test_full_resolution_processing_time(
+        self, qapp, qtbot, large_image_file, tmp_path
+    ):
         """Test that full-resolution processing happens in background (non-blocking)."""
-        window = MainWindow()
+        window = self._build_window(tmp_path)
         qtbot.addWidget(window)
         window.show()
         qtbot.waitExposed(window)
@@ -151,9 +179,11 @@ class TestIntegratedPerformance:
         
         window.close()
 
-    def test_multiple_adjustments_performance(self, qapp, qtbot, large_image_file):
+    def test_multiple_adjustments_performance(
+        self, qapp, qtbot, large_image_file, tmp_path
+    ):
         """Test that multiple adjustments use proxy for fast feedback."""
-        window = MainWindow()
+        window = self._build_window(tmp_path)
         qtbot.addWidget(window)
         window.show()
         qtbot.waitExposed(window)
@@ -188,9 +218,11 @@ class TestIntegratedPerformance:
         
         window.close()
 
-    def test_ui_responsiveness_during_processing(self, qapp, qtbot, large_image_file):
+    def test_ui_responsiveness_during_processing(
+        self, qapp, qtbot, large_image_file, tmp_path
+    ):
         """Test that UI remains responsive during heavy processing (threading works)."""
-        window = MainWindow()
+        window = self._build_window(tmp_path)
         qtbot.addWidget(window)
         window.show()
         qtbot.waitExposed(window)

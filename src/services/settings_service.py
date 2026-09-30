@@ -19,6 +19,8 @@ from typing import Any, Optional
 
 from PyQt6.QtCore import QSettings
 
+from src.services.storage_path_utils import ensure_qt_app_identity
+
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,8 @@ logger = logging.getLogger(__name__)
 _KEY_LAST_OPEN_DIR = "paths/last_open_dir"
 _KEY_LAST_EXPORT_DIR = "paths/last_export_dir"
 _KEY_WINDOW_GEOMETRY = "window/geometry"
+_KEY_WINDOW_STATE = "window/state"
+_KEY_CURRENT_IMAGE_PATH = "session/current_image_path"
 
 
 class SettingsService:
@@ -53,6 +57,8 @@ class SettingsService:
                 ``QSettings`` (``IniFormat`` + ``UserScope`` + custom
                 org/app) so they do not pollute the user's registry.
         """
+        if settings is None:
+            ensure_qt_app_identity()
         self._settings = settings if settings is not None else QSettings()
 
     def get_last_open_dir(self) -> str:
@@ -99,6 +105,43 @@ class SettingsService:
     def set_window_geometry(self, geometry: bytes) -> None:
         """Persist the ``QMainWindow.saveGeometry()`` blob."""
         self._settings.setValue(_KEY_WINDOW_GEOMETRY, geometry)
+
+    def get_window_state(self) -> Optional[bytes]:
+        """Return the saved ``QMainWindow.saveState()`` blob, or ``None``."""
+        value = self._settings.value(_KEY_WINDOW_STATE)
+        if value is None:
+            return None
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        try:
+            data = bytes(value)
+        except TypeError:
+            logger.warning("Stored window state has unexpected type: %r", type(value))
+            return None
+        return data
+
+    def set_window_state(self, state: bytes) -> None:
+        """Persist the ``QMainWindow.saveState()`` blob."""
+        self._settings.setValue(_KEY_WINDOW_STATE, state)
+
+    def get_current_image_path(self) -> Optional[str]:
+        """Return the last-opened image path when it still exists on disk."""
+        value = self._settings.value(_KEY_CURRENT_IMAGE_PATH)
+        if not isinstance(value, str) or not value:
+            return None
+        candidate = Path(value)
+        if not candidate.is_file():
+            logger.info("Stored current image path no longer exists: %s", value)
+            return None
+        return str(candidate)
+
+    def set_current_image_path(self, path: Optional[str]) -> None:
+        """Persist or clear the last-opened image path."""
+        if not path:
+            self._settings.remove(_KEY_CURRENT_IMAGE_PATH)
+            return
+        candidate = Path(path).expanduser()
+        self._settings.setValue(_KEY_CURRENT_IMAGE_PATH, str(candidate))
 
     def sync(self) -> None:
         """Flush pending changes to the underlying store."""

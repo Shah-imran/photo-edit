@@ -7,6 +7,11 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtTest import QTest
 
+from src.services.library_catalog_service import LibraryCatalogService
+from src.services.library_image_preview_cache_service import (
+    LibraryImagePreviewCacheService,
+)
+from src.services.library_thumbnail_cache_service import LibraryThumbnailCacheService
 from src.services.settings_service import SettingsService
 from src.views.main_window import MainWindow
 
@@ -21,9 +26,22 @@ def qapp():
 
 
 @pytest.fixture
-def main_window(qapp, qtbot):
+def main_window(qapp, qtbot, tmp_path):
     """Create a MainWindow instance for testing."""
-    window = MainWindow()
+    settings = SettingsService(
+        QSettings(str(tmp_path / "main-window.ini"), QSettings.Format.IniFormat)
+    )
+    catalog = LibraryCatalogService(catalog_path=tmp_path / "catalog.json")
+    cache = LibraryThumbnailCacheService(cache_dir=tmp_path / "cache")
+    preview_cache = LibraryImagePreviewCacheService(
+        cache_dir=tmp_path / "preview-cache"
+    )
+    window = MainWindow(
+        settings_service=settings,
+        catalog_service=catalog,
+        thumbnail_cache_service=cache,
+        image_preview_cache_service=preview_cache,
+    )
     qtbot.addWidget(window)
     window.show()
     qtbot.waitExposed(window)
@@ -234,6 +252,43 @@ class TestZoomControls:
         zoom = main_window._image_controller.get_zoom_factor()
         assert 0.05 <= zoom <= 10.0
 
+    def test_async_load_fits_to_window_when_no_saved_zoom(
+        self, main_window, tmp_path, qtbot
+    ):
+        """An async load with no saved per-image zoom must fit-to-window.
+
+        Regression test: ``_on_image_load_finished`` used to leave the
+        zoom factor at the 100% reset ``_set_array`` applies (via
+        ``ImageView.set_image()``) whenever ``_pending_zoom_factor`` was
+        ``None`` -- true for a first-ever open or any library entry that
+        was never zoomed/saved before. The image would then intermittently
+        open at 100% (or whatever the earlier intermediate-preview stage's
+        raced ``fit_to_window`` singleShot happened to leave it at) instead
+        of fitted, exactly as reported by the user ("sometimes ... it
+        would come at its full size or zoomed in state"). Uses an image
+        much larger than the test window so a correct fit-to-window is
+        unambiguously distinguishable (zoom < 1.0) from the bug (zoom
+        staying at the 1.0 reset value).
+        """
+        large_image_path = tmp_path / "large_test_image.jpg"
+        Image.new('RGB', (3000, 2000), color='blue').save(large_image_path, 'JPEG')
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=5000
+        ):
+            main_window._image_controller.load_image_async(str(large_image_path))
+        qtbot.wait(50)  # flush the deferred QTimer.singleShot(0, fit_to_window)
+
+        zoom = main_window._image_controller.get_zoom_factor()
+        assert zoom < 1.0
+
+        # Let the background load thread fully wind down (it quits itself
+        # right after emitting `loaded`) so no thread from this test is
+        # still alive when the next test's fixture tears this window down.
+        qtbot.waitUntil(
+            lambda: not main_window._image_controller._load_threads, timeout=5000
+        )
+
 
 class TestUndoRedo:
     """UI tests for undo/redo functionality."""
@@ -269,33 +324,200 @@ class TestUndoRedo:
 class TestLibraryPanel:
     """UI tests for library panel."""
 
+    def test_default_library_exists(self, main_window):
+        assert main_window._library_view.get_library_count() == 1
+        assert main_window._library_view.is_library_section_expanded() is True
+
     def test_add_image_to_library(self, main_window, sample_image_file, qtbot):
         """Test adding an image to the library."""
-        library = main_window._library_view
-        
-        library.add_image(sample_image_file)
-        
-        assert library.get_image_count() == 1
+        main_window._library_controller.add_image(sample_image_file)
+
+        assert main_window._library_view.get_image_count() == 1
 
     def test_select_image_from_library(self, main_window, sample_image_file, qtbot):
         """Test selecting an image from library loads it."""
+        main_window._library_controller.add_image(sample_image_file)
         library = main_window._library_view
-        library.add_image(sample_image_file)
-        
+
         # Emit selection signal
-        library.image_selected.emit(sample_image_file)
-        qtbot.wait(100)
-        
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            library.image_selected.emit(sample_image_file)
+
         assert main_window._image_controller.has_image() is True
+
+    def test_switching_between_images_restores_saved_adjustments(
+        self, main_window, sample_image_file, tmp_path, qtbot
+    ):
+        other = tmp_path / "other.jpg"
+        Image.new("RGB", (80, 60), color="green").save(other)
+
+        main_window._library_controller.import_images([sample_image_file, str(other)])
+        library = main_window._library_view
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            library.image_selected.emit(sample_image_file)
+        main_window._tools_panel._exposure_slider.set_value(1.25)
+        first_exposure = main_window._tools_panel._exposure_slider.get_value()
+        qtbot.wait(500)
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            library.image_selected.emit(str(other))
+        main_window._tools_panel._contrast_slider.set_value(30.0)
+        qtbot.wait(500)
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            library.image_selected.emit(sample_image_file)
+        qtbot.waitUntil(
+            lambda: main_window._tools_panel.get_adjustments()["exposure"] == first_exposure,
+            timeout=3000,
+        )
+        assert main_window._tools_panel.get_adjustments()["contrast"] == 0.0
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            library.image_selected.emit(str(other))
+        qtbot.waitUntil(
+            lambda: main_window._tools_panel.get_adjustments()["contrast"] == 30.0,
+            timeout=3000,
+        )
+        assert main_window._tools_panel.get_adjustments()["exposure"] == 0.0
 
     def test_clear_library(self, main_window, sample_image_file, qtbot):
         """Test clearing the library."""
+        main_window._library_controller.add_image(sample_image_file)
+
+        main_window._library_controller.clear_current_library()
+
+        assert main_window._library_view.get_image_count() == 0
+
+    def test_switching_libraries_updates_grid(self, main_window, sample_image_file, tmp_path):
+        other = tmp_path / "other.jpg"
+        Image.new("RGB", (40, 40), color="green").save(other)
+
         library = main_window._library_view
-        library.add_image(sample_image_file)
-        
-        library.clear()
-        
-        assert library.get_image_count() == 0
+        controller = main_window._library_controller
+        current_id = controller.current_library_id
+        controller.create_library("Travel")
+        second_id = controller.current_library_id
+        controller.select_library(current_id)
+        controller.import_images([sample_image_file])
+        controller.select_library(second_id)
+        controller.import_images([str(other)])
+
+        assert library.get_image_count() == 1
+        current_grid = library._grid_by_library_id[second_id]
+        assert current_grid.item(0).data(Qt.ItemDataRole.UserRole) == str(other)
+
+    def test_startup_restores_selected_library(self, qapp, qtbot, tmp_path, sample_image_file):
+        settings = SettingsService(
+            QSettings(str(tmp_path / "persist.ini"), QSettings.Format.IniFormat)
+        )
+        catalog = LibraryCatalogService(catalog_path=tmp_path / "catalog.json")
+        cache = LibraryThumbnailCacheService(cache_dir=tmp_path / "cache")
+        second = catalog.create_library("Travel")
+        catalog.add_entries(second.id, [sample_image_file])
+        catalog.set_current_library(second.id)
+
+        first = MainWindow(
+            settings_service=settings,
+            catalog_service=catalog,
+            thumbnail_cache_service=cache,
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
+        qtbot.addWidget(first)
+        first.show()
+        qtbot.waitExposed(first)
+        first.close()
+
+        reopened = MainWindow(
+            settings_service=SettingsService(
+                QSettings(str(tmp_path / "persist.ini"), QSettings.Format.IniFormat)
+            ),
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(cache_dir=tmp_path / "cache"),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
+        qtbot.addWidget(reopened)
+        reopened.show()
+        qtbot.waitExposed(reopened)
+
+        assert reopened._library_view.get_current_library_id() == second.id
+        assert reopened._library_view.get_image_count() == 1
+        reopened.close()
+
+    def test_library_section_can_be_collapsed(self, main_window):
+        main_window._library_view.set_library_section_expanded(False)
+        assert main_window._library_view.is_library_section_expanded() is False
+
+    def test_same_library_header_can_toggle_closed(self, main_window):
+        current_id = main_window._library_view.get_current_library_id()
+        main_window._library_view._library_sections[current_id].set_expanded(False)
+        assert main_window._library_view.is_library_section_expanded() is False
+
+    def test_switching_libraries_persists_current_image_adjustments(
+        self, main_window, sample_image_file, tmp_path, qtbot
+    ):
+        other = tmp_path / "travel.jpg"
+        Image.new("RGB", (80, 60), color="red").save(other)
+
+        controller = main_window._library_controller
+        first_id = controller.current_library_id
+        second = controller._catalog_service.create_library("Travel")
+        second_id = second.id
+        controller.select_library(first_id)
+        controller.import_images([sample_image_file])
+        controller.select_library(second_id)
+        controller.import_images([str(other)])
+        controller.select_library(first_id)
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            main_window._library_view.image_selected.emit(sample_image_file)
+        main_window._tools_panel._saturation_slider.set_value(22.0)
+        qtbot.wait(500)
+
+        with qtbot.waitSignal(main_window._library_controller.entries_rebuilt, timeout=1000):
+            main_window._library_view.library_selected.emit(second_id)
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            main_window._library_view.image_selected.emit(str(other))
+
+        with qtbot.waitSignal(main_window._library_controller.entries_rebuilt, timeout=1000):
+            main_window._library_view.library_selected.emit(first_id)
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            main_window._library_view.image_selected.emit(sample_image_file)
+
+        qtbot.waitUntil(
+            lambda: main_window._tools_panel.get_adjustments()["saturation"] == 22.0,
+            timeout=3000,
+        )
 
 
 class TestMainWindowSettingsPersistence:
@@ -308,7 +530,16 @@ class TestMainWindowSettingsPersistence:
         )
         assert settings.get_window_geometry() is None
 
-        window = MainWindow(settings_service=settings)
+        window = MainWindow(
+            settings_service=settings,
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(
+                cache_dir=tmp_path / "cache"
+            ),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
         qtbot.addWidget(window)
         window.show()
         qtbot.waitExposed(window)
@@ -325,7 +556,14 @@ class TestMainWindowSettingsPersistence:
         first = MainWindow(
             settings_service=SettingsService(
                 QSettings(str(ini_path), QSettings.Format.IniFormat)
-            )
+            ),
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(
+                cache_dir=tmp_path / "cache"
+            ),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
         )
         qtbot.addWidget(first)
         first.show()
@@ -337,7 +575,14 @@ class TestMainWindowSettingsPersistence:
         second = MainWindow(
             settings_service=SettingsService(
                 QSettings(str(ini_path), QSettings.Format.IniFormat)
-            )
+            ),
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(
+                cache_dir=tmp_path / "cache"
+            ),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
         )
         qtbot.addWidget(second)
         second.show()
@@ -347,3 +592,193 @@ class TestMainWindowSettingsPersistence:
         assert second.size().width() == 1320
         assert second.size().height() == 870
         second.close()
+
+    def test_dock_state_is_restored_on_next_launch(self, qapp, qtbot, tmp_path):
+        ini_path = tmp_path / "main-window-docks.ini"
+        first = MainWindow(
+            settings_service=SettingsService(
+                QSettings(str(ini_path), QSettings.Format.IniFormat)
+            ),
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(
+                cache_dir=tmp_path / "cache"
+            ),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
+        qtbot.addWidget(first)
+        first.show()
+        qtbot.waitExposed(first)
+        first.resize(1320, 870)
+        first.resizeDocks(
+            [first.library_dock, first.tools_dock],
+            [360, 420],
+            Qt.Orientation.Horizontal,
+        )
+        first.tools_dock.hide()
+        qtbot.wait(50)
+        first.close()
+
+        second = MainWindow(
+            settings_service=SettingsService(
+                QSettings(str(ini_path), QSettings.Format.IniFormat)
+            ),
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(
+                cache_dir=tmp_path / "cache"
+            ),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
+        qtbot.addWidget(second)
+        second.show()
+        qtbot.waitExposed(second)
+        qtbot.wait(50)
+        assert second.tools_dock.isVisible() is False
+        assert second.library_dock.width() >= 320
+        second.close()
+
+    def test_last_image_reopens_with_saved_adjustments(
+        self, qapp, qtbot, tmp_path, sample_image_file
+    ):
+        ini_path = tmp_path / "main-window-session.ini"
+        settings = SettingsService(
+            QSettings(str(ini_path), QSettings.Format.IniFormat)
+        )
+        catalog = LibraryCatalogService(catalog_path=tmp_path / "catalog.json")
+        cache = LibraryThumbnailCacheService(cache_dir=tmp_path / "cache")
+
+        first = MainWindow(
+            settings_service=settings,
+            catalog_service=catalog,
+            thumbnail_cache_service=cache,
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
+        qtbot.addWidget(first)
+        first.show()
+        qtbot.waitExposed(first)
+        first._library_controller.add_image(sample_image_file)
+
+        with qtbot.waitSignal(
+            first._image_controller.image_load_finished,
+            timeout=3000,
+        ):
+            first._library_view.image_selected.emit(sample_image_file)
+
+        first._tools_panel._exposure_slider.set_value(1.5)
+        first._tools_panel._contrast_slider.set_value(25.0)
+        qtbot.wait(500)
+        first.close()
+
+        reopened = MainWindow(
+            settings_service=SettingsService(
+                QSettings(str(ini_path), QSettings.Format.IniFormat)
+            ),
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(cache_dir=tmp_path / "cache"),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
+        qtbot.addWidget(reopened)
+        reopened.show()
+        qtbot.waitExposed(reopened)
+        qtbot.waitUntil(lambda: reopened._image_controller.has_image(), timeout=3000)
+        qtbot.waitUntil(
+            lambda: reopened._tools_panel.get_adjustments()["exposure"] == 1.5,
+            timeout=3000,
+        )
+        assert reopened._tools_panel.get_adjustments()["contrast"] == 25.0
+        reopened.close()
+
+
+class TestAdjustmentPayloadRoundTrip:
+    """Regression coverage for _adjustment_values_from_payload.
+
+    Highlights/Shadows/Whites/Blacks were previously dropped by this
+    function's whitelist (never updated when that slider slice landed),
+    even though they were correctly persisted to disk -- see
+    docs/planning/implementation-notes/2026-09-29-tone-curve.md section 2.
+    """
+
+    def test_payload_restores_tonal_sliders_and_tone_curve(self, main_window):
+        payload = {
+            "version": 1,
+            "values": {
+                "exposure": 1.0,
+                "contrast": 10.0,
+                "brightness": 5.0,
+                "highlights": 40.0,
+                "shadows": -30.0,
+                "whites": 20.0,
+                "blacks": -15.0,
+                "temperature": 25.0,
+                "tint": -12.0,
+                "saturation": 20.0,
+                "vibrance": 8.0,
+                "tone_curve": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]],
+            },
+        }
+
+        restored = main_window._adjustment_values_from_payload(payload)
+
+        assert restored["highlights"] == 40.0
+        assert restored["shadows"] == -30.0
+        assert restored["whites"] == 20.0
+        assert restored["blacks"] == -15.0
+        assert restored["temperature"] == 25.0
+        assert restored["tint"] == -12.0
+        assert restored["tone_curve"] == [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+
+    def test_payload_missing_new_keys_defaults_safely(self, main_window):
+        """An older catalog entry saved before this slice has no tone_curve
+        key at all; restoring it must not raise."""
+        payload = {"version": 1, "values": {"exposure": 1.0}}
+
+        restored = main_window._adjustment_values_from_payload(payload)
+
+        assert restored["highlights"] == 0.0
+        assert restored["temperature"] == 0.0
+        assert restored["tint"] == 0.0
+        assert restored["tone_curve"] is None
+
+    def test_switching_images_restores_tonal_sliders_and_curve(
+        self, main_window, sample_image_file, tmp_path, qtbot
+    ):
+        other = tmp_path / "other.jpg"
+        Image.new("RGB", (80, 60), color="green").save(other)
+
+        main_window._library_controller.import_images([sample_image_file, str(other)])
+        library = main_window._library_view
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(sample_image_file)
+        main_window._tools_panel._highlights_slider.set_value(35.0)
+        main_window._tools_panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        )
+        qtbot.wait(500)
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(str(other))
+        qtbot.wait(200)
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(sample_image_file)
+        qtbot.waitUntil(
+            lambda: main_window._tools_panel.get_adjustments()["highlights"] == 35.0,
+            timeout=3000,
+        )
+        assert main_window._tools_panel.get_curve_params() == {
+            "points": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        }
