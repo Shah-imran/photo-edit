@@ -140,6 +140,12 @@ class TestProcessingQueue:
         request = ProcessingQueue().create_request(grain_params={"grain": 35.0})
         assert request.grain_params == {"grain": 35.0}
 
+    def test_create_request_threads_sharpening_params(self):
+        request = ProcessingQueue().create_request(
+            sharpening_params={"sharpening": 35.0}
+        )
+        assert request.sharpening_params == {"sharpening": 35.0}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

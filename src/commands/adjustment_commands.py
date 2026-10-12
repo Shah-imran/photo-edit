@@ -16,6 +16,7 @@ from src.processors.clarity_processor import ClarityProcessor
 from src.processors.dehaze_processor import DehazeProcessor
 from src.processors.vignette_processor import VignetteProcessor
 from src.processors.grain_processor import GrainProcessor
+from src.processors.sharpening_processor import SharpeningProcessor
 from src.utils.color_pipeline import LinearImage
 
 
@@ -114,6 +115,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         dehaze_params: Dict[str, float] = None,
         vignette_params: Dict[str, float] = None,
         grain_params: Dict[str, float] = None,
+        sharpening_params: Dict[str, float] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -156,6 +158,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._vignette_params = vignette_params or {}
         self._grain_processor = GrainProcessor()
         self._grain_params = grain_params or {}
+        self._sharpening_processor = SharpeningProcessor()
+        self._sharpening_params = sharpening_params or {}
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -213,6 +217,11 @@ class CombinedAdjustmentCommand(BaseCommand):
         if self._grain_params:
             result = self._grain_processor.process(
                 result, **self._grain_params
+            )
+
+        if self._sharpening_params:
+            result = self._sharpening_processor.process(
+                result, **self._sharpening_params
             )
 
         self._new_image = result

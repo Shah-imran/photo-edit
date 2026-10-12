@@ -322,3 +322,15 @@ class TestCombinedAdjustmentCommand:
         assert model.is_modified() is True
         command.undo()
         assert model.get_current_image() is previous
+
+    def test_sharpening_only_and_undo(self, sample_linear_image):
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+        previous = model.get_current_image()
+        command = CombinedAdjustmentCommand(
+            model, sharpening_params={"sharpening": 50.0}
+        )
+        command.execute()
+        assert model.is_modified() is True
+        command.undo()
+        assert model.get_current_image() is previous

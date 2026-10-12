@@ -69,7 +69,8 @@ class ToolsPanel(QWidget):
             'clarity': 0.0,
             'dehaze': 0.0,
             'vignette': 0.0,
-            'grain': 0.0
+            'grain': 0.0,
+            'sharpening': 0.0
         }
         self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
         self._hsl_values: Dict[str, float] = default_hsl_params()
@@ -288,6 +289,21 @@ class ToolsPanel(QWidget):
         )
         content_layout.addWidget(effects_section)
 
+        # Detail section
+        detail_section, detail_content_layout = self._create_section("Detail")
+        self._sharpening_slider = AdjustmentSlider(
+            "Sharpening", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        detail_content_layout.addWidget(self._sharpening_slider)
+        detail_section.add_header_widget(
+            self._reset_button_for(
+                "Reset Detail",
+                lambda: self._reset_sliders(self._sharpening_slider),
+            )
+        )
+        content_layout.addWidget(detail_section)
+
         # Reset button
         self._reset_button = QPushButton("Reset All")
         self._reset_button.setStyleSheet("""
@@ -331,6 +347,7 @@ class ToolsPanel(QWidget):
             "Color Mixer": "mixer",
             "Color Grading": "color",
             "Effects": "effects",
+            "Detail": "mask",
         }.get(title, "effects")
         section.set_header_icon(line_icon(icon_name))
         section.setProperty("sectionName", title.lower().replace(" ", "_"))
@@ -432,6 +449,9 @@ class ToolsPanel(QWidget):
         self._grain_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('grain', v)
         )
+        self._sharpening_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('sharpening', v)
+        )
 
         # Slider released signals (for final processing)
         self._exposure_slider.slider_released.connect(self._on_slider_released)
@@ -450,6 +470,7 @@ class ToolsPanel(QWidget):
         self._dehaze_slider.slider_released.connect(self._on_slider_released)
         self._vignette_slider.slider_released.connect(self._on_slider_released)
         self._grain_slider.slider_released.connect(self._on_slider_released)
+        self._sharpening_slider.slider_released.connect(self._on_slider_released)
 
         self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
@@ -612,6 +633,7 @@ class ToolsPanel(QWidget):
             'dehaze': float(adjustments.get('dehaze', 0.0)),
             'vignette': float(adjustments.get('vignette', 0.0)),
             'grain': float(adjustments.get('grain', 0.0)),
+            'sharpening': float(adjustments.get('sharpening', 0.0)),
         }
         curve_points = normalize_points(adjustments.get('tone_curve'))
         hsl_values = default_hsl_params()
@@ -650,6 +672,7 @@ class ToolsPanel(QWidget):
             self._dehaze_slider.set_value(merged['dehaze'])
             self._vignette_slider.set_value(merged['vignette'])
             self._grain_slider.set_value(merged['grain'])
+            self._sharpening_slider.set_value(merged['sharpening'])
             self._curve_editor.set_points(curve_points)
             self._hsl_mixer_panel.set_values(hsl_values)
             self._color_grading_panel.set_values(color_grading_values)
@@ -690,6 +713,7 @@ class ToolsPanel(QWidget):
         self._dehaze_slider.setEnabled(enabled)
         self._vignette_slider.setEnabled(enabled)
         self._grain_slider.setEnabled(enabled)
+        self._sharpening_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)
         for button in self._section_reset_buttons:
             button.setEnabled(enabled)

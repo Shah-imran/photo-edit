@@ -169,6 +169,7 @@ class TestImageController:
             "dehaze": 0.0,
             "vignette": 0.0,
             "grain": 0.0,
+            "sharpening": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -207,6 +208,7 @@ class TestImageController:
             "dehaze": 0.0,
             "vignette": 0.0,
             "grain": 0.0,
+            "sharpening": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -1163,6 +1165,41 @@ class TestImageControllerGrain:
         controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
         controller.apply_adjustments(
             grain_params={"grain": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerSharpening:
+    def test_sharpening_round_trips_and_reaches_export(self, qapp):
+        # A flat/constant image (e.g. the shared ``sample_image`` fixture)
+        # is exactly the case Sharpening's masking safeguard is meant to
+        # leave unchanged, so this uses an image with real edges to confirm
+        # the parameter actually reaches ``get_export_image()``.
+        from PIL import Image as PILImage
+
+        edge_image = PILImage.new("RGB", (100, 100), color="red")
+        for x in range(50, 100):
+            for y in range(100):
+                edge_image.putpixel((x, y), (0, 255, 0))
+
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(edge_image))
+        original = controller.image_model.get_original_image().copy()
+        controller.restore_adjustment_state({"sharpening": 45.0})
+        assert controller.get_adjustment_state()["sharpening"] == 45.0
+        assert not np.array_equal(controller.get_export_image(), original)
+
+    def test_missing_sharpening_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["sharpening"] == 0.0
+
+    def test_sharpening_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            sharpening_params={"sharpening": 40.0}, add_to_history=True
         )
         assert controller.can_undo() is True
         assert controller.undo() is True

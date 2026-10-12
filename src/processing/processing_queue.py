@@ -37,6 +37,7 @@ class ProcessingRequest:
     dehaze_params: Dict[str, float] = field(default_factory=dict)
     vignette_params: Dict[str, float] = field(default_factory=dict)
     grain_params: Dict[str, float] = field(default_factory=dict)
+    sharpening_params: Dict[str, float] = field(default_factory=dict)
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
     cancelled: bool = False
@@ -101,6 +102,7 @@ class ProcessingQueue:
         dehaze_params: Optional[Dict[str, float]] = None,
         vignette_params: Optional[Dict[str, float]] = None,
         grain_params: Optional[Dict[str, float]] = None,
+        sharpening_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> ProcessingRequest:
@@ -134,6 +136,7 @@ class ProcessingQueue:
                 dehaze_params=dehaze_params or {},
                 vignette_params=vignette_params or {},
                 grain_params=grain_params or {},
+                sharpening_params=sharpening_params or {},
                 use_proxy=use_proxy,
                 interactive_preview=interactive_preview,
             )

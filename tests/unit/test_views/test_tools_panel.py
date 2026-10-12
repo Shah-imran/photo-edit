@@ -486,3 +486,36 @@ class TestToolsPanelGrain:
         panel.set_adjustments({"grain": 25.0}, emit_signal=False)
         assert panel.get_adjustments()["grain"] == 25.0
         assert received == []
+
+
+class TestToolsPanelSharpening:
+    def test_sharpening_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._sharpening_slider._spin_box.minimum() == 0.0
+        assert panel._sharpening_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["sharpening"] == 0.0
+        panel._sharpening_slider.set_value(35.0)
+        assert received[-1]["sharpening"] == 35.0
+
+    def test_sharpening_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"sharpening": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["sharpening"] == 25.0
+        assert received == []
+
+    def test_detail_section_exists_and_starts_collapsed(self, qapp):
+        panel = ToolsPanel()
+        assert "Detail" in panel._sections
+        assert panel._sections["Detail"].is_expanded() is False
+
+    def test_reset_detail_resets_only_sharpening(self, qapp):
+        panel = ToolsPanel()
+        panel._sharpening_slider.set_value(60.0)
+        panel._clarity_slider.set_value(40.0)
+        panel._section_reset_buttons[-1].click()
+        assert panel.get_adjustments()["sharpening"] == 0.0
+        assert panel.get_adjustments()["clarity"] == 40.0
