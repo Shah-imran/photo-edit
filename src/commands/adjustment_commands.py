@@ -20,6 +20,9 @@ from src.processors.sharpening_processor import SharpeningProcessor
 from src.processors.luminance_noise_reduction_processor import (
     LuminanceNoiseReductionProcessor,
 )
+from src.processors.color_noise_reduction_processor import (
+    ColorNoiseReductionProcessor,
+)
 from src.utils.color_pipeline import LinearImage
 
 
@@ -120,6 +123,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         grain_params: Dict[str, float] = None,
         sharpening_params: Dict[str, float] = None,
         luminance_nr_params: Dict[str, float] = None,
+        color_nr_params: Dict[str, float] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -166,6 +170,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._sharpening_params = sharpening_params or {}
         self._luminance_nr_processor = LuminanceNoiseReductionProcessor()
         self._luminance_nr_params = luminance_nr_params or {}
+        self._color_nr_processor = ColorNoiseReductionProcessor()
+        self._color_nr_params = color_nr_params or {}
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -233,6 +239,11 @@ class CombinedAdjustmentCommand(BaseCommand):
         if self._luminance_nr_params:
             result = self._luminance_nr_processor.process(
                 result, **self._luminance_nr_params
+            )
+
+        if self._color_nr_params:
+            result = self._color_nr_processor.process(
+                result, **self._color_nr_params
             )
 
         self._new_image = result

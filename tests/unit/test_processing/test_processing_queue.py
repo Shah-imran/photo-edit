@@ -152,6 +152,12 @@ class TestProcessingQueue:
         )
         assert request.luminance_nr_params == {"luminance_nr": 35.0}
 
+    def test_create_request_threads_color_nr_params(self):
+        request = ProcessingQueue().create_request(
+            color_nr_params={"color_nr": 35.0}
+        )
+        assert request.color_nr_params == {"color_nr": 35.0}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

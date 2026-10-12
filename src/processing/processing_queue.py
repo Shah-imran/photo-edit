@@ -39,6 +39,7 @@ class ProcessingRequest:
     grain_params: Dict[str, float] = field(default_factory=dict)
     sharpening_params: Dict[str, float] = field(default_factory=dict)
     luminance_nr_params: Dict[str, float] = field(default_factory=dict)
+    color_nr_params: Dict[str, float] = field(default_factory=dict)
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
     cancelled: bool = False
@@ -105,6 +106,7 @@ class ProcessingQueue:
         grain_params: Optional[Dict[str, float]] = None,
         sharpening_params: Optional[Dict[str, float]] = None,
         luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> ProcessingRequest:
@@ -140,6 +142,7 @@ class ProcessingQueue:
                 grain_params=grain_params or {},
                 sharpening_params=sharpening_params or {},
                 luminance_nr_params=luminance_nr_params or {},
+                color_nr_params=color_nr_params or {},
                 use_proxy=use_proxy,
                 interactive_preview=interactive_preview,
             )

@@ -171,6 +171,7 @@ class TestImageController:
             "grain": 0.0,
             "sharpening": 0.0,
             "luminance_nr": 0.0,
+            "color_nr": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -211,6 +212,7 @@ class TestImageController:
             "grain": 0.0,
             "sharpening": 0.0,
             "luminance_nr": 0.0,
+            "color_nr": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -1228,6 +1230,32 @@ class TestImageControllerLuminanceNR:
         controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
         controller.apply_adjustments(
             luminance_nr_params={"luminance_nr": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerColorNR:
+    def test_color_nr_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"color_nr": 45.0})
+        assert controller.get_adjustment_state()["color_nr"] == 45.0
+        # The color NR params are at least threaded through to export,
+        # even though the shared flat sample_image has no chroma noise for
+        # the filter to visibly act on.
+        assert controller.get_export_image() is not None
+
+    def test_missing_color_nr_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["color_nr"] == 0.0
+
+    def test_color_nr_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            color_nr_params={"color_nr": 40.0}, add_to_history=True
         )
         assert controller.can_undo() is True
         assert controller.undo() is True

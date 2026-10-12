@@ -72,6 +72,7 @@ class ToolsPanel(QWidget):
             'grain': 0.0,
             'sharpening': 0.0,
             'luminance_nr': 0.0,
+            'color_nr': 0.0,
         }
         self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
         self._hsl_values: Dict[str, float] = default_hsl_params()
@@ -302,11 +303,17 @@ class ToolsPanel(QWidget):
             default_value=0.0, step=1.0, decimals=0
         )
         detail_content_layout.addWidget(self._luminance_nr_slider)
+        self._color_nr_slider = AdjustmentSlider(
+            "Color NR", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        detail_content_layout.addWidget(self._color_nr_slider)
         detail_section.add_header_widget(
             self._reset_button_for(
                 "Reset Detail",
                 lambda: self._reset_sliders(
-                    self._sharpening_slider, self._luminance_nr_slider
+                    self._sharpening_slider, self._luminance_nr_slider,
+                    self._color_nr_slider,
                 ),
             )
         )
@@ -463,6 +470,9 @@ class ToolsPanel(QWidget):
         self._luminance_nr_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('luminance_nr', v)
         )
+        self._color_nr_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('color_nr', v)
+        )
 
         # Slider released signals (for final processing)
         self._exposure_slider.slider_released.connect(self._on_slider_released)
@@ -483,6 +493,7 @@ class ToolsPanel(QWidget):
         self._grain_slider.slider_released.connect(self._on_slider_released)
         self._sharpening_slider.slider_released.connect(self._on_slider_released)
         self._luminance_nr_slider.slider_released.connect(self._on_slider_released)
+        self._color_nr_slider.slider_released.connect(self._on_slider_released)
 
         self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
@@ -647,6 +658,7 @@ class ToolsPanel(QWidget):
             'grain': float(adjustments.get('grain', 0.0)),
             'sharpening': float(adjustments.get('sharpening', 0.0)),
             'luminance_nr': float(adjustments.get('luminance_nr', 0.0)),
+            'color_nr': float(adjustments.get('color_nr', 0.0)),
         }
         curve_points = normalize_points(adjustments.get('tone_curve'))
         hsl_values = default_hsl_params()
@@ -687,6 +699,7 @@ class ToolsPanel(QWidget):
             self._grain_slider.set_value(merged['grain'])
             self._sharpening_slider.set_value(merged['sharpening'])
             self._luminance_nr_slider.set_value(merged['luminance_nr'])
+            self._color_nr_slider.set_value(merged['color_nr'])
             self._curve_editor.set_points(curve_points)
             self._hsl_mixer_panel.set_values(hsl_values)
             self._color_grading_panel.set_values(color_grading_values)
@@ -729,6 +742,7 @@ class ToolsPanel(QWidget):
         self._grain_slider.setEnabled(enabled)
         self._sharpening_slider.setEnabled(enabled)
         self._luminance_nr_slider.setEnabled(enabled)
+        self._color_nr_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)
         for button in self._section_reset_buttons:
             button.setEnabled(enabled)

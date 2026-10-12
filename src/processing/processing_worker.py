@@ -31,6 +31,9 @@ from src.processors.sharpening_processor import SharpeningProcessor
 from src.processors.luminance_noise_reduction_processor import (
     LuminanceNoiseReductionProcessor,
 )
+from src.processors.color_noise_reduction_processor import (
+    ColorNoiseReductionProcessor,
+)
 from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils.color_pipeline import LinearImage
 
@@ -97,6 +100,7 @@ class ProcessingWorker(QObject):
         self._grain_processor = GrainProcessor()
         self._sharpening_processor = SharpeningProcessor()
         self._luminance_nr_processor = LuminanceNoiseReductionProcessor()
+        self._color_nr_processor = ColorNoiseReductionProcessor()
 
         # Thread control
         self._running = False
@@ -172,6 +176,7 @@ class ProcessingWorker(QObject):
         grain_params: Optional[Dict[str, float]] = None,
         sharpening_params: Optional[Dict[str, float]] = None,
         luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -206,6 +211,7 @@ class ProcessingWorker(QObject):
             grain_params=grain_params,
             sharpening_params=sharpening_params,
             luminance_nr_params=luminance_nr_params,
+            color_nr_params=color_nr_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -232,6 +238,7 @@ class ProcessingWorker(QObject):
         grain_params: Optional[Dict[str, float]] = None,
         sharpening_params: Optional[Dict[str, float]] = None,
         luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -266,6 +273,7 @@ class ProcessingWorker(QObject):
             grain_params,
             sharpening_params,
             luminance_nr_params,
+            color_nr_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -286,6 +294,7 @@ class ProcessingWorker(QObject):
         grain_params: Optional[Dict[str, float]] = None,
         sharpening_params: Optional[Dict[str, float]] = None,
         luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -318,6 +327,7 @@ class ProcessingWorker(QObject):
             grain_params,
             sharpening_params,
             luminance_nr_params,
+            color_nr_params,
             use_proxy=False,
         )
 
@@ -431,6 +441,7 @@ class ProcessingWorker(QObject):
                 request.grain_params,
                 request.sharpening_params,
                 request.luminance_nr_params,
+                request.color_nr_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -509,6 +520,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.grain_params.items())),
             tuple(sorted(request.sharpening_params.items())),
             tuple(sorted(request.luminance_nr_params.items())),
+            tuple(sorted(request.color_nr_params.items())),
         )
 
     @staticmethod
@@ -529,6 +541,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.grain_params.items())),
             tuple(sorted(request.sharpening_params.items())),
             tuple(sorted(request.luminance_nr_params.items())),
+            tuple(sorted(request.color_nr_params.items())),
         )
 
     def _apply_adjustments(
@@ -548,6 +561,7 @@ class ProcessingWorker(QObject):
         grain_params: Optional[Dict[str, float]] = None,
         sharpening_params: Optional[Dict[str, float]] = None,
         luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
     ) -> LinearImage:
         """Apply exposure, tonal, white balance, curve, color, HSL mixer,
         and Color Grading adjustments to a ``LinearImage``."""
@@ -644,12 +658,18 @@ class ProcessingWorker(QObject):
             )
             luminance_nr_ms = _elapsed_ms(luminance_nr_start)
 
+        color_nr_ms = 0.0
+        if color_nr_params and color_nr_params.get("color_nr", 0.0) != 0.0:
+            color_nr_start = perf_counter()
+            result = self._color_nr_processor.process(result, **color_nr_params)
+            color_nr_ms = _elapsed_ms(color_nr_start)
+
         logger.info(
             "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
             "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f hsl_ms=%.2f "
             "color_grading_ms=%.2f texture_ms=%.2f clarity_ms=%.2f dehaze_ms=%.2f "
             "vignette_ms=%.2f grain_ms=%.2f sharpening_ms=%.2f "
-            "luminance_nr_ms=%.2f total_ms=%.2f",
+            "luminance_nr_ms=%.2f color_nr_ms=%.2f total_ms=%.2f",
             image.shape,
             copy_ms,
             exposure_ms,
@@ -666,6 +686,7 @@ class ProcessingWorker(QObject):
             grain_ms,
             sharpening_ms,
             luminance_nr_ms,
+            color_nr_ms,
             _elapsed_ms(total_start),
         )
 

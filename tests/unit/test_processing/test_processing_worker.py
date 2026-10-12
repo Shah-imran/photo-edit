@@ -613,3 +613,54 @@ class TestProcessingWorkerLuminanceNR:
         key_b = worker._cache_key(request_b, source)
 
         assert key_a != key_b
+
+
+class TestProcessingWorkerColorNR:
+    def test_color_nr_params_reach_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._color_nr_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1,
+            color_nr_params={"color_nr": 40.0},
+            use_proxy=False,
+        ))
+        assert calls == [{"color_nr": 40.0}]
+
+    def test_zero_color_nr_skips_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._color_nr_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1,
+            color_nr_params={"color_nr": 0.0},
+            use_proxy=False,
+        ))
+        assert calls == []
+
+    def test_different_color_nr_params_produce_different_cache_keys(self):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        request_a = ProcessingRequest(
+            request_id=1, color_nr_params={"color_nr": 0.0}, use_proxy=True
+        )
+        request_b = ProcessingRequest(
+            request_id=2, color_nr_params={"color_nr": 40.0}, use_proxy=True
+        )
+        source = worker._proxy_manager.get_proxy(interactive=True)
+
+        key_a = worker._cache_key(request_a, source)
+        key_b = worker._cache_key(request_b, source)
+
+        assert key_a != key_b

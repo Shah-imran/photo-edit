@@ -96,8 +96,8 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | 12 | Gap | No curve or histogram-in-curve. |
 | 13 | Partial | Saturation, Vibrance; no Temperature/Tint or WB presets. |
 | 14-15 | Done | HSL Color Mixer (8 bands x Hue/Sat/Lum) and Color Grading (Shadows/Midtones/Highlights + Blending/Balance) both implemented; wheels approximated with sliders (see the respective implementation notes). |
-| 16 | Partial | Texture implemented; Clarity, Dehaze, Vignette, and Grain remain. |
-| 17 | Gap | No sharpening / NR panels. |
+| 16 | Done | Texture, Clarity, Dehaze, Vignette, and Grain all implemented (see Phase G implementation notes). |
+| 17 | Done | Sharpening, Luminance NR, and Color NR all implemented, completing the Detail group. |
 | 18 | Gap | No Optics panel. |
 | 19-20 | Gap | No Geometry/Upright; no Crop tool / overlays. |
 | 21-22 | Gap | No Healing or Masking. |
