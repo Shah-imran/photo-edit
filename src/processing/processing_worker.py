@@ -37,6 +37,7 @@ from src.processors.color_noise_reduction_processor import (
 from src.processors.remove_chromatic_aberration_processor import (
     RemoveChromaticAberrationProcessor,
 )
+from src.processors.defringe_processor import DefringeProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils.color_pipeline import LinearImage
 
@@ -105,6 +106,7 @@ class ProcessingWorker(QObject):
         self._luminance_nr_processor = LuminanceNoiseReductionProcessor()
         self._color_nr_processor = ColorNoiseReductionProcessor()
         self._remove_ca_processor = RemoveChromaticAberrationProcessor()
+        self._defringe_processor = DefringeProcessor()
 
         # Thread control
         self._running = False
@@ -182,6 +184,7 @@ class ProcessingWorker(QObject):
         luminance_nr_params: Optional[Dict[str, float]] = None,
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
+        defringe_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -218,6 +221,7 @@ class ProcessingWorker(QObject):
             luminance_nr_params=luminance_nr_params,
             color_nr_params=color_nr_params,
             remove_ca_params=remove_ca_params,
+            defringe_params=defringe_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -246,6 +250,7 @@ class ProcessingWorker(QObject):
         luminance_nr_params: Optional[Dict[str, float]] = None,
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
+        defringe_params: Optional[Dict[str, float]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -282,6 +287,7 @@ class ProcessingWorker(QObject):
             luminance_nr_params,
             color_nr_params,
             remove_ca_params,
+            defringe_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -304,6 +310,7 @@ class ProcessingWorker(QObject):
         luminance_nr_params: Optional[Dict[str, float]] = None,
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
+        defringe_params: Optional[Dict[str, float]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -338,6 +345,7 @@ class ProcessingWorker(QObject):
             luminance_nr_params,
             color_nr_params,
             remove_ca_params,
+            defringe_params,
             use_proxy=False,
         )
 
@@ -453,6 +461,7 @@ class ProcessingWorker(QObject):
                 request.luminance_nr_params,
                 request.color_nr_params,
                 request.remove_ca_params,
+                request.defringe_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -533,6 +542,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.luminance_nr_params.items())),
             tuple(sorted(request.color_nr_params.items())),
             tuple(sorted(request.remove_ca_params.items())),
+            tuple(sorted(request.defringe_params.items())),
         )
 
     @staticmethod
@@ -555,6 +565,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.luminance_nr_params.items())),
             tuple(sorted(request.color_nr_params.items())),
             tuple(sorted(request.remove_ca_params.items())),
+            tuple(sorted(request.defringe_params.items())),
         )
 
     def _apply_adjustments(
@@ -576,6 +587,7 @@ class ProcessingWorker(QObject):
         luminance_nr_params: Optional[Dict[str, float]] = None,
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
+        defringe_params: Optional[Dict[str, float]] = None,
     ) -> LinearImage:
         """Apply exposure, tonal, white balance, curve, color, HSL mixer,
         and Color Grading adjustments to a ``LinearImage``."""
@@ -684,12 +696,19 @@ class ProcessingWorker(QObject):
             result = self._remove_ca_processor.process(result, **remove_ca_params)
             remove_ca_ms = _elapsed_ms(remove_ca_start)
 
+        defringe_ms = 0.0
+        if defringe_params and defringe_params.get("defringe", 0.0) != 0.0:
+            defringe_start = perf_counter()
+            result = self._defringe_processor.process(result, **defringe_params)
+            defringe_ms = _elapsed_ms(defringe_start)
+
         logger.info(
             "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
             "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f hsl_ms=%.2f "
             "color_grading_ms=%.2f texture_ms=%.2f clarity_ms=%.2f dehaze_ms=%.2f "
             "vignette_ms=%.2f grain_ms=%.2f sharpening_ms=%.2f "
-            "luminance_nr_ms=%.2f color_nr_ms=%.2f remove_ca_ms=%.2f total_ms=%.2f",
+            "luminance_nr_ms=%.2f color_nr_ms=%.2f remove_ca_ms=%.2f "
+            "defringe_ms=%.2f total_ms=%.2f",
             image.shape,
             copy_ms,
             exposure_ms,
@@ -708,6 +727,7 @@ class ProcessingWorker(QObject):
             luminance_nr_ms,
             color_nr_ms,
             remove_ca_ms,
+            defringe_ms,
             _elapsed_ms(total_start),
         )
 

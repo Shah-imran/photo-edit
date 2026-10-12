@@ -74,6 +74,7 @@ class ToolsPanel(QWidget):
             'luminance_nr': 0.0,
             'color_nr': 0.0,
             'remove_ca': 0.0,
+            'defringe': 0.0,
         }
         self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
         self._hsl_values: Dict[str, float] = default_hsl_params()
@@ -327,10 +328,17 @@ class ToolsPanel(QWidget):
             default_value=0.0, step=1.0, decimals=0
         )
         optics_content_layout.addWidget(self._remove_ca_slider)
+        self._defringe_slider = AdjustmentSlider(
+            "Defringe", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        optics_content_layout.addWidget(self._defringe_slider)
         optics_section.add_header_widget(
             self._reset_button_for(
                 "Reset Optics",
-                lambda: self._reset_sliders(self._remove_ca_slider),
+                lambda: self._reset_sliders(
+                    self._remove_ca_slider, self._defringe_slider
+                ),
             )
         )
         content_layout.addWidget(optics_section)
@@ -493,6 +501,9 @@ class ToolsPanel(QWidget):
         self._remove_ca_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('remove_ca', v)
         )
+        self._defringe_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('defringe', v)
+        )
 
         # Slider released signals (for final processing)
         self._exposure_slider.slider_released.connect(self._on_slider_released)
@@ -515,6 +526,7 @@ class ToolsPanel(QWidget):
         self._luminance_nr_slider.slider_released.connect(self._on_slider_released)
         self._color_nr_slider.slider_released.connect(self._on_slider_released)
         self._remove_ca_slider.slider_released.connect(self._on_slider_released)
+        self._defringe_slider.slider_released.connect(self._on_slider_released)
 
         self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
@@ -681,6 +693,7 @@ class ToolsPanel(QWidget):
             'luminance_nr': float(adjustments.get('luminance_nr', 0.0)),
             'color_nr': float(adjustments.get('color_nr', 0.0)),
             'remove_ca': float(adjustments.get('remove_ca', 0.0)),
+            'defringe': float(adjustments.get('defringe', 0.0)),
         }
         curve_points = normalize_points(adjustments.get('tone_curve'))
         hsl_values = default_hsl_params()
@@ -723,6 +736,7 @@ class ToolsPanel(QWidget):
             self._luminance_nr_slider.set_value(merged['luminance_nr'])
             self._color_nr_slider.set_value(merged['color_nr'])
             self._remove_ca_slider.set_value(merged['remove_ca'])
+            self._defringe_slider.set_value(merged['defringe'])
             self._curve_editor.set_points(curve_points)
             self._hsl_mixer_panel.set_values(hsl_values)
             self._color_grading_panel.set_values(color_grading_values)
@@ -767,6 +781,7 @@ class ToolsPanel(QWidget):
         self._luminance_nr_slider.setEnabled(enabled)
         self._color_nr_slider.setEnabled(enabled)
         self._remove_ca_slider.setEnabled(enabled)
+        self._defringe_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)
         for button in self._section_reset_buttons:
             button.setEnabled(enabled)

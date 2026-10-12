@@ -164,6 +164,12 @@ class TestProcessingQueue:
         )
         assert request.remove_ca_params == {"remove_ca": 35.0}
 
+    def test_create_request_threads_defringe_params(self):
+        request = ProcessingQueue().create_request(
+            defringe_params={"defringe": 35.0}
+        )
+        assert request.defringe_params == {"defringe": 35.0}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

@@ -631,11 +631,31 @@ class TestToolsPanelOptics:
         assert panel.get_adjustments()["remove_ca"] == 25.0
         assert received == []
 
-    def test_reset_optics_resets_only_remove_ca(self, qapp):
+    def test_defringe_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._defringe_slider._spin_box.minimum() == 0.0
+        assert panel._defringe_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["defringe"] == 0.0
+        panel._defringe_slider.set_value(35.0)
+        assert received[-1]["defringe"] == 35.0
+
+    def test_defringe_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"defringe": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["defringe"] == 25.0
+        assert received == []
+
+    def test_reset_optics_resets_remove_ca_and_defringe_together(self, qapp):
         panel = ToolsPanel()
         panel._remove_ca_slider.set_value(60.0)
+        panel._defringe_slider.set_value(70.0)
         panel._clarity_slider.set_value(40.0)
         optics_reset_button = panel._section_reset_buttons[-1]
         optics_reset_button.click()
         assert panel.get_adjustments()["remove_ca"] == 0.0
+        assert panel.get_adjustments()["defringe"] == 0.0
         assert panel.get_adjustments()["clarity"] == 40.0
