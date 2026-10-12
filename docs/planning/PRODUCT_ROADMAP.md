@@ -196,7 +196,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 
 Tracked in [INCREMENTAL_WORKFLOW.md](INCREMENTAL_WORKFLOW.md) section **6.1**. Each item gets its own approved implementation note before coding:
 
-- Export **overwrite confirmation** (and related prefs).
+- Export **overwrite confirmation** (and related prefs) -- **Done** (see docs/planning/implementation-notes/2026-10-12-export-overwrite-confirmation.md).
 - **Single-instance** behavior (optional lockfile / `QSingleApplication` pattern).
 - **Update channel** (check for updates, release notes) -- usually post-MVP.
 - **Telemetry / analytics** -- **opt-in only**, default off, documented payload.

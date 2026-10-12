@@ -1,5 +1,6 @@
 """Export dialog for saving images."""
 
+from pathlib import Path
 from typing import Optional
 from PyQt6.QtWidgets import (
     QDialog,
@@ -233,7 +234,10 @@ class ExportDialog(QDialog):
             resize = (width, height)
         
         preserve_aspect = self._preserve_aspect.isChecked()
-        
+
+        if not self._confirm_overwrite_if_needed(path):
+            return
+
         # Export
         success = self._export_service.export_image(
             self._image,
@@ -249,6 +253,43 @@ class ExportDialog(QDialog):
             self.accept()
         else:
             QMessageBox.critical(self, "Export Failed", "Failed to export image.")
+
+    def _confirm_overwrite_if_needed(self, path: str) -> bool:
+        """Ask before overwriting an existing export file, if required.
+
+        Returns:
+            ``True`` if the export should proceed, ``False`` if it should
+            be aborted (leaving this dialog open so the user can change
+            the path).
+        """
+        if self._settings_service is None:
+            return True
+        if not Path(path).exists():
+            return True
+        if not self._settings_service.get_confirm_export_overwrite():
+            return True
+
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Question)
+        msg_box.setWindowTitle("Overwrite File?")
+        msg_box.setText(
+            f"The file:\n{path}\nalready exists. Do you want to overwrite it?"
+        )
+        checkbox = QCheckBox("Don't ask me again")
+        msg_box.setCheckBox(checkbox)
+        msg_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
+        result = msg_box.exec()
+
+        if result != QMessageBox.StandardButton.Yes:
+            return False
+
+        if checkbox.isChecked():
+            self._settings_service.set_confirm_export_overwrite(False)
+
+        return True
 
     def get_export_path(self) -> str:
         """Get the exported file path.

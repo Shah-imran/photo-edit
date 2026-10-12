@@ -151,6 +151,24 @@ class TestSettingsServiceCurrentImagePath:
         assert service.get_current_image_path() is None
 
 
+class TestSettingsServiceConfirmExportOverwrite:
+    """Round-trip and default behavior for the overwrite-confirmation flag."""
+
+    def test_default_is_true(self, service):
+        assert service.get_confirm_export_overwrite() is True
+
+    def test_set_false_round_trips_as_actual_bool(self, service):
+        service.set_confirm_export_overwrite(False)
+        result = service.get_confirm_export_overwrite()
+        assert result is False
+
+    def test_set_true_round_trips_as_actual_bool(self, service):
+        service.set_confirm_export_overwrite(False)
+        service.set_confirm_export_overwrite(True)
+        result = service.get_confirm_export_overwrite()
+        assert result is True
+
+
 class TestSettingsServiceSync:
     """Sanity check for the explicit flush helper."""
 

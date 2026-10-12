@@ -30,6 +30,7 @@ _KEY_LAST_EXPORT_DIR = "paths/last_export_dir"
 _KEY_WINDOW_GEOMETRY = "window/geometry"
 _KEY_WINDOW_STATE = "window/state"
 _KEY_CURRENT_IMAGE_PATH = "session/current_image_path"
+_KEY_CONFIRM_EXPORT_OVERWRITE = "export/confirm_overwrite"
 
 
 class SettingsService:
@@ -142,6 +143,26 @@ class SettingsService:
             return
         candidate = Path(path).expanduser()
         self._settings.setValue(_KEY_CURRENT_IMAGE_PATH, str(candidate))
+
+    def get_confirm_export_overwrite(self) -> bool:
+        """Return whether Export should confirm before overwriting a file.
+
+        Defaults to ``True`` (confirmation is shown) when the preference
+        has never been explicitly set. The ``type=bool`` hint keeps
+        ``QSettings`` from handing back the stored ``"false"``/``"true"``
+        string on platforms that persist booleans as text (a string is
+        always truthy in Python, so without this the setting would never
+        actually suppress the prompt).
+        """
+        return bool(
+            self._settings.value(
+                _KEY_CONFIRM_EXPORT_OVERWRITE, True, type=bool
+            )
+        )
+
+    def set_confirm_export_overwrite(self, confirm: bool) -> None:
+        """Persist whether Export should confirm before overwriting a file."""
+        self._settings.setValue(_KEY_CONFIRM_EXPORT_OVERWRITE, bool(confirm))
 
     def sync(self) -> None:
         """Flush pending changes to the underlying store."""
