@@ -378,3 +378,33 @@ class TestProcessingWorkerTexture:
             request_id=1, texture_params={"texture": 0.0}, use_proxy=False
         ))
         assert calls == []
+
+
+class TestProcessingWorkerClarity:
+    def test_clarity_params_reach_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._clarity_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1, clarity_params={"clarity": 40.0}, use_proxy=False
+        ))
+        assert calls == [{"clarity": 40.0}]
+
+    def test_zero_clarity_skips_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._clarity_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1, clarity_params={"clarity": 0.0}, use_proxy=False
+        ))
+        assert calls == []

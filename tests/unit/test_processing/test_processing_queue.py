@@ -124,6 +124,10 @@ class TestProcessingQueue:
         request = ProcessingQueue().create_request(texture_params={"texture": 35.0})
         assert request.texture_params == {"texture": 35.0}
 
+    def test_create_request_threads_clarity_params(self):
+        request = ProcessingQueue().create_request(clarity_params={"clarity": 35.0})
+        assert request.clarity_params == {"clarity": 35.0}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

@@ -406,3 +406,23 @@ class TestToolsPanelTexture:
         panel.set_adjustments({"texture": 25.0}, emit_signal=False)
         assert panel.get_adjustments()["texture"] == 25.0
         assert received == []
+
+
+class TestToolsPanelClarity:
+    def test_clarity_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._clarity_slider._spin_box.minimum() == -100.0
+        assert panel._clarity_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["clarity"] == 0.0
+        panel._clarity_slider.set_value(-35.0)
+        assert received[-1]["clarity"] == -35.0
+
+    def test_clarity_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"clarity": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["clarity"] == 25.0
+        assert received == []

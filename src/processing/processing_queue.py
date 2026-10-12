@@ -33,6 +33,7 @@ class ProcessingRequest:
     hsl_params: Dict[str, float] = field(default_factory=dict)
     color_grading_params: Dict[str, float] = field(default_factory=dict)
     texture_params: Dict[str, float] = field(default_factory=dict)
+    clarity_params: Dict[str, float] = field(default_factory=dict)
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
     cancelled: bool = False
@@ -93,6 +94,7 @@ class ProcessingQueue:
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
         texture_params: Optional[Dict[str, float]] = None,
+        clarity_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> ProcessingRequest:
@@ -122,6 +124,7 @@ class ProcessingQueue:
                 hsl_params=hsl_params or {},
                 color_grading_params=color_grading_params or {},
                 texture_params=texture_params or {},
+                clarity_params=clarity_params or {},
                 use_proxy=use_proxy,
                 interactive_preview=interactive_preview,
             )
