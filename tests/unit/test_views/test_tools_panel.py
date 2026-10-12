@@ -516,7 +516,9 @@ class TestToolsPanelSharpening:
         panel = ToolsPanel()
         panel._sharpening_slider.set_value(60.0)
         panel._clarity_slider.set_value(40.0)
-        panel._section_reset_buttons[-1].click()
+        # Detail's reset button is second-to-last since the Optics section
+        # (added after Detail) now owns the final reset button.
+        panel._section_reset_buttons[-2].click()
         assert panel.get_adjustments()["sharpening"] == 0.0
         assert panel.get_adjustments()["clarity"] == 40.0
 
@@ -549,7 +551,9 @@ class TestToolsPanelLuminanceNR:
         panel._sharpening_slider.set_value(60.0)
         panel._luminance_nr_slider.set_value(55.0)
         panel._clarity_slider.set_value(40.0)
-        panel._section_reset_buttons[-1].click()
+        # Detail's reset button is second-to-last since the Optics section
+        # (added after Detail) now owns the final reset button.
+        panel._section_reset_buttons[-2].click()
         assert panel.get_adjustments()["sharpening"] == 0.0
         assert panel.get_adjustments()["luminance_nr"] == 0.0
         assert panel.get_adjustments()["clarity"] == 40.0
@@ -587,8 +591,51 @@ class TestToolsPanelColorNR:
         panel._luminance_nr_slider.set_value(55.0)
         panel._color_nr_slider.set_value(45.0)
         panel._clarity_slider.set_value(40.0)
-        panel._section_reset_buttons[-1].click()
+        # Detail's reset button is second-to-last since the Optics section
+        # (added after Detail) now owns the final reset button.
+        panel._section_reset_buttons[-2].click()
         assert panel.get_adjustments()["sharpening"] == 0.0
         assert panel.get_adjustments()["luminance_nr"] == 0.0
         assert panel.get_adjustments()["color_nr"] == 0.0
+        assert panel.get_adjustments()["clarity"] == 40.0
+
+
+class TestToolsPanelOptics:
+    """Phase H (Optics) -- Remove Chromatic Aberration.
+
+    This mirrors the Sharpening slice's precedent for creating a brand
+    new section (rather than Color NR's "add to an existing section")
+    since Optics did not exist before this slice.
+    """
+
+    def test_optics_section_exists_and_starts_collapsed(self, qapp):
+        panel = ToolsPanel()
+        assert "Optics" in panel._sections
+        assert panel._sections["Optics"].is_expanded() is False
+
+    def test_remove_ca_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._remove_ca_slider._spin_box.minimum() == 0.0
+        assert panel._remove_ca_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["remove_ca"] == 0.0
+        panel._remove_ca_slider.set_value(35.0)
+        assert received[-1]["remove_ca"] == 35.0
+
+    def test_remove_ca_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"remove_ca": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["remove_ca"] == 25.0
+        assert received == []
+
+    def test_reset_optics_resets_only_remove_ca(self, qapp):
+        panel = ToolsPanel()
+        panel._remove_ca_slider.set_value(60.0)
+        panel._clarity_slider.set_value(40.0)
+        optics_reset_button = panel._section_reset_buttons[-1]
+        optics_reset_button.click()
+        assert panel.get_adjustments()["remove_ca"] == 0.0
         assert panel.get_adjustments()["clarity"] == 40.0

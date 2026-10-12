@@ -158,6 +158,12 @@ class TestProcessingQueue:
         )
         assert request.color_nr_params == {"color_nr": 35.0}
 
+    def test_create_request_threads_remove_ca_params(self):
+        request = ProcessingQueue().create_request(
+            remove_ca_params={"remove_ca": 35.0}
+        )
+        assert request.remove_ca_params == {"remove_ca": 35.0}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

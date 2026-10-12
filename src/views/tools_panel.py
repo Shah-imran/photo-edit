@@ -73,6 +73,7 @@ class ToolsPanel(QWidget):
             'sharpening': 0.0,
             'luminance_nr': 0.0,
             'color_nr': 0.0,
+            'remove_ca': 0.0,
         }
         self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
         self._hsl_values: Dict[str, float] = default_hsl_params()
@@ -319,6 +320,21 @@ class ToolsPanel(QWidget):
         )
         content_layout.addWidget(detail_section)
 
+        # Optics section (Phase H -- Remove Chromatic Aberration)
+        optics_section, optics_content_layout = self._create_section("Optics")
+        self._remove_ca_slider = AdjustmentSlider(
+            "Remove CA", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        optics_content_layout.addWidget(self._remove_ca_slider)
+        optics_section.add_header_widget(
+            self._reset_button_for(
+                "Reset Optics",
+                lambda: self._reset_sliders(self._remove_ca_slider),
+            )
+        )
+        content_layout.addWidget(optics_section)
+
         # Reset button
         self._reset_button = QPushButton("Reset All")
         self._reset_button.setStyleSheet("""
@@ -363,6 +379,7 @@ class ToolsPanel(QWidget):
             "Color Grading": "color",
             "Effects": "effects",
             "Detail": "mask",
+            "Optics": "transform",
         }.get(title, "effects")
         section.set_header_icon(line_icon(icon_name))
         section.setProperty("sectionName", title.lower().replace(" ", "_"))
@@ -473,6 +490,9 @@ class ToolsPanel(QWidget):
         self._color_nr_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('color_nr', v)
         )
+        self._remove_ca_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('remove_ca', v)
+        )
 
         # Slider released signals (for final processing)
         self._exposure_slider.slider_released.connect(self._on_slider_released)
@@ -494,6 +514,7 @@ class ToolsPanel(QWidget):
         self._sharpening_slider.slider_released.connect(self._on_slider_released)
         self._luminance_nr_slider.slider_released.connect(self._on_slider_released)
         self._color_nr_slider.slider_released.connect(self._on_slider_released)
+        self._remove_ca_slider.slider_released.connect(self._on_slider_released)
 
         self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
@@ -659,6 +680,7 @@ class ToolsPanel(QWidget):
             'sharpening': float(adjustments.get('sharpening', 0.0)),
             'luminance_nr': float(adjustments.get('luminance_nr', 0.0)),
             'color_nr': float(adjustments.get('color_nr', 0.0)),
+            'remove_ca': float(adjustments.get('remove_ca', 0.0)),
         }
         curve_points = normalize_points(adjustments.get('tone_curve'))
         hsl_values = default_hsl_params()
@@ -700,6 +722,7 @@ class ToolsPanel(QWidget):
             self._sharpening_slider.set_value(merged['sharpening'])
             self._luminance_nr_slider.set_value(merged['luminance_nr'])
             self._color_nr_slider.set_value(merged['color_nr'])
+            self._remove_ca_slider.set_value(merged['remove_ca'])
             self._curve_editor.set_points(curve_points)
             self._hsl_mixer_panel.set_values(hsl_values)
             self._color_grading_panel.set_values(color_grading_values)
@@ -743,6 +766,7 @@ class ToolsPanel(QWidget):
         self._sharpening_slider.setEnabled(enabled)
         self._luminance_nr_slider.setEnabled(enabled)
         self._color_nr_slider.setEnabled(enabled)
+        self._remove_ca_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)
         for button in self._section_reset_buttons:
             button.setEnabled(enabled)

@@ -172,6 +172,7 @@ class TestImageController:
             "sharpening": 0.0,
             "luminance_nr": 0.0,
             "color_nr": 0.0,
+            "remove_ca": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -213,6 +214,7 @@ class TestImageController:
             "sharpening": 0.0,
             "luminance_nr": 0.0,
             "color_nr": 0.0,
+            "remove_ca": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -1256,6 +1258,31 @@ class TestImageControllerColorNR:
         controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
         controller.apply_adjustments(
             color_nr_params={"color_nr": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerRemoveCA:
+    """Phase H (Optics) -- Remove Chromatic Aberration."""
+
+    def test_remove_ca_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"remove_ca": 45.0})
+        assert controller.get_adjustment_state()["remove_ca"] == 45.0
+        assert controller.get_export_image() is not None
+
+    def test_missing_remove_ca_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["remove_ca"] == 0.0
+
+    def test_remove_ca_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            remove_ca_params={"remove_ca": 40.0}, add_to_history=True
         )
         assert controller.can_undo() is True
         assert controller.undo() is True

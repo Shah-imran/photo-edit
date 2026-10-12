@@ -33,6 +33,9 @@ from src.processors.luminance_noise_reduction_processor import (
 from src.processors.color_noise_reduction_processor import (
     ColorNoiseReductionProcessor,
 )
+from src.processors.remove_chromatic_aberration_processor import (
+    RemoveChromaticAberrationProcessor,
+)
 from src.commands.adjustment_commands import (
     CombinedAdjustmentCommand,
     ImageStateChangeCommand,
@@ -117,6 +120,7 @@ class ImageController(QObject):
         "sharpening": 0.0,
         "luminance_nr": 0.0,
         "color_nr": 0.0,
+        "remove_ca": 0.0,
     }
     # Tone curve control points are not floats, so they are kept out of
     # _ADJUSTMENT_DEFAULTS (which _normalize_adjustment_state float-casts
@@ -180,6 +184,7 @@ class ImageController(QObject):
         self._sharpening_processor = SharpeningProcessor()
         self._luminance_nr_processor = LuminanceNoiseReductionProcessor()
         self._color_nr_processor = ColorNoiseReductionProcessor()
+        self._remove_ca_processor = RemoveChromaticAberrationProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
@@ -197,6 +202,7 @@ class ImageController(QObject):
         self._sharpening_params: Dict[str, float] = {}
         self._luminance_nr_params: Dict[str, float] = {}
         self._color_nr_params: Dict[str, float] = {}
+        self._remove_ca_params: Dict[str, float] = {}
 
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
@@ -437,6 +443,7 @@ class ImageController(QObject):
         self._sharpening_params = {}
         self._luminance_nr_params = {}
         self._color_nr_params = {}
+        self._remove_ca_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -566,6 +573,10 @@ class ImageController(QObject):
             result = self._color_nr_processor.process(
                 result, **self._color_nr_params
             )
+        if self._remove_ca_params:
+            result = self._remove_ca_processor.process(
+                result, **self._remove_ca_params
+            )
         return result
 
     def refresh_view(self) -> None:
@@ -611,6 +622,7 @@ class ImageController(QObject):
         state.update(self._sharpening_params)
         state.update(self._luminance_nr_params)
         state.update(self._color_nr_params)
+        state.update(self._remove_ca_params)
         return state
 
     def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
@@ -672,6 +684,7 @@ class ImageController(QObject):
         self._sharpening_params = {"sharpening": normalized["sharpening"]}
         self._luminance_nr_params = {"luminance_nr": normalized["luminance_nr"]}
         self._color_nr_params = {"color_nr": normalized["color_nr"]}
+        self._remove_ca_params = {"remove_ca": normalized["remove_ca"]}
 
         if not self.has_image():
             return
@@ -719,6 +732,9 @@ class ImageController(QObject):
         result = self._color_nr_processor.process(
             result, **self._color_nr_params
         )
+        result = self._remove_ca_processor.process(
+            result, **self._remove_ca_params
+        )
         self._image_model.current_image = result
         self.refresh_view()
 
@@ -741,6 +757,7 @@ class ImageController(QObject):
         self._sharpening_params = {}
         self._luminance_nr_params = {}
         self._color_nr_params = {}
+        self._remove_ca_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -833,6 +850,7 @@ class ImageController(QObject):
         sharpening_params: Dict[str, float] = None,
         luminance_nr_params: Dict[str, float] = None,
         color_nr_params: Dict[str, float] = None,
+        remove_ca_params: Dict[str, float] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -892,6 +910,8 @@ class ImageController(QObject):
             self._luminance_nr_params = luminance_nr_params
         if color_nr_params:
             self._color_nr_params = color_nr_params
+        if remove_ca_params:
+            self._remove_ca_params = remove_ca_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -913,6 +933,7 @@ class ImageController(QObject):
                         sharpening_params=self._sharpening_params,
                         luminance_nr_params=self._luminance_nr_params,
                         color_nr_params=self._color_nr_params,
+                        remove_ca_params=self._remove_ca_params,
                     )
                 )
             else:
@@ -934,6 +955,7 @@ class ImageController(QObject):
                         sharpening_params=self._sharpening_params,
                         luminance_nr_params=self._luminance_nr_params,
                         color_nr_params=self._color_nr_params,
+                        remove_ca_params=self._remove_ca_params,
                         interactive_preview=True,
                     )
                 )
@@ -958,6 +980,7 @@ class ImageController(QObject):
                 sharpening_params=self._sharpening_params,
                 luminance_nr_params=self._luminance_nr_params,
                 color_nr_params=self._color_nr_params,
+                remove_ca_params=self._remove_ca_params,
             )
             self._history_service.execute_command(command)
         else:
@@ -1025,6 +1048,11 @@ class ImageController(QObject):
             if self._color_nr_params:
                 result = self._color_nr_processor.process(
                     result, **self._color_nr_params
+                )
+
+            if self._remove_ca_params:
+                result = self._remove_ca_processor.process(
+                    result, **self._remove_ca_params
                 )
 
             self._image_model.current_image = result
@@ -1096,6 +1124,9 @@ class ImageController(QObject):
         color_nr_params = {
             "color_nr": adjustments.get("color_nr", 0.0)
         }
+        remove_ca_params = {
+            "remove_ca": adjustments.get("remove_ca", 0.0)
+        }
 
         # Store params
         self._exposure_params = exposure_params
@@ -1110,6 +1141,7 @@ class ImageController(QObject):
         self._sharpening_params = sharpening_params
         self._luminance_nr_params = luminance_nr_params
         self._color_nr_params = color_nr_params
+        self._remove_ca_params = remove_ca_params
 
         if self._use_threading and self._debouncer is not None:
             # Use throttled + debounced async processing. The curve and
@@ -1133,6 +1165,7 @@ class ImageController(QObject):
                 'sharpening': self._sharpening_params,
                 'luminance_nr': self._luminance_nr_params,
                 'color_nr': self._color_nr_params,
+                'remove_ca': self._remove_ca_params,
             })
             mode = "debounced-threaded"
         else:
@@ -1153,6 +1186,7 @@ class ImageController(QObject):
                 self._sharpening_params,
                 self._luminance_nr_params,
                 self._color_nr_params,
+                self._remove_ca_params,
                 add_to_history=False,
             )
             mode = "sync-fallback"
@@ -1217,6 +1251,7 @@ class ImageController(QObject):
                 'sharpening': self._sharpening_params,
                 'luminance_nr': self._luminance_nr_params,
                 'color_nr': self._color_nr_params,
+                'remove_ca': self._remove_ca_params,
             })
         else:
             self.apply_adjustments(
@@ -1272,6 +1307,7 @@ class ImageController(QObject):
                 'sharpening': self._sharpening_params,
                 'luminance_nr': self._luminance_nr_params,
                 'color_nr': self._color_nr_params,
+                'remove_ca': self._remove_ca_params,
             })
         else:
             self.apply_adjustments(
@@ -1327,6 +1363,7 @@ class ImageController(QObject):
                 'sharpening': self._sharpening_params,
                 'luminance_nr': self._luminance_nr_params,
                 'color_nr': self._color_nr_params,
+                'remove_ca': self._remove_ca_params,
             })
         else:
             self.apply_adjustments(
@@ -1363,6 +1400,7 @@ class ImageController(QObject):
         sharpening_params = params.get('sharpening', {})
         luminance_nr_params = params.get('luminance_nr', {})
         color_nr_params = params.get('color_nr', {})
+        remove_ca_params = params.get('remove_ca', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
@@ -1379,6 +1417,7 @@ class ImageController(QObject):
             sharpening_params=sharpening_params,
             luminance_nr_params=luminance_nr_params,
             color_nr_params=color_nr_params,
+            remove_ca_params=remove_ca_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1415,6 +1454,7 @@ class ImageController(QObject):
         sharpening_params = params.get('sharpening', {})
         luminance_nr_params = params.get('luminance_nr', {})
         color_nr_params = params.get('color_nr', {})
+        remove_ca_params = params.get('remove_ca', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -1434,6 +1474,7 @@ class ImageController(QObject):
             sharpening_params=sharpening_params,
             luminance_nr_params=luminance_nr_params,
             color_nr_params=color_nr_params,
+            remove_ca_params=remove_ca_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1549,6 +1590,7 @@ class ImageController(QObject):
                 sharpening_params=self._sharpening_params,
                 luminance_nr_params=self._luminance_nr_params,
                 color_nr_params=self._color_nr_params,
+                remove_ca_params=self._remove_ca_params,
                 interactive_preview=False,
             )
 
@@ -1588,6 +1630,7 @@ class ImageController(QObject):
             any(v != 0 for v in self._sharpening_params.values()) or
             any(v != 0 for v in self._luminance_nr_params.values()) or
             any(v != 0 for v in self._color_nr_params.values()) or
+            any(v != 0 for v in self._remove_ca_params.values()) or
             not is_identity_curve(self._curve_params.get("points"))
         )
 
@@ -1618,6 +1661,7 @@ class ImageController(QObject):
             sharpening_params=self._sharpening_params,
             luminance_nr_params=self._luminance_nr_params,
             color_nr_params=self._color_nr_params,
+            remove_ca_params=self._remove_ca_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -1677,6 +1721,7 @@ class ImageController(QObject):
                 sharpening_params=self._sharpening_params.copy(),
                 luminance_nr_params=self._luminance_nr_params.copy(),
                 color_nr_params=self._color_nr_params.copy(),
+                remove_ca_params=self._remove_ca_params.copy(),
             )
             self._history_service.execute_command(command)
 
