@@ -5,6 +5,8 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QToolButton, QWidget
 
+from src.views.icons import line_icon
+
 
 class ImageToolBar(QFrame):
     """View-only toolbar that emits image navigation intents."""
@@ -35,11 +37,6 @@ class ImageToolBar(QFrame):
         layout.setSpacing(6)
         layout.addStretch(1)
 
-        self._before_after_button = self._button("Y", "Before / After (coming soon)")
-        self._before_after_button.setEnabled(False)
-        layout.addWidget(self._before_after_button)
-        layout.addSpacing(8)
-
         self._fit_button = self._button("Fit", "Fit image to window")
         self._actual_size_button = self._button("100%", "View at actual pixel size")
         self._zoom_out_button = self._button("−", "Zoom out")
@@ -57,12 +54,16 @@ class ImageToolBar(QFrame):
         ):
             layout.addWidget(widget)
 
-        self._pan_button = self._button("Hand", "Pan by dragging the image")
-        self._pan_button.setCheckable(True)
-        self._pan_button.setChecked(True)
-        self._pan_button.setEnabled(False)
         layout.addSpacing(8)
-        layout.addWidget(self._pan_button)
+        self._before_after_button = self._button(
+            "Before / After", "Compare before and after (coming soon)"
+        )
+        self._before_after_button.setIcon(line_icon("compare"))
+        self._before_after_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self._before_after_button.setEnabled(False)
+        layout.addWidget(self._before_after_button)
         layout.addStretch(1)
 
         self._fit_button.clicked.connect(self.fit_requested)
