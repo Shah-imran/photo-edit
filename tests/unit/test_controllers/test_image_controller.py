@@ -168,6 +168,7 @@ class TestImageController:
             "clarity": 0.0,
             "dehaze": 0.0,
             "vignette": 0.0,
+            "grain": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -205,6 +206,7 @@ class TestImageController:
             "clarity": 0.0,
             "dehaze": 0.0,
             "vignette": 0.0,
+            "grain": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -1137,6 +1139,30 @@ class TestImageControllerVignette:
         controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
         controller.apply_adjustments(
             vignette_params={"vignette": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerGrain:
+    def test_grain_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original = controller.image_model.get_original_image().copy()
+        controller.restore_adjustment_state({"grain": 45.0})
+        assert controller.get_adjustment_state()["grain"] == 45.0
+        assert not np.array_equal(controller.get_export_image(), original)
+
+    def test_missing_grain_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["grain"] == 0.0
+
+    def test_grain_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            grain_params={"grain": 40.0}, add_to_history=True
         )
         assert controller.can_undo() is True
         assert controller.undo() is True

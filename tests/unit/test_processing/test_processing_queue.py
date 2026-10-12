@@ -136,6 +136,10 @@ class TestProcessingQueue:
         request = ProcessingQueue().create_request(vignette_params={"vignette": 35.0})
         assert request.vignette_params == {"vignette": 35.0}
 
+    def test_create_request_threads_grain_params(self):
+        request = ProcessingQueue().create_request(grain_params={"grain": 35.0})
+        assert request.grain_params == {"grain": 35.0}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

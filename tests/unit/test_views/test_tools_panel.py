@@ -466,3 +466,23 @@ class TestToolsPanelVignette:
         panel.set_adjustments({"vignette": 25.0}, emit_signal=False)
         assert panel.get_adjustments()["vignette"] == 25.0
         assert received == []
+
+
+class TestToolsPanelGrain:
+    def test_grain_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._grain_slider._spin_box.minimum() == 0.0
+        assert panel._grain_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["grain"] == 0.0
+        panel._grain_slider.set_value(35.0)
+        assert received[-1]["grain"] == 35.0
+
+    def test_grain_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"grain": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["grain"] == 25.0
+        assert received == []
