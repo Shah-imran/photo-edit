@@ -314,8 +314,6 @@ class MainWindow(QMainWindow):
         self._zoom_label = QLabel("100%")
         self._zoom_label.setStyleSheet("padding: 0 10px;")
         self._status_bar.addPermanentWidget(self._zoom_label)
-        
-        self._status_bar.showMessage("Ready")
 
     def _setup_shortcuts(self):
         """Set up keyboard shortcuts."""
