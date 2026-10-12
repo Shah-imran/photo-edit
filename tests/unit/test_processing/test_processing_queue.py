@@ -128,6 +128,10 @@ class TestProcessingQueue:
         request = ProcessingQueue().create_request(clarity_params={"clarity": 35.0})
         assert request.clarity_params == {"clarity": 35.0}
 
+    def test_create_request_threads_dehaze_params(self):
+        request = ProcessingQueue().create_request(dehaze_params={"dehaze": 35.0})
+        assert request.dehaze_params == {"dehaze": 35.0}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

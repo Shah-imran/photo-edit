@@ -166,6 +166,7 @@ class TestImageController:
             "vibrance": 0.0,
             "texture": 0.0,
             "clarity": 0.0,
+            "dehaze": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -201,6 +202,7 @@ class TestImageController:
             "vibrance": 8.0,
             "texture": 0.0,
             "clarity": 0.0,
+            "dehaze": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -1093,3 +1095,20 @@ class TestImageControllerClarity:
         controller = ImageController(ImageView(), use_threading=False)
         controller.restore_adjustment_state({"exposure": 1.0})
         assert controller.get_adjustment_state()["clarity"] == 0.0
+
+
+class TestImageControllerDehaze:
+    def test_dehaze_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original = controller.image_model.get_original_image().copy()
+        original[40:60, 40:60] *= 0.6
+        controller.image_model.set_original_image(original)
+        controller.restore_adjustment_state({"dehaze": 45.0})
+        assert controller.get_adjustment_state()["dehaze"] == 45.0
+        assert not np.array_equal(controller.get_export_image(), original)
+
+    def test_missing_dehaze_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["dehaze"] == 0.0

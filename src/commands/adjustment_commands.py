@@ -13,6 +13,7 @@ from src.processors.tonal_processor import TonalProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.processors.texture_processor import TextureProcessor
 from src.processors.clarity_processor import ClarityProcessor
+from src.processors.dehaze_processor import DehazeProcessor
 from src.utils.color_pipeline import LinearImage
 
 
@@ -108,6 +109,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         color_grading_params: Dict[str, float] = None,
         texture_params: Dict[str, float] = None,
         clarity_params: Dict[str, float] = None,
+        dehaze_params: Dict[str, float] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -144,6 +146,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._texture_params = texture_params or {}
         self._clarity_processor = ClarityProcessor()
         self._clarity_params = clarity_params or {}
+        self._dehaze_processor = DehazeProcessor()
+        self._dehaze_params = dehaze_params or {}
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -186,6 +190,11 @@ class CombinedAdjustmentCommand(BaseCommand):
         if self._clarity_params:
             result = self._clarity_processor.process(
                 result, **self._clarity_params
+            )
+
+        if self._dehaze_params:
+            result = self._dehaze_processor.process(
+                result, **self._dehaze_params
             )
 
         self._new_image = result

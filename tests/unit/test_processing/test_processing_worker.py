@@ -408,3 +408,33 @@ class TestProcessingWorkerClarity:
             request_id=1, clarity_params={"clarity": 0.0}, use_proxy=False
         ))
         assert calls == []
+
+
+class TestProcessingWorkerDehaze:
+    def test_dehaze_params_reach_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._dehaze_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1, dehaze_params={"dehaze": 40.0}, use_proxy=False
+        ))
+        assert calls == [{"dehaze": 40.0}]
+
+    def test_zero_dehaze_skips_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._dehaze_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1, dehaze_params={"dehaze": 0.0}, use_proxy=False
+        ))
+        assert calls == []
