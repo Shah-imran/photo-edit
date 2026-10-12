@@ -99,7 +99,7 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | 16 | Done | Texture, Clarity, Dehaze, Vignette, and Grain all implemented (see Phase G implementation notes). |
 | 17 | Done | Sharpening, Luminance NR, and Color NR all implemented, completing the Detail group. |
 | 18 | Partial | Remove CA and Defringe implemented; no lens-profile-based corrections (no profile database exists -- durable gap). |
-| 19-20 | Gap | No Geometry/Upright; no Crop tool / overlays. |
+| 19-20 | Partial | Straighten (rotation, dimension-preserving) implemented; no Upright modes, Distortion/Scale/Offset, or interactive Crop tool (needs new canvas-overlay UI infrastructure). |
 | 21-22 | Gap | No Healing or Masking. |
 | 23 | Partial | Some actions via menus; no dedicated overflow/settings pattern. |
 | 24 | Partial | [`library_view.py`](../../src/views/library_view.py) left panel + thumbs; **no bottom filmstrip** in described layout. |

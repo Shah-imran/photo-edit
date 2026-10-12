@@ -174,6 +174,7 @@ class TestImageController:
             "color_nr": 0.0,
             "remove_ca": 0.0,
             "defringe": 0.0,
+            "straighten": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -217,6 +218,7 @@ class TestImageController:
             "color_nr": 0.0,
             "remove_ca": 0.0,
             "defringe": 0.0,
+            "straighten": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -1310,6 +1312,33 @@ class TestImageControllerDefringe:
         controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
         controller.apply_adjustments(
             defringe_params={"defringe": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerStraighten:
+    """Phase I (Geometry) -- Straighten."""
+
+    def test_straighten_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"straighten": 12.0})
+        assert controller.get_adjustment_state()["straighten"] == 12.0
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape == pil_to_linear(sample_image).shape
+
+    def test_missing_straighten_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["straighten"] == 0.0
+
+    def test_straighten_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            straighten_params={"straighten": 8.0}, add_to_history=True
         )
         assert controller.can_undo() is True
         assert controller.undo() is True

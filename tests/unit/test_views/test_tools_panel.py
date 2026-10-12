@@ -516,9 +516,9 @@ class TestToolsPanelSharpening:
         panel = ToolsPanel()
         panel._sharpening_slider.set_value(60.0)
         panel._clarity_slider.set_value(40.0)
-        # Detail's reset button is second-to-last since the Optics section
-        # (added after Detail) now owns the final reset button.
-        panel._section_reset_buttons[-2].click()
+        # Detail's reset button is now third-to-last: Optics (after
+        # Detail) and Geometry (after Optics) each own a later one.
+        panel._section_reset_buttons[-3].click()
         assert panel.get_adjustments()["sharpening"] == 0.0
         assert panel.get_adjustments()["clarity"] == 40.0
 
@@ -551,9 +551,9 @@ class TestToolsPanelLuminanceNR:
         panel._sharpening_slider.set_value(60.0)
         panel._luminance_nr_slider.set_value(55.0)
         panel._clarity_slider.set_value(40.0)
-        # Detail's reset button is second-to-last since the Optics section
-        # (added after Detail) now owns the final reset button.
-        panel._section_reset_buttons[-2].click()
+        # Detail's reset button is now third-to-last: Optics (after
+        # Detail) and Geometry (after Optics) each own a later one.
+        panel._section_reset_buttons[-3].click()
         assert panel.get_adjustments()["sharpening"] == 0.0
         assert panel.get_adjustments()["luminance_nr"] == 0.0
         assert panel.get_adjustments()["clarity"] == 40.0
@@ -591,9 +591,9 @@ class TestToolsPanelColorNR:
         panel._luminance_nr_slider.set_value(55.0)
         panel._color_nr_slider.set_value(45.0)
         panel._clarity_slider.set_value(40.0)
-        # Detail's reset button is second-to-last since the Optics section
-        # (added after Detail) now owns the final reset button.
-        panel._section_reset_buttons[-2].click()
+        # Detail's reset button is now third-to-last: Optics (after
+        # Detail) and Geometry (after Optics) each own a later one.
+        panel._section_reset_buttons[-3].click()
         assert panel.get_adjustments()["sharpening"] == 0.0
         assert panel.get_adjustments()["luminance_nr"] == 0.0
         assert panel.get_adjustments()["color_nr"] == 0.0
@@ -654,8 +654,56 @@ class TestToolsPanelOptics:
         panel._remove_ca_slider.set_value(60.0)
         panel._defringe_slider.set_value(70.0)
         panel._clarity_slider.set_value(40.0)
-        optics_reset_button = panel._section_reset_buttons[-1]
+        # Optics' reset button is now second-to-last since the Geometry
+        # section (added after Optics) owns the final reset button.
+        optics_reset_button = panel._section_reset_buttons[-2]
         optics_reset_button.click()
         assert panel.get_adjustments()["remove_ca"] == 0.0
         assert panel.get_adjustments()["defringe"] == 0.0
+        assert panel.get_adjustments()["clarity"] == 40.0
+
+
+class TestToolsPanelGeometry:
+    """Phase I (Geometry) -- Straighten.
+
+    This mirrors the Optics/Remove CA slice's precedent for creating a
+    brand new section (rather than extending an existing one), since
+    Geometry did not exist before this slice. Only Straighten lives here
+    -- the full interactive Crop tool and Upright modes are explicitly
+    out of scope for this slice (see
+    docs/planning/implementation-notes/2026-10-12-straighten.md section 1).
+    """
+
+    def test_geometry_section_exists_and_starts_collapsed(self, qapp):
+        panel = ToolsPanel()
+        assert "Geometry" in panel._sections
+        assert panel._sections["Geometry"].is_expanded() is False
+
+    def test_straighten_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._straighten_slider._spin_box.minimum() == -45.0
+        assert panel._straighten_slider._spin_box.maximum() == 45.0
+        assert panel.get_adjustments()["straighten"] == 0.0
+        panel._straighten_slider.set_value(12.5)
+        assert received[-1]["straighten"] == 12.5
+
+    def test_straighten_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"straighten": -20.0}, emit_signal=False)
+        assert panel.get_adjustments()["straighten"] == -20.0
+        assert received == []
+
+    def test_reset_geometry_resets_only_straighten(self, qapp):
+        panel = ToolsPanel()
+        panel._straighten_slider.set_value(30.0)
+        panel._clarity_slider.set_value(40.0)
+        # Geometry's reset button is now the last one, since Geometry is
+        # the final section added after Optics.
+        geometry_reset_button = panel._section_reset_buttons[-1]
+        geometry_reset_button.click()
+        assert panel.get_adjustments()["straighten"] == 0.0
         assert panel.get_adjustments()["clarity"] == 40.0

@@ -42,6 +42,7 @@ class ProcessingRequest:
     color_nr_params: Dict[str, float] = field(default_factory=dict)
     remove_ca_params: Dict[str, float] = field(default_factory=dict)
     defringe_params: Dict[str, float] = field(default_factory=dict)
+    straighten_params: Dict[str, float] = field(default_factory=dict)
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
     cancelled: bool = False
@@ -111,6 +112,7 @@ class ProcessingQueue:
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
         defringe_params: Optional[Dict[str, float]] = None,
+        straighten_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> ProcessingRequest:
@@ -149,6 +151,7 @@ class ProcessingQueue:
                 color_nr_params=color_nr_params or {},
                 remove_ca_params=remove_ca_params or {},
                 defringe_params=defringe_params or {},
+                straighten_params=straighten_params or {},
                 use_proxy=use_proxy,
                 interactive_preview=interactive_preview,
             )

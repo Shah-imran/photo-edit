@@ -380,3 +380,17 @@ class TestCombinedAdjustmentCommand:
         assert model.is_modified() is True
         command.undo()
         assert model.get_current_image() is previous
+
+    def test_straighten_only_and_undo(self, sample_linear_image):
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+        previous = model.get_current_image()
+        command = CombinedAdjustmentCommand(
+            model, straighten_params={"straighten": 10.0}
+        )
+        command.execute()
+        assert model.is_modified() is True
+        new_image = model.get_current_image()
+        assert new_image.shape == sample_linear_image.shape
+        command.undo()
+        assert model.get_current_image() is previous

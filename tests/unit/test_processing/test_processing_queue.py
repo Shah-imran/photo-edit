@@ -170,6 +170,12 @@ class TestProcessingQueue:
         )
         assert request.defringe_params == {"defringe": 35.0}
 
+    def test_create_request_threads_straighten_params(self):
+        request = ProcessingQueue().create_request(
+            straighten_params={"straighten": 15.0}
+        )
+        assert request.straighten_params == {"straighten": 15.0}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

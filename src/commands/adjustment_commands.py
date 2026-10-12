@@ -27,6 +27,7 @@ from src.processors.remove_chromatic_aberration_processor import (
     RemoveChromaticAberrationProcessor,
 )
 from src.processors.defringe_processor import DefringeProcessor
+from src.processors.straighten_processor import StraightenProcessor
 from src.utils.color_pipeline import LinearImage
 
 
@@ -130,6 +131,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         color_nr_params: Dict[str, float] = None,
         remove_ca_params: Dict[str, float] = None,
         defringe_params: Dict[str, float] = None,
+        straighten_params: Dict[str, float] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -182,6 +184,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._remove_ca_params = remove_ca_params or {}
         self._defringe_processor = DefringeProcessor()
         self._defringe_params = defringe_params or {}
+        self._straighten_processor = StraightenProcessor()
+        self._straighten_params = straighten_params or {}
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -264,6 +268,11 @@ class CombinedAdjustmentCommand(BaseCommand):
         if self._defringe_params:
             result = self._defringe_processor.process(
                 result, **self._defringe_params
+            )
+
+        if self._straighten_params:
+            result = self._straighten_processor.process(
+                result, **self._straighten_params
             )
 
         self._new_image = result

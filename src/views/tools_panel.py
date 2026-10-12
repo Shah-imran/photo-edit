@@ -75,6 +75,7 @@ class ToolsPanel(QWidget):
             'color_nr': 0.0,
             'remove_ca': 0.0,
             'defringe': 0.0,
+            'straighten': 0.0,
         }
         self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
         self._hsl_values: Dict[str, float] = default_hsl_params()
@@ -343,6 +344,26 @@ class ToolsPanel(QWidget):
         )
         content_layout.addWidget(optics_section)
 
+        # Geometry section (Phase I -- Straighten). See
+        # docs/planning/implementation-notes/2026-10-12-straighten.md
+        # section 1 for why this section holds *only* Straighten -- the
+        # full interactive Crop tool, Upright modes, and Distortion/
+        # Scale/Offset controls are explicitly out of scope for this
+        # slice and remain a separate, larger future undertaking.
+        geometry_section, geometry_content_layout = self._create_section("Geometry")
+        self._straighten_slider = AdjustmentSlider(
+            "Straighten", min_value=-45.0, max_value=45.0,
+            default_value=0.0, step=0.1, decimals=1
+        )
+        geometry_content_layout.addWidget(self._straighten_slider)
+        geometry_section.add_header_widget(
+            self._reset_button_for(
+                "Reset Geometry",
+                lambda: self._reset_sliders(self._straighten_slider),
+            )
+        )
+        content_layout.addWidget(geometry_section)
+
         # Reset button
         self._reset_button = QPushButton("Reset All")
         self._reset_button.setStyleSheet("""
@@ -388,6 +409,7 @@ class ToolsPanel(QWidget):
             "Effects": "effects",
             "Detail": "mask",
             "Optics": "transform",
+            "Geometry": "crop",
         }.get(title, "effects")
         section.set_header_icon(line_icon(icon_name))
         section.setProperty("sectionName", title.lower().replace(" ", "_"))
@@ -504,6 +526,9 @@ class ToolsPanel(QWidget):
         self._defringe_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('defringe', v)
         )
+        self._straighten_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('straighten', v)
+        )
 
         # Slider released signals (for final processing)
         self._exposure_slider.slider_released.connect(self._on_slider_released)
@@ -527,6 +552,7 @@ class ToolsPanel(QWidget):
         self._color_nr_slider.slider_released.connect(self._on_slider_released)
         self._remove_ca_slider.slider_released.connect(self._on_slider_released)
         self._defringe_slider.slider_released.connect(self._on_slider_released)
+        self._straighten_slider.slider_released.connect(self._on_slider_released)
 
         self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
@@ -694,6 +720,7 @@ class ToolsPanel(QWidget):
             'color_nr': float(adjustments.get('color_nr', 0.0)),
             'remove_ca': float(adjustments.get('remove_ca', 0.0)),
             'defringe': float(adjustments.get('defringe', 0.0)),
+            'straighten': float(adjustments.get('straighten', 0.0)),
         }
         curve_points = normalize_points(adjustments.get('tone_curve'))
         hsl_values = default_hsl_params()
@@ -737,6 +764,7 @@ class ToolsPanel(QWidget):
             self._color_nr_slider.set_value(merged['color_nr'])
             self._remove_ca_slider.set_value(merged['remove_ca'])
             self._defringe_slider.set_value(merged['defringe'])
+            self._straighten_slider.set_value(merged['straighten'])
             self._curve_editor.set_points(curve_points)
             self._hsl_mixer_panel.set_values(hsl_values)
             self._color_grading_panel.set_values(color_grading_values)
@@ -782,6 +810,7 @@ class ToolsPanel(QWidget):
         self._color_nr_slider.setEnabled(enabled)
         self._remove_ca_slider.setEnabled(enabled)
         self._defringe_slider.setEnabled(enabled)
+        self._straighten_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)
         for button in self._section_reset_buttons:
             button.setEnabled(enabled)
