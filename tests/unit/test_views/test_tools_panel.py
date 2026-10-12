@@ -446,3 +446,23 @@ class TestToolsPanelDehaze:
         panel.set_adjustments({"dehaze": 25.0}, emit_signal=False)
         assert panel.get_adjustments()["dehaze"] == 25.0
         assert received == []
+
+
+class TestToolsPanelVignette:
+    def test_vignette_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._vignette_slider._spin_box.minimum() == -100.0
+        assert panel._vignette_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["vignette"] == 0.0
+        panel._vignette_slider.set_value(-35.0)
+        assert received[-1]["vignette"] == -35.0
+
+    def test_vignette_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"vignette": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["vignette"] == 25.0
+        assert received == []

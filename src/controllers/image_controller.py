@@ -24,6 +24,7 @@ from src.processors.color_grading_processor import (
 from src.processors.texture_processor import TextureProcessor
 from src.processors.clarity_processor import ClarityProcessor
 from src.processors.dehaze_processor import DehazeProcessor
+from src.processors.vignette_processor import VignetteProcessor
 from src.commands.adjustment_commands import (
     CombinedAdjustmentCommand,
     ImageStateChangeCommand,
@@ -103,6 +104,7 @@ class ImageController(QObject):
         "texture": 0.0,
         "clarity": 0.0,
         "dehaze": 0.0,
+        "vignette": 0.0,
     }
     # Tone curve control points are not floats, so they are kept out of
     # _ADJUSTMENT_DEFAULTS (which _normalize_adjustment_state float-casts
@@ -161,6 +163,7 @@ class ImageController(QObject):
         self._texture_processor = TextureProcessor()
         self._clarity_processor = ClarityProcessor()
         self._dehaze_processor = DehazeProcessor()
+        self._vignette_processor = VignetteProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
@@ -173,6 +176,7 @@ class ImageController(QObject):
         self._texture_params: Dict[str, float] = {}
         self._clarity_params: Dict[str, float] = {}
         self._dehaze_params: Dict[str, float] = {}
+        self._vignette_params: Dict[str, float] = {}
 
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
@@ -408,6 +412,7 @@ class ImageController(QObject):
         self._texture_params = {}
         self._clarity_params = {}
         self._dehaze_params = {}
+        self._vignette_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -521,6 +526,8 @@ class ImageController(QObject):
             result = self._clarity_processor.process(result, **self._clarity_params)
         if self._dehaze_params:
             result = self._dehaze_processor.process(result, **self._dehaze_params)
+        if self._vignette_params:
+            result = self._vignette_processor.process(result, **self._vignette_params)
         return result
 
     def refresh_view(self) -> None:
@@ -561,6 +568,7 @@ class ImageController(QObject):
         state.update(self._texture_params)
         state.update(self._clarity_params)
         state.update(self._dehaze_params)
+        state.update(self._vignette_params)
         return state
 
     def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
@@ -617,6 +625,7 @@ class ImageController(QObject):
         self._texture_params = {"texture": normalized["texture"]}
         self._clarity_params = {"clarity": normalized["clarity"]}
         self._dehaze_params = {"dehaze": normalized["dehaze"]}
+        self._vignette_params = {"vignette": normalized["vignette"]}
 
         if not self.has_image():
             return
@@ -653,6 +662,7 @@ class ImageController(QObject):
         result = self._texture_processor.process(result, **self._texture_params)
         result = self._clarity_processor.process(result, **self._clarity_params)
         result = self._dehaze_processor.process(result, **self._dehaze_params)
+        result = self._vignette_processor.process(result, **self._vignette_params)
         self._image_model.current_image = result
         self.refresh_view()
 
@@ -670,6 +680,7 @@ class ImageController(QObject):
         self._texture_params = {}
         self._clarity_params = {}
         self._dehaze_params = {}
+        self._vignette_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._final_render_timer.stop()
@@ -757,6 +768,7 @@ class ImageController(QObject):
         texture_params: Dict[str, float] = None,
         clarity_params: Dict[str, float] = None,
         dehaze_params: Dict[str, float] = None,
+        vignette_params: Dict[str, float] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -806,6 +818,8 @@ class ImageController(QObject):
             self._clarity_params = clarity_params
         if dehaze_params:
             self._dehaze_params = dehaze_params
+        if vignette_params:
+            self._vignette_params = vignette_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -822,6 +836,7 @@ class ImageController(QObject):
                         texture_params=self._texture_params,
                         clarity_params=self._clarity_params,
                         dehaze_params=self._dehaze_params,
+                        vignette_params=self._vignette_params,
                     )
                 )
             else:
@@ -838,6 +853,7 @@ class ImageController(QObject):
                         texture_params=self._texture_params,
                         clarity_params=self._clarity_params,
                         dehaze_params=self._dehaze_params,
+                        vignette_params=self._vignette_params,
                         interactive_preview=True,
                     )
                 )
@@ -857,6 +873,7 @@ class ImageController(QObject):
                 texture_params=self._texture_params,
                 clarity_params=self._clarity_params,
                 dehaze_params=self._dehaze_params,
+                vignette_params=self._vignette_params,
             )
             self._history_service.execute_command(command)
         else:
@@ -904,6 +921,9 @@ class ImageController(QObject):
 
             if self._dehaze_params:
                 result = self._dehaze_processor.process(result, **self._dehaze_params)
+
+            if self._vignette_params:
+                result = self._vignette_processor.process(result, **self._vignette_params)
 
             self._image_model.current_image = result
 
@@ -965,6 +985,7 @@ class ImageController(QObject):
         texture_params = {"texture": adjustments.get("texture", 0.0)}
         clarity_params = {"clarity": adjustments.get("clarity", 0.0)}
         dehaze_params = {"dehaze": adjustments.get("dehaze", 0.0)}
+        vignette_params = {"vignette": adjustments.get("vignette", 0.0)}
 
         # Store params
         self._exposure_params = exposure_params
@@ -974,6 +995,7 @@ class ImageController(QObject):
         self._texture_params = texture_params
         self._clarity_params = clarity_params
         self._dehaze_params = dehaze_params
+        self._vignette_params = vignette_params
 
         if self._use_threading and self._debouncer is not None:
             # Use throttled + debounced async processing. The curve and
@@ -992,6 +1014,7 @@ class ImageController(QObject):
                 'texture': self._texture_params,
                 'clarity': self._clarity_params,
                 'dehaze': self._dehaze_params,
+                'vignette': self._vignette_params,
             })
             mode = "debounced-threaded"
         else:
@@ -1007,6 +1030,7 @@ class ImageController(QObject):
                 self._texture_params,
                 self._clarity_params,
                 self._dehaze_params,
+                self._vignette_params,
                 add_to_history=False,
             )
             mode = "sync-fallback"
@@ -1066,6 +1090,7 @@ class ImageController(QObject):
                 'texture': self._texture_params,
                 'clarity': self._clarity_params,
                 'dehaze': self._dehaze_params,
+                'vignette': self._vignette_params,
             })
         else:
             self.apply_adjustments(
@@ -1116,6 +1141,7 @@ class ImageController(QObject):
                 'texture': self._texture_params,
                 'clarity': self._clarity_params,
                 'dehaze': self._dehaze_params,
+                'vignette': self._vignette_params,
             })
         else:
             self.apply_adjustments(
@@ -1166,6 +1192,7 @@ class ImageController(QObject):
                 'texture': self._texture_params,
                 'clarity': self._clarity_params,
                 'dehaze': self._dehaze_params,
+                'vignette': self._vignette_params,
             })
         else:
             self.apply_adjustments(
@@ -1197,6 +1224,7 @@ class ImageController(QObject):
         texture_params = params.get('texture', {})
         clarity_params = params.get('clarity', {})
         dehaze_params = params.get('dehaze', {})
+        vignette_params = params.get('vignette', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
@@ -1208,6 +1236,7 @@ class ImageController(QObject):
             texture_params=texture_params,
             clarity_params=clarity_params,
             dehaze_params=dehaze_params,
+            vignette_params=vignette_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1239,6 +1268,7 @@ class ImageController(QObject):
         texture_params = params.get('texture', {})
         clarity_params = params.get('clarity', {})
         dehaze_params = params.get('dehaze', {})
+        vignette_params = params.get('vignette', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -1253,6 +1283,7 @@ class ImageController(QObject):
             texture_params=texture_params,
             clarity_params=clarity_params,
             dehaze_params=dehaze_params,
+            vignette_params=vignette_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1363,6 +1394,7 @@ class ImageController(QObject):
                 texture_params=self._texture_params,
                 clarity_params=self._clarity_params,
                 dehaze_params=self._dehaze_params,
+                vignette_params=self._vignette_params,
                 interactive_preview=False,
             )
 
@@ -1397,6 +1429,7 @@ class ImageController(QObject):
             any(v != 0 for v in self._texture_params.values()) or
             any(v != 0 for v in self._clarity_params.values()) or
             any(v != 0 for v in self._dehaze_params.values()) or
+            any(v != 0 for v in self._vignette_params.values()) or
             not is_identity_curve(self._curve_params.get("points"))
         )
 
@@ -1422,6 +1455,7 @@ class ImageController(QObject):
             texture_params=self._texture_params,
             clarity_params=self._clarity_params,
             dehaze_params=self._dehaze_params,
+            vignette_params=self._vignette_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -1476,6 +1510,7 @@ class ImageController(QObject):
                 texture_params=self._texture_params.copy(),
                 clarity_params=self._clarity_params.copy(),
                 dehaze_params=self._dehaze_params.copy(),
+                vignette_params=self._vignette_params.copy(),
             )
             self._history_service.execute_command(command)
 

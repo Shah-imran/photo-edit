@@ -438,3 +438,33 @@ class TestProcessingWorkerDehaze:
             request_id=1, dehaze_params={"dehaze": 0.0}, use_proxy=False
         ))
         assert calls == []
+
+
+class TestProcessingWorkerVignette:
+    def test_vignette_params_reach_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._vignette_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1, vignette_params={"vignette": 40.0}, use_proxy=False
+        ))
+        assert calls == [{"vignette": 40.0}]
+
+    def test_zero_vignette_skips_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._vignette_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1, vignette_params={"vignette": 0.0}, use_proxy=False
+        ))
+        assert calls == []

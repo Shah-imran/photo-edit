@@ -25,6 +25,7 @@ from src.processors.tonal_processor import TonalProcessor
 from src.processors.texture_processor import TextureProcessor
 from src.processors.clarity_processor import ClarityProcessor
 from src.processors.dehaze_processor import DehazeProcessor
+from src.processors.vignette_processor import VignetteProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils.color_pipeline import LinearImage
 
@@ -87,6 +88,7 @@ class ProcessingWorker(QObject):
         self._texture_processor = TextureProcessor()
         self._clarity_processor = ClarityProcessor()
         self._dehaze_processor = DehazeProcessor()
+        self._vignette_processor = VignetteProcessor()
 
         # Thread control
         self._running = False
@@ -158,6 +160,7 @@ class ProcessingWorker(QObject):
         texture_params: Optional[Dict[str, float]] = None,
         clarity_params: Optional[Dict[str, float]] = None,
         dehaze_params: Optional[Dict[str, float]] = None,
+        vignette_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -188,6 +191,7 @@ class ProcessingWorker(QObject):
             texture_params=texture_params,
             clarity_params=clarity_params,
             dehaze_params=dehaze_params,
+            vignette_params=vignette_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -210,6 +214,7 @@ class ProcessingWorker(QObject):
         texture_params: Optional[Dict[str, float]] = None,
         clarity_params: Optional[Dict[str, float]] = None,
         dehaze_params: Optional[Dict[str, float]] = None,
+        vignette_params: Optional[Dict[str, float]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -240,6 +245,7 @@ class ProcessingWorker(QObject):
             texture_params,
             clarity_params,
             dehaze_params,
+            vignette_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -256,6 +262,7 @@ class ProcessingWorker(QObject):
         texture_params: Optional[Dict[str, float]] = None,
         clarity_params: Optional[Dict[str, float]] = None,
         dehaze_params: Optional[Dict[str, float]] = None,
+        vignette_params: Optional[Dict[str, float]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -284,6 +291,7 @@ class ProcessingWorker(QObject):
             texture_params,
             clarity_params,
             dehaze_params,
+            vignette_params,
             use_proxy=False,
         )
     
@@ -393,6 +401,7 @@ class ProcessingWorker(QObject):
                 request.texture_params,
                 request.clarity_params,
                 request.dehaze_params,
+                request.vignette_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -467,6 +476,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.texture_params.items())),
             tuple(sorted(request.clarity_params.items())),
             tuple(sorted(request.dehaze_params.items())),
+            tuple(sorted(request.vignette_params.items())),
         )
 
     @staticmethod
@@ -483,6 +493,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.texture_params.items())),
             tuple(sorted(request.clarity_params.items())),
             tuple(sorted(request.dehaze_params.items())),
+            tuple(sorted(request.vignette_params.items())),
         )
 
     def _apply_adjustments(
@@ -498,6 +509,7 @@ class ProcessingWorker(QObject):
         texture_params: Optional[Dict[str, float]] = None,
         clarity_params: Optional[Dict[str, float]] = None,
         dehaze_params: Optional[Dict[str, float]] = None,
+        vignette_params: Optional[Dict[str, float]] = None,
     ) -> LinearImage:
         """Apply exposure, tonal, white balance, curve, color, HSL mixer,
         and Color Grading adjustments to a ``LinearImage``."""
@@ -568,11 +580,17 @@ class ProcessingWorker(QObject):
             result = self._dehaze_processor.process(result, **dehaze_params)
             dehaze_ms = _elapsed_ms(dehaze_start)
 
+        vignette_ms = 0.0
+        if vignette_params and vignette_params.get("vignette", 0.0) != 0.0:
+            vignette_start = perf_counter()
+            result = self._vignette_processor.process(result, **vignette_params)
+            vignette_ms = _elapsed_ms(vignette_start)
+
         logger.info(
             "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
             "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f hsl_ms=%.2f "
             "color_grading_ms=%.2f texture_ms=%.2f clarity_ms=%.2f dehaze_ms=%.2f "
-            "total_ms=%.2f",
+            "vignette_ms=%.2f total_ms=%.2f",
             image.shape,
             copy_ms,
             exposure_ms,
@@ -585,6 +603,7 @@ class ProcessingWorker(QObject):
             texture_ms,
             clarity_ms,
             dehaze_ms,
+            vignette_ms,
             _elapsed_ms(total_start),
         )
 
