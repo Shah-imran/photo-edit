@@ -519,3 +519,37 @@ class TestToolsPanelSharpening:
         panel._section_reset_buttons[-1].click()
         assert panel.get_adjustments()["sharpening"] == 0.0
         assert panel.get_adjustments()["clarity"] == 40.0
+
+
+class TestToolsPanelLuminanceNR:
+    def test_luminance_nr_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._luminance_nr_slider._spin_box.minimum() == 0.0
+        assert panel._luminance_nr_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["luminance_nr"] == 0.0
+        panel._luminance_nr_slider.set_value(35.0)
+        assert received[-1]["luminance_nr"] == 35.0
+
+    def test_luminance_nr_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"luminance_nr": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["luminance_nr"] == 25.0
+        assert received == []
+
+    def test_luminance_nr_in_detail_section(self, qapp):
+        panel = ToolsPanel()
+        assert "Detail" in panel._sections
+
+    def test_reset_detail_resets_both_sharpening_and_luminance_nr(self, qapp):
+        panel = ToolsPanel()
+        panel._sharpening_slider.set_value(60.0)
+        panel._luminance_nr_slider.set_value(55.0)
+        panel._clarity_slider.set_value(40.0)
+        panel._section_reset_buttons[-1].click()
+        assert panel.get_adjustments()["sharpening"] == 0.0
+        assert panel.get_adjustments()["luminance_nr"] == 0.0
+        assert panel.get_adjustments()["clarity"] == 40.0
