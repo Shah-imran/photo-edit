@@ -398,6 +398,9 @@ class MainWindow(QMainWindow):
         self._filmstrip_view.flag_changed.connect(
             self._library_controller.set_entry_flag
         )
+        self._filmstrip_view.keywords_changed.connect(
+            self._library_controller.set_entry_keywords
+        )
         self._library_view.create_library_requested.connect(
             self._on_create_library_requested
         )

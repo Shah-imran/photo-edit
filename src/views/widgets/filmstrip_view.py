@@ -8,6 +8,7 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -40,6 +41,18 @@ def _normalize_flag(value) -> str:
     return "none"
 
 
+def _normalize_keywords_for_display(value) -> list[str]:
+    """Coerce an incoming keyword list (e.g. from an entry payload) to a
+    plain ``list[str]`` for display purposes. Final normalization/dedup
+    happens on the catalog-service side (see
+    ``library_catalog_service._normalize_keywords``); this local helper
+    just needs to be defensive enough to build a tooltip/pre-filled dialog
+    without raising on missing/malformed data."""
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
 class FilmstripView(QWidget):
     """A compact view of the active library's images."""
 
@@ -47,6 +60,7 @@ class FilmstripView(QWidget):
     favorite_toggled = pyqtSignal(str, bool)
     rating_changed = pyqtSignal(str, int)
     flag_changed = pyqtSignal(str, str)
+    keywords_changed = pyqtSignal(str, list)
     THUMBNAIL_SIZE = QSize(88, 62)
     CELL_SIZE = QSize(104, 78)
 
@@ -268,11 +282,13 @@ class FilmstripView(QWidget):
         favorite = bool(payload.get("favorite", False))
         rating = _clamp_rating(payload.get("rating", 0))
         flag = _normalize_flag(payload.get("flag", "none"))
-        # Rating/flag are surfaced via the tooltip only -- the item TEXT
-        # stays reserved for the existing favorite "★" marker and must not
-        # be repurposed or overwritten here. See
-        # docs/planning/implementation-notes/2026-10-13-ratings.md and
-        # docs/planning/implementation-notes/2026-10-13-pick-reject-flags.md.
+        keywords = _normalize_keywords_for_display(payload.get("keywords", []))
+        # Rating/flag/keywords are surfaced via the tooltip only -- the item
+        # TEXT stays reserved for the existing favorite "★" marker and must
+        # not be repurposed or overwritten here. See
+        # docs/planning/implementation-notes/2026-10-13-ratings.md,
+        # docs/planning/implementation-notes/2026-10-13-pick-reject-flags.md,
+        # and docs/planning/implementation-notes/2026-10-13-keywords.md.
         item.setText("★" if favorite else "")
         tooltip = str(payload.get("tooltip") or Path(str(payload["path"])).name)
         prefix = ("Favorite\n" if favorite else "")
@@ -282,11 +298,14 @@ class FilmstripView(QWidget):
             prefix += "Pick\n"
         elif flag == "reject":
             prefix += "Rejected\n"
+        if keywords:
+            prefix += f"Keywords: {', '.join(keywords)}\n"
         item.setToolTip(prefix + tooltip)
         item.setData(Qt.ItemDataRole.UserRole + 1, payload.get("status"))
         item.setData(Qt.ItemDataRole.UserRole + 2, favorite)
         item.setData(Qt.ItemDataRole.UserRole + 3, rating)
         item.setData(Qt.ItemDataRole.UserRole + 4, flag)
+        item.setData(Qt.ItemDataRole.UserRole + 5, keywords)
 
     def _show_context_menu(self, position) -> None:
         item = self._list.itemAt(position)
@@ -295,6 +314,9 @@ class FilmstripView(QWidget):
         path = item.data(Qt.ItemDataRole.UserRole)
         favorite = bool(item.data(Qt.ItemDataRole.UserRole + 2))
         flag = _normalize_flag(item.data(Qt.ItemDataRole.UserRole + 4))
+        current_keywords = _normalize_keywords_for_display(
+            item.data(Qt.ItemDataRole.UserRole + 5)
+        )
         menu = QMenu(self)
         favorite_action = menu.addAction(
             "Remove from Favorites" if favorite else "Add to Favorites"
@@ -320,6 +342,7 @@ class FilmstripView(QWidget):
         pick_action = menu.addAction("Flag as Pick")
         reject_action = menu.addAction("Flag as Reject")
         remove_flag_action = menu.addAction("Remove Flag") if flag != "none" else None
+        keywords_action = menu.addAction("Edit Keywords...")
         selected = menu.exec(self._list.viewport().mapToGlobal(position))
         if selected is None or not path:
             return
@@ -333,6 +356,17 @@ class FilmstripView(QWidget):
             self.flag_changed.emit(str(path), "reject")
         elif remove_flag_action is not None and selected is remove_flag_action:
             self.flag_changed.emit(str(path), "none")
+        elif selected is keywords_action:
+            text, ok = QInputDialog.getText(
+                self,
+                "Edit Keywords",
+                "Comma-separated keywords:",
+                text=", ".join(current_keywords),
+            )
+            if not ok:
+                return
+            new_keywords = [piece.strip() for piece in text.split(",") if piece.strip()]
+            self.keywords_changed.emit(str(path), new_keywords)
 
     def _placeholder_pixmap(self, missing: bool) -> QPixmap:
         pixmap = QPixmap(self.THUMBNAIL_SIZE)

@@ -312,3 +312,142 @@ class TestLibraryCatalogService:
         )
 
         assert entry.flag == "none"
+
+    def test_keywords_state_survives_reload(
+        self, library_catalog_path, sample_image_path
+    ):
+        first = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = first.get_current_library_id()
+        first.add_entries(library_id, [sample_image_path])
+        first.set_entry_keywords(library_id, sample_image_path, ["Sunset", "beach"])
+
+        reloaded = LibraryCatalogService(catalog_path=library_catalog_path)
+        assert reloaded.get_entry(library_id, sample_image_path).keywords == [
+            "Sunset",
+            "beach",
+        ]
+
+    def test_keywords_default_to_empty_list_for_new_entries(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+
+        assert service.get_entry(library_id, sample_image_path).keywords == []
+
+    def test_set_entry_keywords_is_a_no_op_when_unchanged(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        service.set_entry_keywords(library_id, sample_image_path, ["sunset"])
+        library = service.list_libraries()[0]
+        updated_at_after_first_set = library.updated_at
+
+        service.set_entry_keywords(library_id, sample_image_path, ["sunset"])
+
+        assert library.updated_at == updated_at_after_first_set
+
+    def test_set_entry_keywords_normalizes_on_write(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+
+        service.set_entry_keywords(
+            library_id, sample_image_path, ["Sunset", " sunset ", "", "  ", "Beach"]
+        )
+
+        assert service.get_entry(library_id, sample_image_path).keywords == [
+            "Sunset",
+            "Beach",
+        ]
+
+    def test_keywords_missing_from_old_catalog_payload_defaults_to_empty_list(self):
+        """Catalog files written before this slice lack the "keywords" key
+        entirely; reading them must default cleanly to [] rather than error."""
+        from src.services.library_catalog_service import LibraryEntry
+
+        entry = LibraryEntry.from_dict(
+            {
+                "path": "/photos/old.jpg",
+                "filename": "old.jpg",
+                "added_at": "2024-01-01T00:00:00+00:00",
+                "last_seen_mtime_ns": None,
+                "last_seen_size": None,
+                "status": "available",
+                # No "favorite", "rating", "flag" or "keywords" key at all.
+            }
+        )
+
+        assert entry.favorite is False
+        assert entry.rating == 0
+        assert entry.flag == "none"
+        assert entry.keywords == []
+
+    def test_fresh_library_entries_do_not_share_a_mutable_keywords_list(self):
+        """Regression test for the classic Python mutable-default-argument
+        footgun: ``keywords: list[str] = []`` as a plain default would share
+        ONE list object across every LibraryEntry instance. Confirm
+        ``field(default_factory=list)`` gives each instance its own list."""
+        from src.services.library_catalog_service import LibraryEntry
+
+        first = LibraryEntry(
+            path="/photos/a.jpg",
+            filename="a.jpg",
+            added_at="2024-01-01T00:00:00+00:00",
+            last_seen_mtime_ns=None,
+            last_seen_size=None,
+            status="available",
+        )
+        second = LibraryEntry(
+            path="/photos/b.jpg",
+            filename="b.jpg",
+            added_at="2024-01-01T00:00:00+00:00",
+            last_seen_mtime_ns=None,
+            last_seen_size=None,
+            status="available",
+        )
+
+        first.keywords.append("sunset")
+
+        assert first.keywords == ["sunset"]
+        assert second.keywords == []
+
+    def test_normalize_keywords_rejects_non_list_input(self):
+        from src.services.library_catalog_service import _normalize_keywords
+
+        assert _normalize_keywords(None) == []
+        assert _normalize_keywords("sunset") == []
+        assert _normalize_keywords(42) == []
+        assert _normalize_keywords({"sunset": True}) == []
+
+    def test_normalize_keywords_dedupes_case_insensitively_preserving_first_casing(
+        self,
+    ):
+        from src.services.library_catalog_service import _normalize_keywords
+
+        assert _normalize_keywords(["Sunset", "sunset", "SUNSET", "Beach"]) == [
+            "Sunset",
+            "Beach",
+        ]
+
+    def test_normalize_keywords_drops_whitespace_only_and_empty_entries(self):
+        from src.services.library_catalog_service import _normalize_keywords
+
+        assert _normalize_keywords(["sunset", "", "   ", "beach"]) == [
+            "sunset",
+            "beach",
+        ]
+
+    def test_normalize_keywords_preserves_insertion_order(self):
+        from src.services.library_catalog_service import _normalize_keywords
+
+        assert _normalize_keywords(["zebra", "alpha", "mango"]) == [
+            "zebra",
+            "alpha",
+            "mango",
+        ]

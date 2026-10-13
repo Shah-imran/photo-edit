@@ -370,6 +370,113 @@ def test_filmstrip_context_menu_remove_flag_absent_when_unflagged(qapp, qtbot):
     assert "Remove Flag" not in seen_action_texts
 
 
+def test_filmstrip_keywords_appear_in_tooltip_only_and_leave_text_alone(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    keyworded = _entry("C:/photos/zebra.jpg")
+    keyworded["keywords"] = ["sunset", "beach"]
+    unkeyworded = _entry("C:/photos/alpha.jpg")
+    strip.set_entries([keyworded, unkeyworded])
+
+    keyworded_item = strip._item_by_path["C:/photos/zebra.jpg"]
+    unkeyworded_item = strip._item_by_path["C:/photos/alpha.jpg"]
+
+    # Keywords never touch the item TEXT -- that's reserved for favorite.
+    assert keyworded_item.text() == ""
+    assert keyworded_item.toolTip() == "Keywords: sunset, beach\nC:/photos/zebra.jpg"
+    assert keyworded_item.data(Qt.ItemDataRole.UserRole + 5) == ["sunset", "beach"]
+
+    # Empty keywords add nothing to the tooltip.
+    assert unkeyworded_item.toolTip() == "C:/photos/alpha.jpg"
+    assert unkeyworded_item.data(Qt.ItemDataRole.UserRole + 5) == []
+
+
+def test_filmstrip_favorite_rating_flag_and_keywords_all_show_in_tooltip_together(
+    qapp, qtbot
+):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    entry = _entry("C:/photos/zebra.jpg")
+    entry["favorite"] = True
+    entry["rating"] = 5
+    entry["flag"] = "pick"
+    entry["keywords"] = ["sunset"]
+    strip.set_entries([entry])
+
+    item = strip._item_by_path["C:/photos/zebra.jpg"]
+    assert item.text() == "★"
+    assert (
+        item.toolTip()
+        == "Favorite\nRating: ★★★★★\nPick\nKeywords: sunset\nC:/photos/zebra.jpg"
+    )
+
+
+def test_filmstrip_context_menu_edit_keywords_prefills_dialog_and_emits_parsed_list(
+    qapp, qtbot
+):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QInputDialog, QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    entry = _entry("C:/photos/one.jpg")
+    entry["keywords"] = ["sunset", "beach"]
+    strip.set_entries([entry])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text() == "Edit Keywords...":
+                return action
+        return None
+
+    captured_kwargs = {}
+
+    def fake_get_text(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return "sunset, mountain, , beach ", True
+
+    with patch.object(QMenu, "exec", fake_exec), patch.object(
+        QInputDialog, "getText", staticmethod(fake_get_text)
+    ):
+        with qtbot.waitSignal(strip.keywords_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert captured_kwargs.get("text") == "sunset, beach"
+    assert blocker.args == ["C:/photos/one.jpg", ["sunset", "mountain", "beach"]]
+
+
+def test_filmstrip_context_menu_edit_keywords_cancel_emits_nothing(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QInputDialog, QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg")])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text() == "Edit Keywords...":
+                return action
+        return None
+
+    def fake_get_text(*_args, **_kwargs):
+        return "sunset, beach", False
+
+    received = []
+    strip.keywords_changed.connect(lambda *args: received.append(args))
+
+    with patch.object(QMenu, "exec", fake_exec), patch.object(
+        QInputDialog, "getText", staticmethod(fake_get_text)
+    ):
+        strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert received == []
+
+
 def test_filmstrip_context_menu_set_rating_emits_rating_changed(qapp, qtbot):
     from unittest.mock import patch
 

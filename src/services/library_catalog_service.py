@@ -51,6 +51,7 @@ class LibraryEntry:
     favorite: bool = False
     rating: int = 0
     flag: str = "none"
+    keywords: list[str] = field(default_factory=list)
 
     @property
     def normalized_path(self) -> str:
@@ -69,6 +70,7 @@ class LibraryEntry:
             "favorite": self.favorite,
             "rating": self.rating,
             "flag": self.flag,
+            "keywords": self.keywords,
         }
 
     @classmethod
@@ -85,6 +87,7 @@ class LibraryEntry:
             favorite=bool(payload.get("favorite", False)),
             rating=_clamp_rating(payload.get("rating", 0)),
             flag=_normalize_flag(payload.get("flag", "none")),
+            keywords=_normalize_keywords(payload.get("keywords", [])),
         )
 
 
@@ -184,6 +187,34 @@ def _normalize_flag(value) -> str:
     if value in ("pick", "reject"):
         return value
     return "none"
+
+
+def _normalize_keywords(value) -> list[str]:
+    """Coerce a persisted/incoming keyword list to a clean ``list[str]``.
+
+    Defensive against corrupt or old-format catalog data the same way
+    ``_optional_dict``/``_clamp_rating``/``_normalize_flag`` defend their
+    own fields -- never raises. A non-list ``value`` (missing key, ``None``,
+    a stray string/int/dict) normalizes to ``[]``. Otherwise, each item is
+    coerced to ``str``, stripped of surrounding whitespace, and empty
+    strings are dropped. Duplicates are removed case-insensitively (so
+    "Sunset" and "sunset" collapse to one entry) while preserving the
+    first-seen casing/spelling and insertion order.
+    """
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    return cleaned
 
 
 class LibraryCatalogService:
@@ -401,6 +432,27 @@ class LibraryCatalogService:
         if entry.flag == flag:
             return entry
         entry.flag = flag
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def set_entry_keywords(
+        self, library_id: str, path: str, keywords: list[str]
+    ) -> LibraryEntry:
+        """Persist a list of free-text keywords for an entry.
+
+        Normalizes (strips/drops empties/case-insensitively dedupes while
+        preserving first-seen casing and order) rather than raising on
+        malformed input -- mirrors ``set_entry_rating``/``set_entry_flag``'s
+        clamp/normalize style for the same reasons (see
+        ``_normalize_keywords``).
+        """
+        library = self._require_library(library_id)
+        entry = self._require_entry(library, path)
+        keywords = _normalize_keywords(keywords)
+        if entry.keywords == keywords:
+            return entry
+        entry.keywords = keywords
         library.updated_at = _utc_now_iso()
         self._save_catalog()
         return entry
