@@ -91,7 +91,7 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | 7 | Partial | [`export_dialog.py`](../../src/views/export_dialog.py) exists; sidebar richness vs PDF Sec.7 unknown. |
 | 8 | Gap | No dedicated search panel (PDF Sec.8). |
 | 9 | Partial | Right adjustments dock + central viewer exist; bottom **filmstrip** and full **tool icon rail** not matching PDF Sec.9. |
-| 10 | Gap | No profile/preset system. |
+| 10 | Partial | Built-in profile selector ([`builtin_profiles.py`](../../src/models/builtin_profiles.py)) + single-file JSON preset export/import (File menu); no browsable on-disk preset library, no LUT-based presets. |
 | 11 | Partial | Exposure, Contrast exist; **Brightness** (non-LR) instead of full LR Basic; missing Highlights, Shadows, Whites, Blacks. |
 | 12 | Gap | No curve or histogram-in-curve. |
 | 13 | Partial | Saturation, Vibrance; no Temperature/Tint or WB presets. |
@@ -154,7 +154,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 ### Phase D -- Profiles and presets (PDF 10)
 
 - Profile selector (start with built-in looks analogous to Adobe Standard / Monochrome / etc.) -- **Done** (see docs/planning/implementation-notes/2026-10-13-profile-selector.md).
-- **Import presets** subset (e.g. JSON or LUT-based) -- full "Import Profiles & Presets" parity can grow incrementally.
+- Import presets subset (e.g. JSON or LUT-based) -- full "Import Profiles & Presets" parity can grow incrementally. -- **Done** (see docs/planning/implementation-notes/2026-10-13-import-export-presets.md).
 
 ### Phase E -- Light, Tone curve, Color (PDF 11-13)
 

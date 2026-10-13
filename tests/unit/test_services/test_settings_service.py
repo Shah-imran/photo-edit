@@ -32,6 +32,9 @@ class TestSettingsServiceDefaults:
     def test_default_last_export_dir_is_home(self, service):
         assert service.get_last_export_dir() == str(Path.home())
 
+    def test_default_last_preset_dir_is_home(self, service):
+        assert service.get_last_preset_dir() == str(Path.home())
+
     def test_default_window_geometry_is_none(self, service):
         assert service.get_window_geometry() is None
 
@@ -101,6 +104,37 @@ class TestSettingsServiceLastExportDir:
         service.set_last_open_dir(str(opens))
         service.set_last_export_dir(str(exports))
         assert service.get_last_open_dir() == str(opens)
+        assert service.get_last_export_dir() == str(exports)
+
+
+class TestSettingsServiceLastPresetDir:
+    """Round-trip tests for get/set_last_preset_dir, mirroring last_export_dir."""
+
+    def test_set_and_get_with_directory(self, service, tmp_path):
+        service.set_last_preset_dir(str(tmp_path))
+        assert service.get_last_preset_dir() == str(tmp_path)
+
+    def test_set_with_file_path_stores_parent(self, service, tmp_path):
+        file_path = tmp_path / "my.json"
+        file_path.touch()
+        service.set_last_preset_dir(str(file_path))
+        assert service.get_last_preset_dir() == str(tmp_path)
+
+    def test_get_falls_back_to_home_when_stored_dir_missing(self, service, tmp_path):
+        ghost = tmp_path / "transient-preset"
+        ghost.mkdir()
+        service.set_last_preset_dir(str(ghost))
+        ghost.rmdir()
+        assert service.get_last_preset_dir() == str(Path.home())
+
+    def test_preset_and_export_keys_are_independent(self, service, tmp_path):
+        presets = tmp_path / "presets"
+        exports = tmp_path / "exports"
+        presets.mkdir()
+        exports.mkdir()
+        service.set_last_preset_dir(str(presets))
+        service.set_last_export_dir(str(exports))
+        assert service.get_last_preset_dir() == str(presets)
         assert service.get_last_export_dir() == str(exports)
 
 

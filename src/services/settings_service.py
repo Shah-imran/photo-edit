@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 _KEY_LAST_OPEN_DIR = "paths/last_open_dir"
 _KEY_LAST_EXPORT_DIR = "paths/last_export_dir"
+_KEY_LAST_PRESET_DIR = "paths/last_preset_dir"
 _KEY_WINDOW_GEOMETRY = "window/geometry"
 _KEY_WINDOW_STATE = "window/state"
 _KEY_CURRENT_IMAGE_PATH = "session/current_image_path"
@@ -92,6 +93,22 @@ class SettingsService:
     def set_last_export_dir(self, path: str) -> None:
         """Persist the last export directory (file path or directory)."""
         self._set_dir(_KEY_LAST_EXPORT_DIR, path)
+
+    def get_last_preset_dir(self) -> str:
+        """Return the last directory used for Export/Import Preset dialogs.
+
+        Kept as its own key rather than sharing ``get_last_export_dir``:
+        a user's preset files (small, hand-authored JSON) commonly live
+        in a different place than their exported images (large JPEG/PNG
+        output), e.g. a dedicated "presets" folder kept alongside a
+        project rather than next to rendered exports. Same fallback
+        semantics as :meth:`get_last_open_dir`.
+        """
+        return self._get_existing_dir(_KEY_LAST_PRESET_DIR)
+
+    def set_last_preset_dir(self, path: str) -> None:
+        """Persist the last Export/Import Preset directory (file or dir)."""
+        self._set_dir(_KEY_LAST_PRESET_DIR, path)
 
     def get_window_geometry(self) -> Optional[bytes]:
         """Return the saved ``QMainWindow.saveGeometry()`` blob, or ``None``."""

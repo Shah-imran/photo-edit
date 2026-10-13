@@ -1,6 +1,7 @@
 """Main window for PhotoEdit application."""
 
 import copy
+import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -25,6 +26,13 @@ from PyQt6.QtGui import QKeySequence, QAction
 
 
 logger = logging.getLogger(__name__)
+
+# Preset file envelope: see docs/planning/implementation-notes/
+# 2026-10-13-import-export-presets.md section 3 for the full format
+# rationale. ``PRESET_FILE_VERSION`` is bumped only if the envelope shape
+# itself ever changes incompatibly; it is not tied to the app version.
+PRESET_FILE_VERSION = 1
+PRESET_FILE_FILTER = "PhotoEdit Preset (*.json)"
 
 from src.models.builtin_profiles import BUILTIN_PROFILES
 from src.views.image_view import ImageView
@@ -213,6 +221,13 @@ class MainWindow(QMainWindow):
             self._create_action(
                 "Export with &Previous", self._export_with_previous, "Ctrl+Shift+E"
             )
+        )
+        file_menu.addSeparator()
+        file_menu.addAction(
+            self._create_action("Export &Preset...", self._export_preset)
+        )
+        file_menu.addAction(
+            self._create_action("Import Pre&set...", self._import_preset)
         )
         file_menu.addSeparator()
         file_menu.addAction(self._create_action("E&xit", self.close, "Ctrl+Q"))
@@ -854,6 +869,141 @@ class MainWindow(QMainWindow):
         self._image_controller.restore_adjustment_state(state_for_controller)
         self._adjustment_persist_timer.start()
         self._status_bar.showMessage(f"Applied profile: {profile_name}", 2000)
+
+    def _export_preset(self) -> None:
+        """Export the current image's adjustment state as a preset file.
+
+        Single-file export of one user-authored preset (analogous to
+        saving a Lightroom .xmp preset) -- NOT a browsable, persistent
+        preset library. See docs/planning/implementation-notes/
+        2026-10-13-import-export-presets.md section 1 for the full scope
+        boundary. Reuses ``ImageController.get_adjustment_state()`` --
+        the same whole-state dict used by Copy Edit Settings and already
+        persisted per image -- wrapped in a small versioned JSON envelope.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to export a preset from", 2000)
+            return
+
+        default_name = "preset.json"
+        source_path = self._image_controller.image_model.file_path or ""
+        if source_path:
+            default_name = f"{Path(source_path).stem}_preset.json"
+        start_dir = self._settings_service.get_last_preset_dir()
+        default_path = str(Path(start_dir) / default_name)
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Preset", default_path, PRESET_FILE_FILTER
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+
+        if not confirm_overwrite_if_needed(self, path, self._settings_service):
+            self._status_bar.showMessage("Export preset cancelled", 2000)
+            return
+
+        preset_name = Path(path).stem
+        envelope = {
+            "photoedit_preset_version": PRESET_FILE_VERSION,
+            "name": preset_name,
+            "adjustments": self._image_controller.get_adjustment_state(),
+        }
+
+        try:
+            Path(path).write_text(json.dumps(envelope, indent=2), encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Failed to write preset file %s: %s", path, exc)
+            QMessageBox.critical(
+                self, "Export Preset Failed", f"Failed to write preset file:\n{exc}"
+            )
+            return
+
+        self._settings_service.set_last_preset_dir(path)
+        self._status_bar.showMessage(f"Exported preset: {preset_name}", 2000)
+
+    def _import_preset(self) -> None:
+        """Import a preset file and apply it to the current image.
+
+        Mirrors ``_apply_profile``/``_paste_edit_settings``'s exact
+        "replace the current image's entire adjustment state" pattern,
+        with a user-chosen preset file as the source instead of a
+        built-in profile or the in-memory clipboard. The file's content
+        is arbitrary, user-supplied data -- every parsing/validation step
+        below is defensive and reports a clear message rather than
+        letting a malformed file crash the app or partially apply.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to apply a preset to", 2000)
+            return
+
+        start_dir = self._settings_service.get_last_preset_dir()
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Preset", start_dir, PRESET_FILE_FILTER
+        )
+        if not path:
+            return
+
+        try:
+            raw_text = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Failed to read preset file %s: %s", path, exc)
+            QMessageBox.critical(
+                self, "Import Preset Failed", f"Failed to read preset file:\n{exc}"
+            )
+            return
+
+        try:
+            envelope = json.loads(raw_text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            QMessageBox.warning(
+                self,
+                "Import Preset Failed",
+                f"This file is not a valid preset (not valid JSON):\n{exc}",
+            )
+            return
+
+        if not isinstance(envelope, dict):
+            QMessageBox.warning(
+                self,
+                "Import Preset Failed",
+                "This file is not a valid preset (expected a JSON object).",
+            )
+            return
+
+        version = envelope.get("photoedit_preset_version")
+        if version != PRESET_FILE_VERSION:
+            if isinstance(version, int) and version > PRESET_FILE_VERSION:
+                message = (
+                    "This preset was made with a newer version of PhotoEdit "
+                    "and cannot be imported here."
+                )
+            else:
+                message = "This file is not a recognized PhotoEdit preset."
+            QMessageBox.warning(self, "Import Preset Failed", message)
+            return
+
+        adjustments = envelope.get("adjustments")
+        if not isinstance(adjustments, dict):
+            QMessageBox.warning(
+                self,
+                "Import Preset Failed",
+                "This preset file is missing its adjustment data.",
+            )
+            return
+
+        preset_name = envelope.get("name")
+        if not isinstance(preset_name, str) or not preset_name:
+            preset_name = Path(path).stem
+
+        state_for_tools_panel = copy.deepcopy(adjustments)
+        state_for_controller = copy.deepcopy(adjustments)
+        self._tools_panel.set_adjustments(state_for_tools_panel, emit_signal=False)
+        self._image_controller.restore_adjustment_state(state_for_controller)
+        self._adjustment_persist_timer.start()
+        self._settings_service.set_last_preset_dir(path)
+        self._status_bar.showMessage(f"Imported preset: {preset_name}", 2000)
 
     def _show_preferences(self) -> None:
         """Open the Preferences dialog."""
