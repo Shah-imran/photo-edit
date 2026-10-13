@@ -294,6 +294,17 @@ class LibraryController(QObject):
         self._emit_libraries()
         self._rebuild_entries_for_current_library()
 
+    def set_entry_captured_at(self, file_path: str, captured_at: str) -> None:
+        """Update the user-editable "captured at" timestamp for the
+        current library and refresh its views."""
+        if not self._current_library_id or not file_path:
+            return
+        self._catalog_service.set_entry_captured_at(
+            self._current_library_id, file_path, captured_at
+        )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
     def set_entry_keywords(self, file_path: str, keywords: list[str]) -> None:
         """Update the keyword list for the current library and refresh its views."""
         if not self._current_library_id or not file_path:
@@ -348,6 +359,23 @@ class LibraryController(QObject):
                 continue
             self._catalog_service.set_entry_flag(
                 self._current_library_id, file_path, flag
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entries_captured_at(self, file_paths: list[str], captured_at: str) -> None:
+        """Batch counterpart of ``set_entry_captured_at`` -- sets every
+        given path to the SAME captured-at value (not an offset/shift),
+        refreshing views only once. Useful for a batch of scanned film
+        photos with no EXIF date at all. See docs/planning/
+        implementation-notes/2026-10-13-edit-date-time.md."""
+        if not self._current_library_id or not file_paths:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.set_entry_captured_at(
+                self._current_library_id, file_path, captured_at
             )
         self._emit_libraries()
         self._rebuild_entries_for_current_library()
@@ -555,6 +583,7 @@ class LibraryController(QObject):
             "flag": entry.flag,
             "keywords": entry.keywords,
             "collection_ids": entry.collection_ids,
+            "captured_at": entry.captured_at,
         }
 
         if entry.status != "available":
@@ -640,6 +669,7 @@ class LibraryController(QObject):
             "flag": entry.flag,
             "keywords": entry.keywords,
             "collection_ids": entry.collection_ids,
+            "captured_at": entry.captured_at,
         }
         if library_id == self._current_library_id:
             self.entry_thumbnail_updated.emit(file_path, payload)

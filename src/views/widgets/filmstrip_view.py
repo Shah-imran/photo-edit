@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QDateTime, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QDateTimeEdit,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -62,6 +65,7 @@ class FilmstripView(QWidget):
     rating_changed = pyqtSignal(str, int)
     flag_changed = pyqtSignal(str, str)
     keywords_changed = pyqtSignal(str, list)
+    captured_at_changed = pyqtSignal(str, str)
     collection_membership_toggled = pyqtSignal(str, str, bool)
     new_collection_for_entry_requested = pyqtSignal(str, str)
     # Batch (multi-select) counterparts of the five signals above -- only
@@ -75,6 +79,7 @@ class FilmstripView(QWidget):
     rating_batch_changed = pyqtSignal(list, int)
     flag_batch_changed = pyqtSignal(list, str)
     keywords_batch_added = pyqtSignal(list, list)
+    captured_at_batch_changed = pyqtSignal(list, str)
     collection_batch_added = pyqtSignal(list, str)
     THUMBNAIL_SIZE = QSize(88, 62)
     CELL_SIZE = QSize(104, 78)
@@ -392,6 +397,7 @@ class FilmstripView(QWidget):
         flag = _normalize_flag(payload.get("flag", "none"))
         keywords = _normalize_keywords_for_display(payload.get("keywords", []))
         collection_ids = _normalize_keywords_for_display(payload.get("collection_ids", []))
+        captured_at = str(payload.get("captured_at") or "")
         # Rating/flag/keywords are surfaced via the tooltip only -- the item
         # TEXT stays reserved for the existing favorite "★" marker and must
         # not be repurposed or overwritten here. See
@@ -416,6 +422,44 @@ class FilmstripView(QWidget):
         item.setData(Qt.ItemDataRole.UserRole + 4, flag)
         item.setData(Qt.ItemDataRole.UserRole + 5, keywords)
         item.setData(Qt.ItemDataRole.UserRole + 6, collection_ids)
+        item.setData(Qt.ItemDataRole.UserRole + 7, captured_at)
+
+    def _prompt_for_captured_at(self, current_value: str) -> tuple[str | None, bool]:
+        """Show a small ``QDateTimeEdit``-based dialog for the "Edit Date &
+        Time..." context-menu action, pre-filled with ``current_value``
+        (or the current date/time if it's missing/unparseable).
+
+        A ``QDateTimeEdit`` (with a calendar popup) was chosen over a bare
+        ``QInputDialog.getText`` free-text edit -- it needs only a little
+        more code than the text-input approach, and gets input validation
+        for free (the widget simply cannot represent an invalid date/time,
+        unlike a hand-parsed string). It stops well short of a hand-rolled
+        calendar-picker widget: this is one standard Qt widget plus
+        OK/Cancel buttons, nothing custom-painted. Returns
+        ``(new_iso_string, True)`` on OK, or ``(None, False)`` on Cancel.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Date & Time")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Captured at:"))
+        editor = QDateTimeEdit(dialog)
+        editor.setCalendarPopup(True)
+        editor.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        initial = QDateTime.fromString(current_value, Qt.DateFormat.ISODate)
+        if not initial.isValid():
+            initial = QDateTime.currentDateTime()
+        editor.setDateTime(initial)
+        layout.addWidget(editor)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None, False
+        return editor.dateTime().toPyDateTime().isoformat(), True
 
     def _show_context_menu(self, position) -> None:
         item = self._list.itemAt(position)
@@ -442,6 +486,7 @@ class FilmstripView(QWidget):
         current_collection_ids = set(
             _normalize_keywords_for_display(item.data(Qt.ItemDataRole.UserRole + 6))
         )
+        current_captured_at = str(item.data(Qt.ItemDataRole.UserRole + 7) or "")
         menu = QMenu(self)
         favorite_action = menu.addAction(
             "Remove from Favorites" if favorite else "Add to Favorites"
@@ -468,6 +513,7 @@ class FilmstripView(QWidget):
         reject_action = menu.addAction("Flag as Reject")
         remove_flag_action = menu.addAction("Remove Flag") if flag != "none" else None
         keywords_action = menu.addAction("Edit Keywords...")
+        date_time_action = menu.addAction("Edit Date & Time...")
         # "Add to Collection" submenu: one checkable action per existing
         # collection (checked = currently a member) plus a trailing
         # "New Collection..." entry. No existing collection/batch
@@ -512,6 +558,11 @@ class FilmstripView(QWidget):
                 return
             new_keywords = [piece.strip() for piece in text.split(",") if piece.strip()]
             self.keywords_changed.emit(str(path), new_keywords)
+        elif selected is date_time_action:
+            new_captured_at, ok = self._prompt_for_captured_at(current_captured_at)
+            if not ok or not new_captured_at:
+                return
+            self.captured_at_changed.emit(str(path), new_captured_at)
         elif selected in collection_actions:
             collection_id = collection_actions[selected]
             is_member = collection_id in current_collection_ids
@@ -571,6 +622,7 @@ class FilmstripView(QWidget):
         reject_action = menu.addAction(f"Flag as Reject ({count})")
         remove_flag_action = menu.addAction(f"Remove Flag ({count})")
         keywords_action = menu.addAction(f"Add Keywords to {count} Photos...")
+        date_time_action = menu.addAction(f"Edit Date & Time for {count} Photos...")
         collection_menu = menu.addMenu(f"Add to Collection ({count})")
         collection_actions: dict = {}
         for collection in self._collections:
@@ -604,6 +656,11 @@ class FilmstripView(QWidget):
             new_keywords = [piece.strip() for piece in text.split(",") if piece.strip()]
             if new_keywords:
                 self.keywords_batch_added.emit(paths, new_keywords)
+        elif selected is date_time_action:
+            new_captured_at, ok = self._prompt_for_captured_at("")
+            if not ok or not new_captured_at:
+                return
+            self.captured_at_batch_changed.emit(paths, new_captured_at)
         elif selected in collection_actions:
             self.collection_batch_added.emit(paths, collection_actions[selected])
 

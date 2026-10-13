@@ -583,6 +583,88 @@ def test_filmstrip_context_menu_edit_keywords_cancel_emits_nothing(qapp, qtbot):
     assert received == []
 
 
+def test_filmstrip_context_menu_edit_date_time_emits_captured_at_changed(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    entry = _entry("C:/photos/one.jpg")
+    entry["captured_at"] = "2020-01-01T00:00:00"
+    strip.set_entries([entry])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text() == "Edit Date & Time...":
+                return action
+        return None
+
+    captured_prefill = {}
+
+    def fake_prompt(self, current_value):
+        captured_prefill["value"] = current_value
+        return "2022-06-15T08:30:00", True
+
+    with patch.object(QMenu, "exec", fake_exec), patch.object(
+        FilmstripView, "_prompt_for_captured_at", fake_prompt
+    ):
+        with qtbot.waitSignal(strip.captured_at_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert captured_prefill["value"] == "2020-01-01T00:00:00"
+    assert blocker.args == ["C:/photos/one.jpg", "2022-06-15T08:30:00"]
+
+
+def test_filmstrip_context_menu_edit_date_time_cancel_emits_nothing(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg")])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text() == "Edit Date & Time...":
+                return action
+        return None
+
+    def fake_prompt(self, _current_value):
+        return None, False
+
+    received = []
+    strip.captured_at_changed.connect(lambda *args: received.append(args))
+
+    with patch.object(QMenu, "exec", fake_exec), patch.object(
+        FilmstripView, "_prompt_for_captured_at", fake_prompt
+    ):
+        strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert received == []
+
+
+def test_filmstrip_prompt_for_captured_at_rejects_invalid_date_via_widget(qapp, qtbot):
+    """``QDateTimeEdit`` cannot represent an invalid date/time, so an
+    unparseable prefill value simply falls back to the current date/time
+    rather than raising or leaving the dialog's editor blank."""
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QDialog
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+
+    with patch.object(QDialog, "exec", lambda self: QDialog.DialogCode.Accepted):
+        value, ok = strip._prompt_for_captured_at("not-a-real-timestamp")
+
+    assert ok is True
+    assert value  # a valid ISO-8601 string (fell back to "now")
+
+
 def test_filmstrip_context_menu_set_rating_emits_rating_changed(qapp, qtbot):
     from unittest.mock import patch
 
@@ -1045,6 +1127,39 @@ def test_filmstrip_batch_add_keywords_is_additive_only(qapp, qtbot):
     # (preserving "existing") happens controller-side (see
     # LibraryController.add_entries_keywords).
     assert keywords == ["sunset"]
+
+
+def test_filmstrip_batch_edit_date_time_emits_captured_at_batch_changed(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+    one = strip._item_by_path["C:/photos/one.jpg"]
+    two = strip._item_by_path["C:/photos/two.jpg"]
+    one.setSelected(True)
+    two.setSelected(True)
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text().startswith("Edit Date & Time for"):
+                return action
+        return None
+
+    def fake_prompt(self, _current_value):
+        return "2018-03-09T12:00:00", True
+
+    with patch.object(QMenu, "exec", fake_exec), patch.object(
+        FilmstripView, "_prompt_for_captured_at", fake_prompt
+    ):
+        with qtbot.waitSignal(strip.captured_at_batch_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(one).center())
+
+    paths, captured_at = blocker.args
+    assert set(paths) == {"C:/photos/one.jpg", "C:/photos/two.jpg"}
+    assert captured_at == "2018-03-09T12:00:00"
 
 
 def test_filmstrip_batch_add_to_collection_adds_every_selected_item(qapp, qtbot):

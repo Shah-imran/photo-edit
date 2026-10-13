@@ -145,6 +145,30 @@ class TestLibraryController:
         _, entries = rebuilt.args
         assert entries[0]["keywords"] == ["sunset", "beach"]
 
+    def test_set_entry_captured_at_delegates_and_refreshes_entries(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entry_captured_at(sample_image_path, "2021-02-03T04:05:06")
+
+        _, entries = rebuilt.args
+        assert entries[0]["captured_at"] == "2021-02-03T04:05:06"
+
+    def test_set_entries_captured_at_batch_sets_same_value_for_all(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entries_captured_at(paths, "2019-07-04T09:00:00")
+
+        _, entries = rebuilt.args
+        assert {entry["captured_at"] for entry in entries} == {"2019-07-04T09:00:00"}
+
     # -- Collections --------------------------------------------------
     # See docs/planning/implementation-notes/2026-10-13-collections.md.
 

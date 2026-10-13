@@ -506,6 +506,9 @@ class MainWindow(QMainWindow):
         self._filmstrip_view.keywords_changed.connect(
             self._library_controller.set_entry_keywords
         )
+        self._filmstrip_view.captured_at_changed.connect(
+            self._library_controller.set_entry_captured_at
+        )
         self._filmstrip_view.collection_membership_toggled.connect(
             self._library_controller.set_entry_collection_membership
         )
@@ -528,6 +531,9 @@ class MainWindow(QMainWindow):
         )
         self._filmstrip_view.keywords_batch_added.connect(
             self._library_controller.add_entries_keywords
+        )
+        self._filmstrip_view.captured_at_batch_changed.connect(
+            self._library_controller.set_entries_captured_at
         )
         self._filmstrip_view.collection_batch_added.connect(
             self._library_controller.add_entries_to_collection

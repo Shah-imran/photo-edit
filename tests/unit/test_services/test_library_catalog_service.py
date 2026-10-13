@@ -313,6 +313,114 @@ class TestLibraryCatalogService:
 
         assert entry.flag == "none"
 
+    # -- captured_at ----------------------------------------------------
+    # See docs/planning/implementation-notes/2026-10-13-edit-date-time.md.
+
+    def test_captured_at_defaults_to_added_at_for_new_entries(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+
+        entry = service.get_entry(library_id, sample_image_path)
+        assert entry.captured_at == entry.added_at
+
+    def test_captured_at_state_survives_reload(
+        self, library_catalog_path, sample_image_path
+    ):
+        first = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = first.get_current_library_id()
+        first.add_entries(library_id, [sample_image_path])
+        first.set_entry_captured_at(
+            library_id, sample_image_path, "2020-05-17T10:30:00"
+        )
+
+        reloaded = LibraryCatalogService(catalog_path=library_catalog_path)
+        assert (
+            reloaded.get_entry(library_id, sample_image_path).captured_at
+            == "2020-05-17T10:30:00"
+        )
+
+    def test_set_entry_captured_at_is_a_no_op_when_unchanged(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        service.set_entry_captured_at(library_id, sample_image_path, "2020-05-17T10:30:00")
+        library = service.list_libraries()[0]
+        updated_at_after_first_set = library.updated_at
+
+        service.set_entry_captured_at(library_id, sample_image_path, "2020-05-17T10:30:00")
+
+        assert library.updated_at == updated_at_after_first_set
+
+    def test_set_entry_captured_at_falls_back_on_malformed_input(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        service.set_entry_captured_at(library_id, sample_image_path, "2020-05-17T10:30:00")
+
+        result = service.set_entry_captured_at(
+            library_id, sample_image_path, "not-a-real-timestamp"
+        )
+
+        assert result.captured_at == "2020-05-17T10:30:00"
+        assert (
+            service.get_entry(library_id, sample_image_path).captured_at
+            == "2020-05-17T10:30:00"
+        )
+
+    def test_set_entry_captured_at_returns_none_for_unknown_library_or_path(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+
+        assert service.set_entry_captured_at("not-a-library", sample_image_path, "x") is None
+        assert service.set_entry_captured_at(library_id, "/no/such/path.jpg", "x") is None
+
+    def test_captured_at_missing_from_old_catalog_payload_defaults_to_added_at(self):
+        """Catalog files written before this slice lack the "captured_at"
+        key entirely; reading them must default cleanly to added_at
+        rather than error."""
+        from src.services.library_catalog_service import LibraryEntry
+
+        entry = LibraryEntry.from_dict(
+            {
+                "path": "/photos/old.jpg",
+                "filename": "old.jpg",
+                "added_at": "2024-01-01T00:00:00+00:00",
+                "last_seen_mtime_ns": None,
+                "last_seen_size": None,
+                "status": "available",
+                # No "captured_at" key at all -- pre-dates this slice.
+            }
+        )
+
+        assert entry.captured_at == "2024-01-01T00:00:00+00:00"
+
+    def test_captured_at_from_corrupt_payload_falls_back_to_added_at(self):
+        from src.services.library_catalog_service import LibraryEntry
+
+        entry = LibraryEntry.from_dict(
+            {
+                "path": "/photos/old.jpg",
+                "filename": "old.jpg",
+                "added_at": "2024-01-01T00:00:00+00:00",
+                "last_seen_mtime_ns": None,
+                "last_seen_size": None,
+                "status": "available",
+                "captured_at": "definitely-not-a-timestamp",
+            }
+        )
+
+        assert entry.captured_at == "2024-01-01T00:00:00+00:00"
+
     def test_keywords_state_survives_reload(
         self, library_catalog_path, sample_image_path
     ):

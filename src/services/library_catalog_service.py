@@ -53,6 +53,12 @@ class LibraryEntry:
     flag: str = "none"
     keywords: list[str] = field(default_factory=list)
     collection_ids: list[str] = field(default_factory=list)
+    #: User-editable "when this photo was actually taken" timestamp --
+    #: separate from ``added_at`` ("when imported into this library").
+    #: Defaults to ``added_at`` at import time (no real EXIF
+    #: DateTimeOriginal reading exists in this codebase yet -- see
+    #: docs/planning/implementation-notes/2026-10-13-edit-date-time.md).
+    captured_at: str = ""
 
     @property
     def normalized_path(self) -> str:
@@ -73,14 +79,16 @@ class LibraryEntry:
             "flag": self.flag,
             "keywords": self.keywords,
             "collection_ids": self.collection_ids,
+            "captured_at": self.captured_at,
         }
 
     @classmethod
     def from_dict(cls, payload: dict) -> "LibraryEntry":
+        added_at = str(payload.get("added_at", _utc_now_iso()))
         return cls(
             path=str(payload.get("path", "")),
             filename=str(payload.get("filename", "")),
-            added_at=str(payload.get("added_at", _utc_now_iso())),
+            added_at=added_at,
             last_seen_mtime_ns=_optional_int(payload.get("last_seen_mtime_ns")),
             last_seen_size=_optional_int(payload.get("last_seen_size")),
             status=str(payload.get("status", "missing")),
@@ -91,6 +99,9 @@ class LibraryEntry:
             flag=_normalize_flag(payload.get("flag", "none")),
             keywords=_normalize_keywords(payload.get("keywords", [])),
             collection_ids=_normalize_collection_ids(payload.get("collection_ids", [])),
+            # Old catalog files predating this slice lack "captured_at"
+            # entirely; falls back to added_at (see _normalize_captured_at).
+            captured_at=_normalize_captured_at(payload.get("captured_at"), added_at),
         )
 
 
@@ -279,6 +290,34 @@ def _normalize_collection_ids(value) -> list[str]:
         seen.add(text)
         cleaned.append(text)
     return cleaned
+
+
+def _normalize_captured_at(value, fallback: str) -> str:
+    """Coerce a persisted/incoming "captured at" timestamp to a sane
+    ISO-8601 string, never raising on malformed input.
+
+    Unlike ``_clamp_rating``/``_normalize_flag`` (which fall back to one
+    fixed literal for every entry, ``0``/``"none"``), ``captured_at`` has
+    no single universal default -- each entry's own sensible fallback is
+    "whatever its ``added_at`` currently is" (import time), which the
+    caller passes in as ``fallback`` rather than this helper inventing a
+    value of its own. A missing key, ``None``, a non-string value, or a
+    string that does not parse as ISO-8601 (``datetime.fromisoformat``)
+    all fall back to ``fallback`` rather than raising or storing garbage.
+    A well-formed ISO-8601 string is returned unchanged (not
+    re-formatted), so a user-supplied value with, e.g., no timezone
+    offset round-trips exactly as typed -- this app does not impose
+    timezone handling beyond whatever convention ``fallback`` (usually
+    ``added_at``, itself UTC) already implies. See
+    docs/planning/implementation-notes/2026-10-13-edit-date-time.md.
+    """
+    if isinstance(value, str) and value.strip():
+        try:
+            datetime.fromisoformat(value.strip())
+        except ValueError:
+            return fallback
+        return value.strip()
+    return fallback
 
 
 class LibraryCatalogService:
@@ -521,6 +560,40 @@ class LibraryCatalogService:
         self._save_catalog()
         return entry
 
+    def set_entry_captured_at(
+        self, library_id: str, path: str, captured_at: str
+    ) -> Optional[LibraryEntry]:
+        """Persist a user-editable "captured at" timestamp for an entry.
+
+        Unlike ``set_entry_rating``/``set_entry_flag`` (which raise
+        ``KeyError`` via ``_require_library``/``_require_entry`` on an
+        unknown library/path, relying on their one real caller --
+        ``LibraryController`` -- to guard against that first), this
+        follows the more defensive style ``add_entry_to_collection`` uses:
+        an unknown library or path is a no-op returning ``None`` rather
+        than raising, which is the explicit contract this method is
+        documented to have. ``captured_at`` is normalized via
+        ``_normalize_captured_at`` (never raises on a malformed string --
+        falls back to the entry's own current ``captured_at``, itself
+        never empty once an entry exists) before the no-op-if-unchanged/
+        bump-`updated_at`/save sequence every other per-entry setter in
+        this service already uses.
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        try:
+            entry = self._require_entry(library, path)
+        except KeyError:
+            return None
+        normalized = _normalize_captured_at(captured_at, entry.captured_at)
+        if entry.captured_at == normalized:
+            return entry
+        entry.captured_at = normalized
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
     def list_collections(self, library_id: str) -> list[CollectionRecord]:
         """Return the flat list of collections for one library.
 
@@ -750,6 +823,13 @@ class LibraryCatalogService:
             last_seen_mtime_ns=mtime_ns,
             last_seen_size=size,
             status=status,
+            # No real EXIF DateTimeOriginal reading exists in this codebase
+            # (image_service.py only reads EXIF orientation for transpose,
+            # not capture-time metadata) -- deliberately deferred, not
+            # built here. Defaults to added_at, overridable by the user at
+            # any time via set_entry_captured_at(). See
+            # docs/planning/implementation-notes/2026-10-13-edit-date-time.md.
+            captured_at=added_at,
         )
 
     def _refresh_entry(self, entry: LibraryEntry) -> bool:
