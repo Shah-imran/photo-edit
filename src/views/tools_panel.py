@@ -17,9 +17,10 @@ from src.models.builtin_profiles import BUILTIN_PROFILES
 from src.models.wb_presets import WB_PRESETS
 from src.processors.color_grading_processor import default_color_grading_params
 from src.processors.hsl_mixer_processor import default_hsl_params
-from src.utils.curve_math import normalize_points
+from src.utils.curve_math import is_identity_curve, normalize_points
 from src.views.widgets.adjustment_slider import AdjustmentSlider
 from src.views.widgets.color_grading_panel import ColorGradingPanel
+from src.views.widgets.curve_editor import CHANNELS as CURVE_CHANNELS
 from src.views.widgets.curve_editor import CurveEditor
 from src.views.widgets.hsl_mixer_panel import HslMixerPanel
 from src.views.widgets.collapsible_section import CollapsibleSection
@@ -33,8 +34,19 @@ class ToolsPanel(QWidget):
 
     Signals:
         adjustments_changed: Emitted when any (non-curve, non-HSL) adjustment changes
-        curve_changed: Emitted when the tone curve changes (list of [x, y]
-            control points)
+        curve_changed: Emitted when the MASTER tone curve changes (list
+            of [x, y] control points) -- kept to its original payload
+            shape for backward compatibility with existing callers that
+            only ever cared about the one master curve.
+        curve_channel_changed: New in the per-channel curves slice (PDF
+            section 12, Phase E -- see docs/planning/implementation-notes/
+            2026-10-13-per-channel-curves.md). Emitted with
+            ``(channel, points)`` for whichever of the 4 curves
+            ("master"/"red"/"green"/"blue") actually changed, including
+            (redundantly, for "master") every time ``curve_changed``
+            fires. This is the signal ``MainWindow`` wires to
+            ``ImageController.on_curve_changed`` so a per-channel edit is
+            never collapsed into the master curve.
         hsl_changed: Emitted when the HSL Color Mixer changes (24-key flat dict)
         color_grading_changed: Emitted when Color Grading changes (11-key
             flat dict)
@@ -64,6 +76,7 @@ class ToolsPanel(QWidget):
 
     adjustments_changed = pyqtSignal(dict)
     curve_changed = pyqtSignal(list)
+    curve_channel_changed = pyqtSignal(str, list)
     hsl_changed = pyqtSignal(dict)
     color_grading_changed = pyqtSignal(dict)
     slider_released = pyqtSignal()
@@ -111,7 +124,16 @@ class ToolsPanel(QWidget):
             'offset_x': 0.0,
             'offset_y': 0.0,
         }
-        self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
+        # The 4 independent tone curves (master + Red/Green/Blue -- see
+        # docs/planning/implementation-notes/
+        # 2026-10-13-per-channel-curves.md), keyed by channel name
+        # ("master"/"red"/"green"/"blue"). Every pre-existing call site
+        # that used to read/write a single ``self._curve_points`` list
+        # now reads/writes ``self._channel_curve_points["master"]``
+        # instead, keeping its original meaning unchanged.
+        self._channel_curve_points: Dict[str, List[Tuple[float, float]]] = {
+            channel: list(normalize_points(None)) for channel in CURVE_CHANNELS
+        }
         self._hsl_values: Dict[str, float] = default_hsl_params()
         self._color_grading_values: Dict[str, float] = default_color_grading_params()
         self._suppress_adjustment_signal = False
@@ -238,6 +260,17 @@ class ToolsPanel(QWidget):
 
         self._curve_editor = CurveEditor()
         curve_content_layout.addWidget(self._curve_editor)
+        # "Reset Tone Curve" resets only the currently-active channel
+        # (standard curve-editor UX -- Lightroom's own per-channel reset
+        # works the same way); "Reset All Channels" is the secondary
+        # affordance for clearing all 4 curves at once. See
+        # docs/planning/implementation-notes/
+        # 2026-10-13-per-channel-curves.md section 4.
+        curve_section.add_header_widget(
+            self._reset_button_for(
+                "Reset All Channels", self._curve_editor.reset_all_channels
+            )
+        )
         curve_section.add_header_widget(
             self._reset_button_for("Reset Tone Curve", self._curve_editor.reset)
         )
@@ -698,7 +731,20 @@ class ToolsPanel(QWidget):
         self._offset_x_slider.slider_released.connect(self._on_slider_released)
         self._offset_y_slider.slider_released.connect(self._on_slider_released)
 
-        self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
+        # Connected to the channel-aware signal, not the legacy
+        # ``curve_changed`` (which always reports the active channel's
+        # points but without saying which channel that is) -- see
+        # docs/planning/implementation-notes/
+        # 2026-10-13-per-channel-curves.md section 4. A lambda re-orders
+        # the signal's ``(channel, points)`` into
+        # ``_on_curve_editor_changed(points, channel=...)``'s own
+        # ``(points, channel)`` parameter order, which is kept
+        # ``points``-first so every pre-existing direct call (passing
+        # just a points list, with ``channel`` defaulting to "master")
+        # keeps working unchanged.
+        self._curve_editor.channel_curve_changed.connect(
+            lambda channel, points: self._on_curve_editor_changed(points, channel)
+        )
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
 
         self._hsl_mixer_panel.values_changed.connect(self._on_hsl_mixer_changed)
@@ -739,11 +785,27 @@ class ToolsPanel(QWidget):
         self._tint_slider.set_value(preset["tint"])
         self.slider_released.emit()
 
-    def _on_curve_editor_changed(self, points: list):
-        """Handle the tone curve changing (continuous, during drag)."""
-        self._curve_points = [tuple(p) for p in points]
-        if not self._suppress_adjustment_signal:
-            self.curve_changed.emit([list(p) for p in self._curve_points])
+    def _on_curve_editor_changed(self, points: list, channel: str = "master"):
+        """Handle one of the 4 tone curves changing (continuous, during
+        drag).
+
+        ``channel`` defaults to ``"master"`` so existing callers that
+        invoke this directly with just a points list keep editing the
+        master curve exactly as before. The real wiring (see
+        ``_connect_signals``) connects ``CurveEditor.
+        channel_curve_changed`` here instead, which always passes an
+        explicit channel for whichever curve the user is actually
+        editing.
+        """
+        if channel not in self._channel_curve_points:
+            channel = "master"
+        self._channel_curve_points[channel] = [tuple(p) for p in points]
+        if self._suppress_adjustment_signal:
+            return
+        emitted_points = [list(p) for p in self._channel_curve_points[channel]]
+        if channel == "master":
+            self.curve_changed.emit(emitted_points)
+        self.curve_channel_changed.emit(channel, emitted_points)
 
     def _on_curve_editor_released(self):
         """Handle the tone curve gesture being committed."""
@@ -828,14 +890,34 @@ class ToolsPanel(QWidget):
             'tint': self._adjustments['tint'],
         }
 
+    _CURVE_CHANNEL_PARAM_KEYS = {
+        "red": "red_points",
+        "green": "green_points",
+        "blue": "blue_points",
+    }
+
     def get_curve_params(self) -> Dict[str, Any]:
         """Get the tone curve parameters.
 
         Returns:
-            Dictionary with a single ``"points"`` key (list of ``[x, y]``
-            control points).
+            Dictionary with a ``"points"`` key (the master curve's list
+            of ``[x, y]`` control points -- always present, exactly as
+            before this method grew per-channel awareness), optionally
+            joined by ``"red_points"``/``"green_points"``/``"blue_points"``
+            for whichever per-channel curves are currently non-identity
+            (an untouched channel is omitted, matching
+            ``ImageController._curve_params``'s own falsy-skip
+            convention -- see docs/planning/implementation-notes/
+            2026-10-13-per-channel-curves.md section 4).
         """
-        return {'points': [list(p) for p in self._curve_points]}
+        params: Dict[str, Any] = {
+            'points': [list(p) for p in self._channel_curve_points['master']]
+        }
+        for channel, key in self._CURVE_CHANNEL_PARAM_KEYS.items():
+            channel_points = self._channel_curve_points[channel]
+            if not is_identity_curve(channel_points):
+                params[key] = [list(p) for p in channel_points]
+        return params
 
     def update_curve_histogram(self, counts: Optional[Sequence[int]]) -> None:
         """Set the histogram backdrop drawn behind the tone curve."""
@@ -896,7 +978,12 @@ class ToolsPanel(QWidget):
             'offset_x': float(adjustments.get('offset_x', 0.0)),
             'offset_y': float(adjustments.get('offset_y', 0.0)),
         }
-        curve_points = normalize_points(adjustments.get('tone_curve'))
+        curve_points_by_channel = {
+            'master': normalize_points(adjustments.get('tone_curve')),
+            'red': normalize_points(adjustments.get('tone_curve_red')),
+            'green': normalize_points(adjustments.get('tone_curve_green')),
+            'blue': normalize_points(adjustments.get('tone_curve_blue')),
+        }
         hsl_values = default_hsl_params()
         raw_hsl = adjustments.get('hsl')
         if raw_hsl:
@@ -945,18 +1032,26 @@ class ToolsPanel(QWidget):
             self._scale_slider.set_value(merged['scale'])
             self._offset_x_slider.set_value(merged['offset_x'])
             self._offset_y_slider.set_value(merged['offset_y'])
-            self._curve_editor.set_points(curve_points)
+            self._curve_editor.set_all_points(curve_points_by_channel)
             self._hsl_mixer_panel.set_values(hsl_values)
             self._color_grading_panel.set_values(color_grading_values)
         finally:
             self._suppress_adjustment_signal = False
         self._adjustments = merged
-        self._curve_points = list(curve_points)
+        self._channel_curve_points = {
+            channel: list(points) for channel, points in curve_points_by_channel.items()
+        }
         self._hsl_values = hsl_values
         self._color_grading_values = color_grading_values
         if emit_signal:
             self.adjustments_changed.emit(self._adjustments.copy())
-            self.curve_changed.emit([list(p) for p in self._curve_points])
+            for channel in CURVE_CHANNELS:
+                emitted_points = [
+                    list(p) for p in self._channel_curve_points[channel]
+                ]
+                if channel == 'master':
+                    self.curve_changed.emit(emitted_points)
+                self.curve_channel_changed.emit(channel, emitted_points)
             self.hsl_changed.emit(dict(self._hsl_values))
             self.color_grading_changed.emit(dict(self._color_grading_values))
 

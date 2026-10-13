@@ -154,6 +154,21 @@ class ImageController(QObject):
     # every value of) and threaded as a separate, parallel parameter --
     # see docs/planning/implementation-notes/2026-09-29-tone-curve.md.
     _CURVE_DEFAULT_POINTS = DEFAULT_CURVE_POINTS
+    # Per-channel curves (PDF section 12, Phase E -- see
+    # docs/planning/implementation-notes/2026-10-13-per-channel-curves.md):
+    # the master curve's own "points" key, above, is joined by 3 more
+    # OPTIONAL keys inside the same ``_curve_params`` dict, one per
+    # Red/Green/Blue channel. Like "points" itself, each is only present
+    # in ``_curve_params`` when that one channel's curve is non-identity
+    # (the same falsy-skip convention every ``_xxx_params`` field uses),
+    # so ``CurveProcessor.process(**self._curve_params)`` only builds a
+    # LUT for a channel that actually needs one.
+    _CURVE_CHANNEL_KEYS = {
+        "master": "points",
+        "red": "red_points",
+        "green": "green_points",
+        "blue": "blue_points",
+    }
     # The HSL Color Mixer's 24 keys are plain floats, but are kept out of
     # the top-level get_adjustment_state()/_ADJUSTMENT_DEFAULTS contract
     # (nested under one "hsl" key instead) so persistence/exact-dict tests
@@ -838,7 +853,11 @@ class ImageController(QObject):
         Includes four non-flat keys alongside the flat float keys:
         ``"tone_curve"`` (a JSON-plain list of ``[x, y]`` control points --
         see docs/planning/implementation-notes/2026-09-29-tone-curve.md
-        section 4), ``"hsl"`` (a flat 24-key dict for the Color Mixer --
+        section 4; joined by ``"tone_curve_red"``/``"tone_curve_green"``/
+        ``"tone_curve_blue"``, the same JSON-plain shape, one per
+        per-channel curve -- see docs/planning/implementation-notes/
+        2026-10-13-per-channel-curves.md section 4), ``"hsl"`` (a flat
+        24-key dict for the Color Mixer --
         see docs/planning/implementation-notes/2026-09-30-hsl-color-mixer.md
         section 4), ``"color_grading"`` (a flat 11-key dict -- see
         docs/planning/implementation-notes/2026-09-30-color-grading.md
@@ -864,6 +883,18 @@ class ImageController(QObject):
         state.update(self._color_params)
         curve_points = self._curve_params.get("points", self._CURVE_DEFAULT_POINTS)
         state["tone_curve"] = [list(point) for point in curve_points]
+        red_curve_points = self._curve_params.get(
+            "red_points", self._CURVE_DEFAULT_POINTS
+        )
+        state["tone_curve_red"] = [list(point) for point in red_curve_points]
+        green_curve_points = self._curve_params.get(
+            "green_points", self._CURVE_DEFAULT_POINTS
+        )
+        state["tone_curve_green"] = [list(point) for point in green_curve_points]
+        blue_curve_points = self._curve_params.get(
+            "blue_points", self._CURVE_DEFAULT_POINTS
+        )
+        state["tone_curve_blue"] = [list(point) for point in blue_curve_points]
         state["hsl"] = {**self._HSL_DEFAULTS, **self._hsl_params}
         state["color_grading"] = {
             **self._COLOR_GRADING_DEFAULTS,
@@ -912,6 +943,15 @@ class ImageController(QObject):
         curve_points = normalize_points(
             adjustments.get("tone_curve") if adjustments else None
         )
+        red_curve_points = normalize_points(
+            adjustments.get("tone_curve_red") if adjustments else None
+        )
+        green_curve_points = normalize_points(
+            adjustments.get("tone_curve_green") if adjustments else None
+        )
+        blue_curve_points = normalize_points(
+            adjustments.get("tone_curve_blue") if adjustments else None
+        )
         hsl_values = self._normalize_hsl_state(
             adjustments.get("hsl") if adjustments else None
         )
@@ -947,9 +987,16 @@ class ImageController(QObject):
             "saturation": normalized["saturation"],
             "vibrance": normalized["vibrance"],
         }
-        self._curve_params = (
-            {"points": curve_points} if not is_identity_curve(curve_points) else {}
-        )
+        curve_params: Dict[str, Any] = {}
+        if not is_identity_curve(curve_points):
+            curve_params["points"] = curve_points
+        if not is_identity_curve(red_curve_points):
+            curve_params["red_points"] = red_curve_points
+        if not is_identity_curve(green_curve_points):
+            curve_params["green_points"] = green_curve_points
+        if not is_identity_curve(blue_curve_points):
+            curve_params["blue_points"] = blue_curve_points
+        self._curve_params = curve_params
         self._hsl_params = hsl_values
         self._color_grading_params = color_grading_values
         self._texture_params = {"texture": normalized["texture"]}
@@ -982,6 +1029,9 @@ class ImageController(QObject):
         return {
             "normalized": normalized,
             "curve_points": curve_points,
+            "red_curve_points": red_curve_points,
+            "green_curve_points": green_curve_points,
+            "blue_curve_points": blue_curve_points,
             "hsl_values": hsl_values,
             "color_grading_values": color_grading_values,
             "crop_values": crop_values,
@@ -1010,6 +1060,9 @@ class ImageController(QObject):
         applied = self._apply_state_params(adjustments)
         normalized = applied["normalized"]
         curve_points = applied["curve_points"]
+        red_curve_points = applied["red_curve_points"]
+        green_curve_points = applied["green_curve_points"]
+        blue_curve_points = applied["blue_curve_points"]
         hsl_values = applied["hsl_values"]
         color_grading_values = applied["color_grading_values"]
         crop_values = applied["crop_values"]
@@ -1029,6 +1082,9 @@ class ImageController(QObject):
                 for key, default in self._ADJUSTMENT_DEFAULTS.items()
             )
             or not is_identity_curve(curve_points)
+            or not is_identity_curve(red_curve_points)
+            or not is_identity_curve(green_curve_points)
+            or not is_identity_curve(blue_curve_points)
             or any(value != 0.0 for value in hsl_values.values())
             or any(
                 color_grading_values.get(key, 0.0) != default
@@ -1280,7 +1336,11 @@ class ImageController(QObject):
             exposure_params: Exposure adjustment parameters
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
-            curve_params: Tone curve parameters (``{"points": [...]}`)
+            curve_params: Tone curve parameters -- ``{"points": [...]}``
+                for the master curve, optionally joined by
+                ``"red_points"``/``"green_points"``/``"blue_points"`` for
+                the 3 per-channel curves (any channel omitted defaults
+                to identity)
             wb_params: White balance (Temperature/Tint) parameters
             hsl_params: HSL Color Mixer parameters (24-key flat dict)
             color_grading_params: Color Grading parameters (11-key flat dict)
@@ -1740,12 +1800,23 @@ class ImageController(QObject):
             color_params.get("vibrance"),
         )
 
-    def on_curve_changed(self, points: List[Any]) -> None:
+    def on_curve_changed(self, points: List[Any], channel: str = "master") -> None:
         """Handle tone curve changes from the tools panel.
 
         Mirrors :meth:`on_adjustments_changed` but for the tone curve,
         which travels on its own signal/parameter (see
         docs/planning/implementation-notes/2026-09-29-tone-curve.md).
+
+        Args:
+            points: The changed channel's new control points.
+            channel: Which of the 4 curves changed -- ``"master"``
+                (default, for backward compatibility with every existing
+                caller that only ever edited the one master curve),
+                ``"red"``, ``"green"``, or ``"blue"``. Only this one
+                channel's entry in ``self._curve_params`` is touched;
+                every other channel's curve is left exactly as it was.
+                See docs/planning/implementation-notes/
+                2026-10-13-per-channel-curves.md section 4.
         """
         if not self.has_image():
             return
@@ -1760,11 +1831,13 @@ class ImageController(QObject):
             self._final_processing_worker.cancel_pending()
 
         normalized_points = normalize_points(points)
-        self._curve_params = (
-            {"points": normalized_points}
-            if not is_identity_curve(normalized_points)
-            else {}
-        )
+        key = self._CURVE_CHANNEL_KEYS.get(channel, "points")
+        updated_curve_params = dict(self._curve_params)
+        if is_identity_curve(normalized_points):
+            updated_curve_params.pop(key, None)
+        else:
+            updated_curve_params[key] = normalized_points
+        self._curve_params = updated_curve_params
 
         if self._use_threading and self._debouncer is not None:
             self._debouncer.call({
@@ -2409,6 +2482,9 @@ class ImageController(QObject):
             ) or
             any(v != 0 for v in self._straighten_params.values()) or
             not is_identity_curve(self._curve_params.get("points")) or
+            not is_identity_curve(self._curve_params.get("red_points")) or
+            not is_identity_curve(self._curve_params.get("green_points")) or
+            not is_identity_curve(self._curve_params.get("blue_points")) or
             bool(self._crop_params) or
             bool(self._mask_params) or
             bool(self._healing_params)

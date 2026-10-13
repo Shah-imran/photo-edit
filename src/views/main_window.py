@@ -450,7 +450,11 @@ class MainWindow(QMainWindow):
         self._workspace_header.export_requested.connect(self._export_image)
         self._workspace_header.workspace_changed.connect(self._on_workspace_changed)
         self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
-        self._tools_panel.curve_changed.connect(self._on_curve_changed)
+        # Connected to the channel-aware signal (always carries an
+        # explicit channel, including "master"), not the legacy
+        # ``curve_changed`` -- see docs/planning/implementation-notes/
+        # 2026-10-13-per-channel-curves.md section 4.
+        self._tools_panel.curve_channel_changed.connect(self._on_curve_changed)
         self._tools_panel.hsl_changed.connect(self._on_hsl_changed)
         self._tools_panel.color_grading_changed.connect(self._on_color_grading_changed)
         self._tools_panel.slider_released.connect(self._on_slider_released)
@@ -564,9 +568,9 @@ class MainWindow(QMainWindow):
         self._image_controller.on_adjustments_changed(adjustments)
         self._adjustment_persist_timer.start()
 
-    def _on_curve_changed(self, points: list):
-        """Handle tone curve changes from the tools panel."""
-        self._image_controller.on_curve_changed(points)
+    def _on_curve_changed(self, channel: str, points: list):
+        """Handle one of the 4 tone curves changing from the tools panel."""
+        self._image_controller.on_curve_changed(points, channel=channel)
         self._adjustment_persist_timer.start()
 
     def _on_hsl_changed(self, values: dict):
@@ -1593,6 +1597,9 @@ class MainWindow(QMainWindow):
             "saturation": float(values.get("saturation", 0.0)),
             "vibrance": float(values.get("vibrance", 0.0)),
             "tone_curve": values.get("tone_curve"),
+            "tone_curve_red": values.get("tone_curve_red"),
+            "tone_curve_green": values.get("tone_curve_green"),
+            "tone_curve_blue": values.get("tone_curve_blue"),
             "hsl": values.get("hsl"),
             "color_grading": values.get("color_grading"),
         }

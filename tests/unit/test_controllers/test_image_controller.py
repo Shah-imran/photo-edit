@@ -265,6 +265,9 @@ class TestImageController:
             "offset_x": 0.0,
             "offset_y": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_red": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_green": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_blue": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
             "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
@@ -318,6 +321,9 @@ class TestImageController:
             "offset_x": 0.0,
             "offset_y": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_red": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_green": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_blue": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
             "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
@@ -1064,6 +1070,150 @@ class TestImageController:
         assert controller._final_render_timer.isActive() is False
         assert controller._pending_final_request_id == -1
         assert len(fake_debouncer.calls) == 1
+        controller.cleanup()
+
+
+class TestImageControllerPerChannelCurves:
+    """Per-channel (R/G/B) Tone Curve state round-trip (PDF section 12,
+    Phase E) -- mirrors ``TestImageController``'s existing master-curve
+    tests above.
+    """
+
+    def test_get_adjustment_state_includes_identity_channel_keys(self, qapp):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+
+        state = controller.get_adjustment_state()
+
+        assert state["tone_curve_red"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_green"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_blue"] == [[0.0, 0.0], [1.0, 1.0]]
+        controller.cleanup()
+
+    def test_restore_adjustment_state_round_trips_all_four_channels(
+        self, qapp, sample_image
+    ):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {
+                "tone_curve": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]],
+                "tone_curve_red": [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+                "tone_curve_green": [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]],
+                "tone_curve_blue": [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]],
+            }
+        )
+
+        state = controller.get_adjustment_state()
+        assert state["tone_curve"] == [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        assert state["tone_curve_red"] == [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]]
+        assert state["tone_curve_green"] == [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]]
+        assert state["tone_curve_blue"] == [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]]
+        controller.cleanup()
+
+    def test_restore_adjustment_state_tolerates_malformed_channel_curves(
+        self, qapp, sample_image
+    ):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"tone_curve_red": "not a curve", "tone_curve_green": 42}
+        )
+
+        state = controller.get_adjustment_state()
+        assert state["tone_curve_red"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_green"] == [[0.0, 0.0], [1.0, 1.0]]
+        controller.cleanup()
+
+    def test_on_curve_changed_with_channel_only_updates_that_channel(self, qapp):
+        import numpy as np
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image(
+            "sample.jpg", np.full((4, 4, 3), 0.5, dtype=np.float32)
+        )
+
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]], channel="master"
+        )
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], channel="green"
+        )
+
+        state = controller.get_adjustment_state()
+        assert state["tone_curve"] == [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        assert state["tone_curve_green"] == [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]]
+        assert state["tone_curve_red"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_blue"] == [[0.0, 0.0], [1.0, 1.0]]
+        controller.cleanup()
+
+    def test_on_curve_changed_red_only_leaves_green_blue_pixels_untouched(
+        self, qapp
+    ):
+        import numpy as np
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        mid_gray = np.full((4, 4, 3), 0.5, dtype=np.float32)
+        controller._apply_loaded_image("sample.jpg", mid_gray)
+
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.85], [1.0, 1.0]], channel="red"
+        )
+
+        exported = controller.get_export_image()
+        original = controller.image_model.get_original_image()
+        np.testing.assert_allclose(
+            exported[..., 1], original[..., 1], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            exported[..., 2], original[..., 2], atol=1e-6
+        )
+        assert not np.allclose(exported[..., 0], original[..., 0], atol=1e-4)
+        controller.cleanup()
+
+    def test_undo_redo_round_trips_per_channel_curves(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], channel="red"
+        )
+        controller.commit_adjustments()
+        first_red = controller.get_adjustment_state()["tone_curve_red"]
+
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.3], [1.0, 1.0]], channel="red"
+        )
+        controller.commit_adjustments()
+        second_red = controller.get_adjustment_state()["tone_curve_red"]
+        assert second_red != first_red
+
+        controller.undo()
+        assert controller.get_adjustment_state()["tone_curve_red"] == first_red
+
+        controller.redo()
+        assert controller.get_adjustment_state()["tone_curve_red"] == second_red
+        controller.cleanup()
+
+    def test_reset_to_original_clears_all_channel_curves(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_curve_changed([[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], "red")
+        controller.on_curve_changed([[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], "blue")
+
+        controller.reset_to_original()
+
+        state = controller.get_adjustment_state()
+        assert state["tone_curve_red"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_blue"] == [[0.0, 0.0], [1.0, 1.0]]
         controller.cleanup()
 
 

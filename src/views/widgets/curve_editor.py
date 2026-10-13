@@ -12,15 +12,37 @@ itself is computed by :mod:`src.utils.curve_math`, the same module
 ``CurveProcessor`` uses, so the drawn curve and the applied curve are
 always identical (INCREMENTAL_WORKFLOW.md section 5.1: no adjustment math
 in widgets).
+
+Per-channel editing (PDF section 12, Phase E)
+----------------------------------------------
+There are FOUR independent curves -- "master" (RGB) plus "red"/"green"/
+"blue" -- each its own list of ``(x, y)`` control points, defaulting to
+the identity diagonal. A small channel-selector bar ("RGB"/"R"/"G"/"B")
+at the top of the widget switches which one is currently being edited;
+all the existing drag/add/delete/reset interaction keeps working exactly
+as before, just against whichever channel is "active". The other three
+channels' curves are drawn faintly, tinted in their own channel color,
+behind the active curve -- similar to Lightroom's own point-curve editor
+-- so the user can see all four curves at a glance without losing track
+of which one responds to the mouse.
+
+``get_points()``/``set_points()`` keep their original, pre-channel
+meaning: with no ``channel`` argument, they read/write whichever channel
+is currently active (``"master"`` by default, since that is the editor's
+initial active channel) -- this is what lets
+``tests/unit/test_views/test_curve_editor.py`` and
+``tests/unit/test_views/test_tools_panel.py``'s existing master-curve
+assertions keep passing unchanged. ``get_all_points()``/``set_all_points()``
+are the new channel-aware entry points for the other three channels.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPaintEvent, QPen
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from src.utils.curve_math import (
     DEFAULT_CURVE_POINTS,
@@ -32,41 +54,193 @@ from src.utils.curve_math import (
 
 _PICK_RADIUS_PX = 9.0
 _MARGIN_PX = 10.0
+_CHANNEL_BAR_HEIGHT = 26
+
+#: The four editable curves, in the order their selector buttons appear.
+CHANNELS = ("master", "red", "green", "blue")
+
+#: Button/curve-overlay label and tint color for each channel. The active
+#: channel's own curve is always drawn in the usual accent color
+#: (``#0078d4``, see ``_paint_curve``); these are only for the dim,
+#: inactive overlay lines and the selector buttons.
+_CHANNEL_LABELS = {"master": "RGB", "red": "R", "green": "G", "blue": "B"}
+_CHANNEL_COLORS = {
+    "master": QColor(224, 224, 224),
+    "red": QColor(255, 90, 90),
+    "green": QColor(90, 220, 90),
+    "blue": QColor(90, 150, 255),
+}
 
 
 class CurveEditor(QWidget):
-    """Interactive point-curve editor with a histogram backdrop.
+    """Interactive point-curve editor with a histogram backdrop and a
+    channel selector (RGB/R/G/B).
 
     Signals:
-        curve_changed: Emitted with the current points (list of ``[x,
-            y]`` pairs) whenever the curve shape changes, including during
-            a drag.
+        curve_changed: Emitted with the ACTIVE channel's current points
+            (list of ``[x, y]`` pairs) whenever its shape changes,
+            including during a drag. Kept to its original, pre-channel
+            payload shape for backward compatibility.
         curve_released: Emitted once a gesture (drag release, point
             add/delete, or reset) is committed -- the point to trigger a
             full-resolution render, matching ``AdjustmentSlider.
             slider_released``.
+        channel_curve_changed: New in the per-channel slice. Emitted
+            alongside ``curve_changed`` with ``(channel, points)``, so a
+            listener that cares which of the 4 curves actually changed
+            (``ToolsPanel``, for the real multi-channel wiring) doesn't
+            have to guess from ``curve_changed`` alone.
+        active_channel_changed: New in the per-channel slice. Emitted
+            when the user switches the channel selector.
     """
 
     curve_changed = pyqtSignal(list)
     curve_released = pyqtSignal()
+    channel_curve_changed = pyqtSignal(str, list)
+    active_channel_changed = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self._points: List[Point] = list(DEFAULT_CURVE_POINTS)
+        self._channel_points: Dict[str, List[Point]] = {
+            channel: list(DEFAULT_CURVE_POINTS) for channel in CHANNELS
+        }
+        self._active_channel: str = "master"
         self._histogram: Optional[Sequence[int]] = None
         self._dragging_index: Optional[int] = None
-        self.setMinimumHeight(180)
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        self._channel_bar = QWidget(self)
+        self._channel_bar.setFixedHeight(_CHANNEL_BAR_HEIGHT)
+        bar_layout = QHBoxLayout(self._channel_bar)
+        bar_layout.setContentsMargins(0, 0, 0, 4)
+        bar_layout.setSpacing(4)
+        self._channel_buttons: Dict[str, QPushButton] = {}
+        self._channel_button_group = QButtonGroup(self)
+        self._channel_button_group.setExclusive(True)
+        for channel in CHANNELS:
+            button = QPushButton(_CHANNEL_LABELS[channel])
+            button.setCheckable(True)
+            button.setChecked(channel == self._active_channel)
+            button.setFixedHeight(_CHANNEL_BAR_HEIGHT - 4)
+            tint = _CHANNEL_COLORS[channel]
+            button.setStyleSheet(
+                "QPushButton {"
+                f"  color: rgb({tint.red()}, {tint.green()}, {tint.blue()});"
+                "  background-color: #2d2d2d;"
+                "  border: 1px solid #3a3a3a;"
+                "  border-radius: 3px;"
+                "  padding: 1px 8px;"
+                "}"
+                "QPushButton:checked {"
+                "  background-color: #0078d4;"
+                "  color: #ffffff;"
+                "  border: 1px solid #0078d4;"
+                "}"
+            )
+            bar_layout.addWidget(button)
+            self._channel_button_group.addButton(button)
+            self._channel_buttons[channel] = button
+            button.clicked.connect(
+                lambda _checked=False, c=channel: self.set_active_channel(c)
+            )
+        bar_layout.addStretch(1)
+        outer_layout.addWidget(self._channel_bar)
+        outer_layout.addStretch(1)
+
+        self.setMinimumHeight(180 + _CHANNEL_BAR_HEIGHT)
         self.setMouseTracking(False)
+
+    # -- Channel selection ---------------------------------------------
+
+    def get_active_channel(self) -> str:
+        """Return the channel currently being edited/displayed."""
+        return self._active_channel
+
+    def set_active_channel(self, channel: str) -> None:
+        """Switch which channel's curve subsequent interaction edits.
+
+        Does not itself change any curve's shape, and does not emit
+        ``curve_changed``/``curve_released`` -- only ``active_channel_
+        changed``, matching ``set_points``'s own "programmatic state
+        changes don't emit curve signals" convention.
+        """
+        if channel not in CHANNELS or channel == self._active_channel:
+            return
+        self._active_channel = channel
+        self._dragging_index = None
+        button = self._channel_buttons.get(channel)
+        if button is not None and not button.isChecked():
+            button.setChecked(True)
+        self.update()
+        self.active_channel_changed.emit(channel)
 
     # -- Public API ---------------------------------------------------
 
-    def get_points(self) -> List[Point]:
-        """Return a copy of the current control points."""
-        return list(self._points)
+    @property
+    def _points(self) -> List[Point]:
+        """The ACTIVE channel's point list (by reference, not a copy) --
+        every existing paint/mouse-handling method below reads and
+        mutates this in place exactly as it did before per-channel
+        support existed.
+        """
+        return self._channel_points[self._active_channel]
 
-    def set_points(self, points: Optional[Sequence[Sequence[float]]]) -> None:
-        """Programmatically set the curve shape without emitting signals."""
-        self._points = list(normalize_points(points))
+    @_points.setter
+    def _points(self, value: List[Point]) -> None:
+        self._channel_points[self._active_channel] = value
+
+    def get_points(self, channel: Optional[str] = None) -> List[Point]:
+        """Return a copy of ``channel``'s control points.
+
+        ``channel`` defaults to whichever channel is currently active
+        (``"master"`` right after construction), preserving this
+        method's original, pre-channel meaning for existing callers.
+        """
+        key = channel if channel is not None else self._active_channel
+        return list(self._channel_points.get(key, DEFAULT_CURVE_POINTS))
+
+    def set_points(
+        self, points: Optional[Sequence[Sequence[float]]], channel: Optional[str] = None
+    ) -> None:
+        """Programmatically set ``channel``'s curve shape without
+        emitting signals.
+
+        ``channel`` defaults to the currently active channel, preserving
+        this method's original, pre-channel meaning for existing
+        callers.
+        """
+        key = channel if channel is not None else self._active_channel
+        if key not in CHANNELS:
+            return
+        self._channel_points[key] = list(normalize_points(points))
+        if key == self._active_channel:
+            self._dragging_index = None
+        self.update()
+
+    def get_all_points(self) -> Dict[str, List[Point]]:
+        """Return a copy of every channel's control points, keyed by
+        channel name (``"master"``/``"red"``/``"green"``/``"blue"``).
+        """
+        return {
+            channel: list(points) for channel, points in self._channel_points.items()
+        }
+
+    def set_all_points(
+        self, points_by_channel: Optional[Dict[str, Sequence[Sequence[float]]]]
+    ) -> None:
+        """Programmatically set every channel's curve shape at once,
+        without emitting signals. Any channel missing from
+        ``points_by_channel`` (or the whole argument being falsy) resets
+        to the identity curve.
+        """
+        points_by_channel = points_by_channel or {}
+        for channel in CHANNELS:
+            self._channel_points[channel] = list(
+                normalize_points(points_by_channel.get(channel))
+            )
         self._dragging_index = None
         self.update()
 
@@ -76,21 +250,40 @@ class CurveEditor(QWidget):
         self.update()
 
     def reset(self) -> None:
-        """Reset to the identity curve and notify listeners."""
+        """Reset the ACTIVE channel to the identity curve and notify
+        listeners (standard curve-editor UX: a per-channel "Reset"
+        touches only the channel currently being edited, matching
+        Lightroom's own behavior).
+        """
         self._points = list(DEFAULT_CURVE_POINTS)
         self._dragging_index = None
         self.update()
-        self.curve_changed.emit(self.get_points())
+        points = self.get_points()
+        self.curve_changed.emit(points)
+        self.channel_curve_changed.emit(self._active_channel, points)
+        self.curve_released.emit()
+
+    def reset_all_channels(self) -> None:
+        """Reset every one of the 4 curves (master + R/G/B) to identity."""
+        for channel in CHANNELS:
+            self._channel_points[channel] = list(DEFAULT_CURVE_POINTS)
+        self._dragging_index = None
+        self.update()
+        points = self.get_points()
+        self.curve_changed.emit(points)
+        for channel in CHANNELS:
+            self.channel_curve_changed.emit(channel, list(DEFAULT_CURVE_POINTS))
         self.curve_released.emit()
 
     # -- Geometry mapping ----------------------------------------------
 
     def _plot_rect(self) -> QRectF:
+        top = _MARGIN_PX + _CHANNEL_BAR_HEIGHT
         return QRectF(
             _MARGIN_PX,
-            _MARGIN_PX,
+            top,
             max(1.0, self.width() - 2 * _MARGIN_PX),
-            max(1.0, self.height() - 2 * _MARGIN_PX),
+            max(1.0, self.height() - top - _MARGIN_PX),
         )
 
     @staticmethod
@@ -120,6 +313,7 @@ class CurveEditor(QWidget):
         self._paint_histogram(painter, rect)
         self._paint_grid(painter, rect)
         self._paint_diagonal(painter, rect)
+        self._paint_inactive_curves(painter, rect)
         self._paint_curve(painter, rect)
         self._paint_points(painter, rect)
 
@@ -157,8 +351,8 @@ class CurveEditor(QWidget):
             self._to_widget(0.0, 0.0, rect), self._to_widget(1.0, 1.0, rect)
         )
 
-    def _paint_curve(self, painter: QPainter, rect: QRectF) -> None:
-        lut = build_curve_lut(self._points, resolution=128)
+    def _curve_path(self, points: Sequence[Point], rect: QRectF) -> QPainterPath:
+        lut = build_curve_lut(points, resolution=128)
         path = QPainterPath()
         for i, y in enumerate(lut):
             x = i / (len(lut) - 1)
@@ -167,8 +361,29 @@ class CurveEditor(QWidget):
                 path.moveTo(point)
             else:
                 path.lineTo(point)
+        return path
+
+    def _paint_inactive_curves(self, painter: QPainter, rect: QRectF) -> None:
+        """Draw the 3 non-active channels' curves faintly, tinted in
+        their own channel color, behind the active curve -- so the user
+        can see all 4 curves at a glance (Lightroom's own point-curve
+        editor does the same) without losing track of which one the
+        mouse edits.
+        """
+        for channel in CHANNELS:
+            if channel == self._active_channel:
+                continue
+            points = self._channel_points[channel]
+            if normalize_points(points) == DEFAULT_CURVE_POINTS:
+                continue
+            tint = _CHANNEL_COLORS[channel]
+            dim = QColor(tint.red(), tint.green(), tint.blue(), 110)
+            painter.setPen(QPen(dim, 1.5))
+            painter.drawPath(self._curve_path(points, rect))
+
+    def _paint_curve(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QPen(QColor("#0078d4"), 2))
-        painter.drawPath(path)
+        painter.drawPath(self._curve_path(self._points, rect))
 
     def _paint_points(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QPen(QColor("#e0e0e0"), 1.5))
@@ -205,16 +420,25 @@ class CurveEditor(QWidget):
             x = min(upper, max(lower, x))
         return (x, y)
 
+    def _emit_changed(self) -> None:
+        points = self.get_points()
+        self.curve_changed.emit(points)
+        self.channel_curve_changed.emit(self._active_channel, points)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         rect = self._plot_rect()
         pos = event.position()
+        if pos.y() < rect.top() - _MARGIN_PX:
+            # Click landed on the channel-selector bar; let the button
+            # widgets (real Qt children) handle it themselves.
+            return
 
         if event.button() == Qt.MouseButton.RightButton:
             index = self._nearest_point_index(pos, rect)
             if index is not None and 0 < index < len(self._points) - 1:
                 del self._points[index]
                 self.update()
-                self.curve_changed.emit(self.get_points())
+                self._emit_changed()
                 self.curve_released.emit()
             return
 
@@ -232,7 +456,7 @@ class CurveEditor(QWidget):
 
         self._dragging_index = index
         self.update()
-        self.curve_changed.emit(self.get_points())
+        self._emit_changed()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._dragging_index is None:
@@ -243,7 +467,7 @@ class CurveEditor(QWidget):
             self._dragging_index, x, y
         )
         self.update()
-        self.curve_changed.emit(self.get_points())
+        self._emit_changed()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
@@ -254,6 +478,9 @@ class CurveEditor(QWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        rect = self._plot_rect()
+        if event.position().y() < rect.top() - _MARGIN_PX:
             return
         self._dragging_index = None
         self.reset()

@@ -182,6 +182,141 @@ class TestToolsPanelToneCurve:
         assert panel.get_color_params() == {'saturation': 0.0, 'vibrance': 0.0}
 
 
+class TestToolsPanelPerChannelCurves:
+    """Tests for the per-channel (R/G/B) Tone Curve wiring (PDF section
+    12, Phase E) -- mirrors ``TestToolsPanelToneCurve``'s own style.
+    """
+
+    def test_default_curve_params_has_no_channel_keys(self, qapp):
+        panel = ToolsPanel()
+        assert panel.get_curve_params() == {'points': [[0.0, 0.0], [1.0, 1.0]]}
+
+    def test_channel_edit_adds_only_that_channels_key(self, qapp):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], channel="red"
+        )
+        assert panel.get_curve_params() == {
+            'points': [[0.0, 0.0], [1.0, 1.0]],
+            'red_points': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+        }
+
+    def test_each_channel_edit_is_independent(self, qapp):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], "red")
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], "green")
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]], "blue")
+
+        assert panel.get_curve_params() == {
+            'points': [[0.0, 0.0], [1.0, 1.0]],
+            'red_points': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+            'green_points': [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]],
+            'blue_points': [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]],
+        }
+
+    def test_channel_edit_emits_curve_channel_changed(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.curve_channel_changed.connect(
+            lambda channel, points: received.append((channel, points))
+        )
+
+        panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], channel="blue"
+        )
+
+        assert received == [("blue", [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]])]
+
+    def test_legacy_curve_changed_only_fires_for_master(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.curve_changed.connect(received.append)
+
+        panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], channel="red"
+        )
+        assert received == []
+
+        panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.3], [1.0, 1.0]], channel="master"
+        )
+        assert received == [[[0.0, 0.0], [0.5, 0.3], [1.0, 1.0]]]
+
+    def test_reset_all_resets_every_channel(self, qapp):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], "master")
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], "red")
+
+        panel.reset_all()
+
+        assert panel.get_curve_params() == {'points': [[0.0, 0.0], [1.0, 1.0]]}
+
+    def test_set_adjustments_restores_all_four_channels(self, qapp):
+        panel = ToolsPanel()
+        panel.set_adjustments(
+            {
+                'tone_curve': [[0.0, 0.0], [0.4, 0.6], [1.0, 1.0]],
+                'tone_curve_red': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+                'tone_curve_green': [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]],
+                'tone_curve_blue': [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]],
+            },
+            emit_signal=False,
+        )
+
+        assert panel.get_curve_params() == {
+            'points': [[0.0, 0.0], [0.4, 0.6], [1.0, 1.0]],
+            'red_points': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+            'green_points': [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]],
+            'blue_points': [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]],
+        }
+        assert panel._curve_editor.get_points('red') == [
+            (0.0, 0.0), (0.5, 0.8), (1.0, 1.0)
+        ]
+
+    def test_set_adjustments_with_missing_channel_keys_defaults_to_identity(
+        self, qapp
+    ):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], "green")
+
+        panel.set_adjustments({'exposure': 1.0}, emit_signal=False)
+
+        assert panel.get_curve_params() == {'points': [[0.0, 0.0], [1.0, 1.0]]}
+
+    def test_set_adjustments_emits_curve_channel_changed_for_all_four(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.curve_channel_changed.connect(
+            lambda channel, points: received.append(channel)
+        )
+
+        panel.set_adjustments(
+            {'tone_curve_red': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]]},
+            emit_signal=True,
+        )
+
+        assert set(received) == {'master', 'red', 'green', 'blue'}
+
+    def test_channel_curve_editor_switch_affects_which_channel_mouse_edits(
+        self, qapp
+    ):
+        panel = ToolsPanel()
+        panel._curve_editor.resize(220, 220 + 26)
+        panel._curve_editor.set_active_channel('red')
+
+        rect = panel._curve_editor._plot_rect()
+        pos = panel._curve_editor._to_widget(0.0, 0.0, rect)
+        # Simulate the editor's own drag-start, which emits
+        # channel_curve_changed("red", ...) -- ToolsPanel is wired to
+        # that signal, not the legacy channel-less one.
+        panel._curve_editor._points[0] = (0.0, 0.3)
+        panel._curve_editor.channel_curve_changed.emit(
+            'red', panel._curve_editor.get_points('red')
+        )
+
+        assert panel.get_curve_params()['red_points'][0] == [0.0, 0.3]
+
+
 class TestToolsPanelWhiteBalance:
     """Tests for the Temperature/Tint controls."""
 
