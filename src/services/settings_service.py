@@ -13,6 +13,7 @@ in :mod:`src.main`). On macOS/Linux it uses native plist/INI files.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -31,6 +32,7 @@ _KEY_WINDOW_GEOMETRY = "window/geometry"
 _KEY_WINDOW_STATE = "window/state"
 _KEY_CURRENT_IMAGE_PATH = "session/current_image_path"
 _KEY_CONFIRM_EXPORT_OVERWRITE = "export/confirm_overwrite"
+_KEY_LAST_EXPORT_OPTIONS = "export/last_options"
 
 
 class SettingsService:
@@ -163,6 +165,44 @@ class SettingsService:
     def set_confirm_export_overwrite(self, confirm: bool) -> None:
         """Persist whether Export should confirm before overwriting a file."""
         self._settings.setValue(_KEY_CONFIRM_EXPORT_OVERWRITE, bool(confirm))
+
+    def get_last_export_options(self) -> Optional[dict]:
+        """Return the last-persisted "Export with Previous" options.
+
+        The options are stored as a JSON string (see
+        :meth:`set_last_export_options`) rather than relying on
+        ``QSettings``'s own dict round-tripping, which is backend-specific.
+        Returns ``None`` when no export has completed yet, or when the
+        stored value is missing/empty/corrupt, rather than raising.
+
+        The returned dict has the shape::
+
+            {
+                "format": str,            # e.g. "JPEG"
+                "quality": int,            # 1-100
+                "width": Optional[int],    # None means no resize
+                "height": Optional[int],   # None means no resize
+                "preserve_aspect": bool,
+            }
+        """
+        value = self._settings.value(_KEY_LAST_EXPORT_OPTIONS)
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            logger.warning("Stored last export options are not valid JSON; ignoring")
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+
+    def set_last_export_options(self, options: dict) -> None:
+        """Persist the options used by the most recent successful export.
+
+        See :meth:`get_last_export_options` for the expected shape.
+        """
+        self._settings.setValue(_KEY_LAST_EXPORT_OPTIONS, json.dumps(options))
 
     def sync(self) -> None:
         """Flush pending changes to the underlying store."""

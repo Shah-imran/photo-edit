@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 from src.views.image_view import ImageView
 from src.views.tools_panel import ToolsPanel
-from src.views.export_dialog import ExportDialog
+from src.services.export_service import ExportService
+from src.views.export_dialog import ExportDialog, confirm_overwrite_if_needed
 from src.views.library_view import LibraryView
 from src.views.theme import apply_theme
 from src.views.widgets.filmstrip_view import FilmstripView
@@ -199,6 +200,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._create_action("&Import Images...", self._import_images, "Ctrl+Shift+O"))
         file_menu.addSeparator()
         file_menu.addAction(self._create_action("&Export...", self._export_image, "Ctrl+E"))
+        file_menu.addAction(
+            self._create_action(
+                "Export with &Previous", self._export_with_previous, "Ctrl+Shift+E"
+            )
+        )
         file_menu.addSeparator()
         file_menu.addAction(self._create_action("E&xit", self.close, "Ctrl+Q"))
         
@@ -667,6 +673,68 @@ class MainWindow(QMainWindow):
             if export_path:
                 self._settings_service.set_last_export_dir(export_path)
             self._status_bar.showMessage(f"Exported to: {export_path}", 3000)
+
+    def _export_with_previous(self):
+        """Repeat the last-used export settings without opening the dialog.
+
+        Mirrors Lightroom's File > Export with Previous: re-runs the most
+        recently used export options (format/quality/resize/preserve
+        aspect) immediately. When no previous export has ever completed,
+        there is nothing to repeat, so this falls back to the normal
+        ``_export_image`` flow (which opens the dialog) -- that is the
+        intended UX, not a bug.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to export", 2000)
+            return
+
+        image = self._image_controller.get_export_image()
+        if image is None:
+            self._status_bar.showMessage("No image to export", 2000)
+            return
+
+        # Get default path from current file (same logic as _export_image).
+        default_path = self._image_controller.image_model.file_path or ""
+        if default_path:
+            p = Path(default_path)
+            default_path = str(p.parent / f"{p.stem}_edited{p.suffix}")
+
+        if not default_path:
+            default_path = str(Path(self._settings_service.get_last_export_dir()))
+
+        options = self._settings_service.get_last_export_options()
+        if options is None:
+            # No previous export to repeat; fall back to the normal
+            # Export dialog flow.
+            self._status_bar.showMessage(
+                "No previous export settings; opening Export dialog...", 2000
+            )
+            self._export_image()
+            return
+
+        if not confirm_overwrite_if_needed(self, default_path, self._settings_service):
+            self._status_bar.showMessage("Export cancelled", 2000)
+            return
+
+        width = options.get("width")
+        height = options.get("height")
+        resize = (width, height) if width is not None and height is not None else None
+
+        export_service = ExportService()
+        success = export_service.export_image(
+            image,
+            default_path,
+            format=options.get("format"),
+            quality=options.get("quality"),
+            resize=resize,
+            preserve_aspect=options.get("preserve_aspect", True),
+        )
+
+        if success:
+            self._settings_service.set_last_export_dir(default_path)
+            self._status_bar.showMessage(f"Exported to: {default_path}", 3000)
+        else:
+            QMessageBox.critical(self, "Export Failed", "Failed to export image.")
 
     def _undo(self):
         """Handle undo action."""

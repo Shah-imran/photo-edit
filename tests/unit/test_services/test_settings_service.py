@@ -169,6 +169,43 @@ class TestSettingsServiceConfirmExportOverwrite:
         assert result is True
 
 
+class TestSettingsServiceLastExportOptions:
+    """Round-trip and corruption-recovery behavior for export options."""
+
+    def test_default_is_none(self, service):
+        assert service.get_last_export_options() is None
+
+    def test_round_trips_full_options_dict(self, service):
+        options = {
+            "format": "JPEG",
+            "quality": 85,
+            "width": 1920,
+            "height": 1080,
+            "preserve_aspect": True,
+        }
+        service.set_last_export_options(options)
+        assert service.get_last_export_options() == options
+
+    def test_round_trips_none_width_and_height(self, service):
+        options = {
+            "format": "PNG",
+            "quality": 95,
+            "width": None,
+            "height": None,
+            "preserve_aspect": False,
+        }
+        service.set_last_export_options(options)
+        assert service.get_last_export_options() == options
+
+    def test_corrupt_stored_value_returns_none(self, service, isolated_settings):
+        isolated_settings.setValue("export/last_options", "not-valid-json{{{")
+        assert service.get_last_export_options() is None
+
+    def test_empty_stored_value_returns_none(self, service, isolated_settings):
+        isolated_settings.setValue("export/last_options", "")
+        assert service.get_last_export_options() is None
+
+
 class TestSettingsServiceSync:
     """Sanity check for the explicit flush helper."""
 

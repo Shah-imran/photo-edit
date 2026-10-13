@@ -25,6 +25,57 @@ from src.services.export_service import ExportService
 from src.services.settings_service import SettingsService
 
 
+def confirm_overwrite_if_needed(
+    parent, path: str, settings_service: Optional[SettingsService]
+) -> bool:
+    """Ask before overwriting an existing export file, if required.
+
+    Standalone module-level version of the logic ``ExportDialog`` uses
+    internally, so other callers (e.g. ``MainWindow``'s "Export with
+    Previous" action) can reuse it without duplicating the logic or
+    depending on an ``ExportDialog`` instance.
+
+    Args:
+        parent: Widget to parent the confirmation ``QMessageBox`` to.
+        path: Destination export path.
+        settings_service: Optional ``SettingsService`` used to read/update
+            the "confirm before overwrite" preference. When ``None``, no
+            confirmation is required.
+
+    Returns:
+        ``True`` if the export should proceed, ``False`` if it should be
+        aborted.
+    """
+    if settings_service is None:
+        return True
+    if not Path(path).exists():
+        return True
+    if not settings_service.get_confirm_export_overwrite():
+        return True
+
+    msg_box = QMessageBox(parent)
+    msg_box.setIcon(QMessageBox.Icon.Question)
+    msg_box.setWindowTitle("Overwrite File?")
+    msg_box.setText(
+        f"The file:\n{path}\nalready exists. Do you want to overwrite it?"
+    )
+    checkbox = QCheckBox("Don't ask me again")
+    msg_box.setCheckBox(checkbox)
+    msg_box.setStandardButtons(
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    )
+    msg_box.setDefaultButton(QMessageBox.StandardButton.No)
+    result = msg_box.exec()
+
+    if result != QMessageBox.StandardButton.Yes:
+        return False
+
+    if checkbox.isChecked():
+        settings_service.set_confirm_export_overwrite(False)
+
+    return True
+
+
 class ExportDialog(QDialog):
     """Dialog for exporting images with format and quality options."""
 
@@ -57,6 +108,7 @@ class ExportDialog(QDialog):
         self.setModal(True)
         
         self._setup_ui()
+        self._apply_last_export_options()
 
     def _setup_ui(self):
         """Set up the dialog UI."""
@@ -162,6 +214,43 @@ class ExportDialog(QDialog):
         # Connect preset changes
         self._resize_combo.currentIndexChanged.connect(self._on_resize_preset_changed)
 
+    def _apply_last_export_options(self):
+        """Pre-populate widgets from the last-used export options, if any.
+
+        Called after ``_setup_ui()`` so the signal connections it makes
+        (format combo -> ``_on_format_changed``, etc.) are already wired;
+        ``QComboBox.setCurrentIndex`` emits ``currentIndexChanged`` itself
+        when the index actually changes, so ``_on_format_changed`` fires
+        automatically here and no explicit call is needed.
+        """
+        if self._settings_service is None:
+            return
+        options = self._settings_service.get_last_export_options()
+        if not options:
+            return
+
+        format_name = options.get("format")
+        if format_name:
+            for i in range(self._format_combo.count()):
+                data = self._format_combo.itemData(i)
+                if data and data.get("name") == format_name:
+                    self._format_combo.setCurrentIndex(i)
+                    break
+
+        quality = options.get("quality")
+        if isinstance(quality, int):
+            self._quality_slider.setValue(quality)
+
+        width = options.get("width")
+        height = options.get("height")
+        if width is not None and height is not None:
+            self._width_spin.setValue(width)
+            self._height_spin.setValue(height)
+
+        preserve_aspect = options.get("preserve_aspect")
+        if preserve_aspect is not None:
+            self._preserve_aspect.setChecked(bool(preserve_aspect))
+
     def _browse_file(self):
         """Open file browser for export location."""
         format_data = self._format_combo.currentData()
@@ -235,7 +324,7 @@ class ExportDialog(QDialog):
         
         preserve_aspect = self._preserve_aspect.isChecked()
 
-        if not self._confirm_overwrite_if_needed(path):
+        if not confirm_overwrite_if_needed(self, path, self._settings_service):
             return
 
         # Export
@@ -247,49 +336,20 @@ class ExportDialog(QDialog):
             resize=resize,
             preserve_aspect=preserve_aspect
         )
-        
+
         if success:
+            if self._settings_service is not None:
+                self._settings_service.set_last_export_options({
+                    "format": format_name,
+                    "quality": quality,
+                    "width": resize[0] if resize else None,
+                    "height": resize[1] if resize else None,
+                    "preserve_aspect": preserve_aspect,
+                })
             QMessageBox.information(self, "Export Complete", f"Image exported to:\n{path}")
             self.accept()
         else:
             QMessageBox.critical(self, "Export Failed", "Failed to export image.")
-
-    def _confirm_overwrite_if_needed(self, path: str) -> bool:
-        """Ask before overwriting an existing export file, if required.
-
-        Returns:
-            ``True`` if the export should proceed, ``False`` if it should
-            be aborted (leaving this dialog open so the user can change
-            the path).
-        """
-        if self._settings_service is None:
-            return True
-        if not Path(path).exists():
-            return True
-        if not self._settings_service.get_confirm_export_overwrite():
-            return True
-
-        msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Icon.Question)
-        msg_box.setWindowTitle("Overwrite File?")
-        msg_box.setText(
-            f"The file:\n{path}\nalready exists. Do you want to overwrite it?"
-        )
-        checkbox = QCheckBox("Don't ask me again")
-        msg_box.setCheckBox(checkbox)
-        msg_box.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
-        result = msg_box.exec()
-
-        if result != QMessageBox.StandardButton.Yes:
-            return False
-
-        if checkbox.isChecked():
-            self._settings_service.set_confirm_export_overwrite(False)
-
-        return True
 
     def get_export_path(self) -> str:
         """Get the exported file path.
