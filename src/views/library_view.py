@@ -8,6 +8,7 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -77,6 +78,7 @@ class LibraryView(QWidget):
     create_library_requested = pyqtSignal(str)
     remove_library_requested = pyqtSignal(str)
     collection_selected = pyqtSignal(str)
+    create_collection_requested = pyqtSignal(str)
 
     THUMBNAIL_SIZE = 80
     THUMB_CELL_WIDTH = 112
@@ -99,6 +101,8 @@ class LibraryView(QWidget):
         self._count_label_by_library_id: dict[str, QLabel] = {}
         self._suppress_section_signal = False
         self._entry_count = 0
+        self._collection_rows: dict[str, QWidget] = {}
+        self._collection_row_counts: dict[str, QLabel] = {}
 
         self._setup_ui()
         self._connect_signals()
@@ -193,6 +197,30 @@ class LibraryView(QWidget):
             row_layout.addWidget(count)
             self._collection_counts[key] = count
             layout.addWidget(row)
+
+        # Dynamic rows for user-created collections (see
+        # docs/planning/implementation-notes/2026-10-13-collections.md).
+        # Rebuilt wholesale by set_collections() each time the controller's
+        # collections list changes -- mirroring set_libraries()'s own
+        # clear-and-rebuild-every-row pattern for its section widgets.
+        self._collections_container = QWidget()
+        self._collections_layout = QVBoxLayout(self._collections_container)
+        self._collections_layout.setContentsMargins(0, 0, 0, 0)
+        self._collections_layout.setSpacing(0)
+        layout.addWidget(self._collections_container)
+
+        self._new_collection_button = QToolButton()
+        self._new_collection_button.setText("+ New Collection")
+        self._new_collection_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
+        self._new_collection_button.setStyleSheet(
+            "QToolButton { background: transparent; border: none; padding: 6px 4px; "
+            "text-align: left; color: #7faed6; } "
+            "QToolButton:hover { background: #303840; color: #b7d9f7; }"
+        )
+        self._new_collection_button.clicked.connect(self._on_new_collection_clicked)
+        layout.addWidget(self._new_collection_button)
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
@@ -321,6 +349,61 @@ class LibraryView(QWidget):
             self._apply_active_section_layout()
         finally:
             self._suppress_section_signal = False
+
+    def set_collections(self, collections: list[dict]) -> None:
+        """Rebuild the sidebar's user-created collection rows.
+
+        Each row mirrors the existing All Photos/Favorites/Recently Added
+        rows (a QToolButton plus a count label), emitting
+        ``collection_selected`` with ``f"collection:{id}"`` -- the same
+        signal the three built-in smart collections already use -- so
+        ``FilmstripView.set_filter`` and the existing MainWindow wiring
+        need no changes at all to support it.
+        """
+        for row in self._collection_rows.values():
+            row.setParent(None)
+        self._collection_rows.clear()
+        self._collection_row_counts.clear()
+        for collection in collections:
+            collection_id = str(collection.get("id", ""))
+            if not collection_id:
+                continue
+            name = str(collection.get("name", "Collection"))
+            count = int(collection.get("count", 0))
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(2, 0, 8, 0)
+            row_layout.setSpacing(4)
+            button = QToolButton()
+            button.setText(name)
+            button.setIcon(line_icon("folder", "#c4ced8", 18))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setStyleSheet(
+                "QToolButton { background: transparent; border: none; padding: 6px 4px; "
+                "text-align: left; } QToolButton:hover { background: #303840; }"
+            )
+            button.setAccessibleName(name)
+            button.clicked.connect(
+                lambda _checked=False, cid=collection_id: self.collection_selected.emit(
+                    f"collection:{cid}"
+                )
+            )
+            row_layout.addWidget(button, 1)
+            count_label = QLabel(str(count))
+            count_label.setStyleSheet("color: #929ba5;")
+            row_layout.addWidget(count_label)
+            self._collections_layout.addWidget(row)
+            self._collection_rows[collection_id] = row
+            self._collection_row_counts[collection_id] = count_label
+
+    def _on_new_collection_clicked(self) -> None:
+        name, ok = QInputDialog.getText(self, "New Collection", "Collection name:")
+        if not ok:
+            return
+        clean_name = name.strip()
+        if not clean_name:
+            return
+        self.create_collection_requested.emit(clean_name)
 
     def set_entries(self, entries: list[dict]) -> None:
         self._entry_count = len(entries)

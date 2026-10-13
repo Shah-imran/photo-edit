@@ -495,14 +495,29 @@ class MainWindow(QMainWindow):
         self._filmstrip_view.keywords_changed.connect(
             self._library_controller.set_entry_keywords
         )
+        self._filmstrip_view.collection_membership_toggled.connect(
+            self._library_controller.set_entry_collection_membership
+        )
+        self._filmstrip_view.new_collection_for_entry_requested.connect(
+            self._library_controller.create_collection_with_entry
+        )
         self._library_view.create_library_requested.connect(
             self._on_create_library_requested
         )
         self._library_view.remove_library_requested.connect(
             self._on_remove_library_requested
         )
+        self._library_view.create_collection_requested.connect(
+            self._library_controller.create_collection
+        )
         self._library_controller.libraries_changed.connect(
             self._library_view.set_libraries
+        )
+        self._library_controller.collections_changed.connect(
+            self._library_view.set_collections
+        )
+        self._library_controller.collections_changed.connect(
+            self._filmstrip_view.set_collections
         )
         self._library_controller.entries_rebuilt.connect(
             self._on_library_entries_rebuilt

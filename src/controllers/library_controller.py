@@ -121,6 +121,7 @@ class LibraryController(QObject):
     libraries_changed = pyqtSignal(object, str)
     entries_rebuilt = pyqtSignal(str, object)
     entry_thumbnail_updated = pyqtSignal(str, object)
+    collections_changed = pyqtSignal(object)
     thumbnail_batch_started = pyqtSignal(int)
     thumbnail_batch_progress = pyqtSignal(int, int)
     thumbnail_batch_finished = pyqtSignal()
@@ -161,6 +162,7 @@ class LibraryController(QObject):
     def initialize(self) -> None:
         self._current_library_id = self._catalog_service.get_current_library_id()
         self._emit_libraries()
+        self._emit_collections()
         self._rebuild_entries_for_current_library()
 
     def select_library(self, library_id: str) -> None:
@@ -169,12 +171,14 @@ class LibraryController(QObject):
         self._catalog_service.set_current_library(library_id)
         self._current_library_id = library_id
         self._emit_libraries()
+        self._emit_collections()
         self._rebuild_entries_for_current_library()
 
     def create_library(self, name: str) -> None:
         library = self._catalog_service.create_library(name)
         self._current_library_id = library.id
         self._emit_libraries()
+        self._emit_collections()
         self._rebuild_entries_for_current_library()
 
     def remove_library(self, library_id: str) -> None:
@@ -182,6 +186,7 @@ class LibraryController(QObject):
         self._cleanup_orphaned_cache_async(self._catalog_service.referenced_cache_keys())
         self._current_library_id = self._catalog_service.get_current_library_id()
         self._emit_libraries()
+        self._emit_collections()
         self._rebuild_entries_for_current_library()
 
     def import_images(self, file_paths: list[str]) -> None:
@@ -299,6 +304,85 @@ class LibraryController(QObject):
         self._emit_libraries()
         self._rebuild_entries_for_current_library()
 
+    def create_collection(self, name: str) -> None:
+        """Create a new collection in the current library and refresh views."""
+        if not self._current_library_id:
+            return
+        self._catalog_service.create_collection(self._current_library_id, name)
+        self._emit_collections()
+
+    def rename_collection(self, collection_id: str, name: str) -> None:
+        """Rename a collection in the current library and refresh views."""
+        if not self._current_library_id or not collection_id:
+            return
+        self._catalog_service.rename_collection(
+            self._current_library_id, collection_id, name
+        )
+        self._emit_collections()
+
+    def delete_collection(self, collection_id: str) -> None:
+        """Delete a collection from the current library and refresh views.
+
+        Also triggers an entries refresh, since every entry that
+        belonged to the deleted collection just had that id stripped out
+        of its ``collection_ids`` by the catalog service.
+        """
+        if not self._current_library_id or not collection_id:
+            return
+        self._catalog_service.delete_collection(self._current_library_id, collection_id)
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
+    def add_entry_to_collection(self, file_path: str, collection_id: str) -> None:
+        """Add an image to a collection in the current library and refresh views."""
+        if not self._current_library_id or not file_path or not collection_id:
+            return
+        self._catalog_service.add_entry_to_collection(
+            self._current_library_id, file_path, collection_id
+        )
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
+    def remove_entry_from_collection(self, file_path: str, collection_id: str) -> None:
+        """Remove an image from a collection in the current library and refresh views."""
+        if not self._current_library_id or not file_path or not collection_id:
+            return
+        self._catalog_service.remove_entry_from_collection(
+            self._current_library_id, file_path, collection_id
+        )
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
+    def set_entry_collection_membership(
+        self, file_path: str, collection_id: str, is_member: bool
+    ) -> None:
+        """Add or remove one image from one collection, by the target
+        membership state -- the single slot the context menu's checkable
+        "Add to Collection" submenu connects to (one call either adds or
+        removes, instead of the caller picking which of
+        ``add_entry_to_collection``/``remove_entry_from_collection`` to
+        call)."""
+        if is_member:
+            self.add_entry_to_collection(file_path, collection_id)
+        else:
+            self.remove_entry_from_collection(file_path, collection_id)
+
+    def create_collection_with_entry(self, file_path: str, name: str) -> None:
+        """Create a new collection and immediately add one image to it --
+        backs the context menu's "New Collection..." entry, where the
+        collection doesn't exist yet to pass an id back to the view for a
+        separate add_entry_to_collection call."""
+        if not self._current_library_id or not file_path:
+            return
+        record = self._catalog_service.create_collection(self._current_library_id, name)
+        if record is None:
+            return
+        self._catalog_service.add_entry_to_collection(
+            self._current_library_id, file_path, record.id
+        )
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
     def referenced_adjustment_preview_cache_keys(self) -> set[str]:
         return self._catalog_service.referenced_adjustment_preview_cache_keys()
 
@@ -317,6 +401,30 @@ class LibraryController(QObject):
             for library in self._catalog_service.list_libraries()
         ]
         self.libraries_changed.emit(libraries, self._current_library_id)
+
+    def _emit_collections(self) -> None:
+        """Emit the current library's flat collection list (name + image
+        count per collection), separate from ``libraries_changed``'s
+        per-library aggregate counts since this list is dynamic/
+        user-created rather than a fixed set of counters."""
+        if not self._current_library_id:
+            self.collections_changed.emit([])
+            return
+        library = self._catalog_service.get_library(self._current_library_id)
+        if library is None:
+            self.collections_changed.emit([])
+            return
+        collections = [
+            {
+                "id": collection.id,
+                "name": collection.name,
+                "count": sum(
+                    1 for entry in library.entries if collection.id in entry.collection_ids
+                ),
+            }
+            for collection in library.collections
+        ]
+        self.collections_changed.emit(collections)
 
     def _rebuild_entries_for_current_library(self) -> None:
         self.cancel_thumbnail_batch()
@@ -353,6 +461,7 @@ class LibraryController(QObject):
             "rating": entry.rating,
             "flag": entry.flag,
             "keywords": entry.keywords,
+            "collection_ids": entry.collection_ids,
         }
 
         if entry.status != "available":
@@ -437,6 +546,7 @@ class LibraryController(QObject):
             "rating": entry.rating,
             "flag": entry.flag,
             "keywords": entry.keywords,
+            "collection_ids": entry.collection_ids,
         }
         if library_id == self._current_library_id:
             self.entry_thumbnail_updated.emit(file_path, payload)

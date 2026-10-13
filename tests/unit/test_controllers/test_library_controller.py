@@ -145,6 +145,135 @@ class TestLibraryController:
         _, entries = rebuilt.args
         assert entries[0]["keywords"] == ["sunset", "beach"]
 
+    # -- Collections --------------------------------------------------
+    # See docs/planning/implementation-notes/2026-10-13-collections.md.
+
+    def test_create_collection_delegates_and_emits_collections_changed(
+        self, controller, qtbot
+    ):
+        controller.initialize()
+
+        with qtbot.waitSignal(controller.collections_changed, timeout=1000) as changed:
+            controller.create_collection("Travel")
+
+        collections = changed.args[0]
+        assert [item["name"] for item in collections] == ["Travel"]
+        assert collections[0]["count"] == 0
+
+    def test_add_entry_to_collection_updates_count_and_entry_payload(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.add_entry_to_collection(sample_image_path, collection_id)
+
+        _, entries = rebuilt.args
+        assert entries[0]["collection_ids"] == [collection_id]
+
+    def test_remove_entry_from_collection_clears_entry_payload(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+        controller.add_entry_to_collection(sample_image_path, collection_id)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.remove_entry_from_collection(sample_image_path, collection_id)
+
+        _, entries = rebuilt.args
+        assert entries[0]["collection_ids"] == []
+
+    def test_set_entry_collection_membership_toggles_both_ways(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+
+        controller.set_entry_collection_membership(sample_image_path, collection_id, True)
+        entry = controller._catalog_service.get_entry(
+            controller.current_library_id, sample_image_path
+        )
+        assert entry.collection_ids == [collection_id]
+
+        controller.set_entry_collection_membership(sample_image_path, collection_id, False)
+        entry = controller._catalog_service.get_entry(
+            controller.current_library_id, sample_image_path
+        )
+        assert entry.collection_ids == []
+
+    def test_create_collection_with_entry_creates_and_adds_in_one_call(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.collections_changed, timeout=1000) as changed:
+            controller.create_collection_with_entry(sample_image_path, "Travel")
+
+        collections = changed.args[0]
+        assert collections[0]["name"] == "Travel"
+        assert collections[0]["count"] == 1
+        entry = controller._catalog_service.get_entry(
+            controller.current_library_id, sample_image_path
+        )
+        assert entry.collection_ids == [collections[0]["id"]]
+
+    def test_delete_collection_strips_dangling_references_and_refreshes_entries(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+        controller.add_entry_to_collection(sample_image_path, collection_id)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.delete_collection(collection_id)
+
+        _, entries = rebuilt.args
+        assert entries[0]["collection_ids"] == []
+        assert controller._catalog_service.list_collections(
+            controller.current_library_id
+        ) == []
+
+    def test_entry_payload_and_thumbnail_ready_payload_have_identical_keys(
+        self, controller, sample_image_path, qtbot
+    ):
+        """Regression guard for the duplicated payload-dict construction
+        in ``_entry_payload()`` and ``_on_thumbnail_ready()`` -- a future
+        edit that adds/renames a key in one but not the other must fail
+        this test. See
+        docs/planning/implementation-notes/2026-10-13-collections.md.
+        """
+        controller.initialize()
+
+        with qtbot.waitSignal(
+            controller.entry_thumbnail_updated, timeout=3000
+        ) as updated:
+            with qtbot.waitSignal(controller.entries_rebuilt, timeout=3000) as rebuilt:
+                controller.import_images([sample_image_path])
+
+        _, entries = rebuilt.args
+        entry_payload_keys = set(entries[0].keys())
+        thumbnail_payload_keys = set(updated.args[1].keys())
+        assert entry_payload_keys == thumbnail_payload_keys
+
     def test_cleanup_stops_thumbnail_worker(
         self,
         qapp,

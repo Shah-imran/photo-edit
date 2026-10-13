@@ -639,6 +639,155 @@ def test_filmstrip_context_menu_no_rating_emits_zero(qapp, qtbot):
     assert blocker.args == ["C:/photos/one.jpg", 0]
 
 
+def test_filmstrip_set_filter_collection_mode_filters_by_collection_id(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    member = _entry("C:/photos/zebra.jpg")
+    member["collection_ids"] = ["c1"]
+    other = _entry("C:/photos/alpha.jpg")
+    other["collection_ids"] = ["c2"]
+    unassigned = _entry("C:/photos/mango.jpg")
+    strip.set_entries([member, other, unassigned])
+
+    strip.set_filter("collection:c1")
+
+    assert strip.count() == 1
+    assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("zebra.jpg")
+
+
+def test_filmstrip_set_filter_unknown_mode_falls_back_to_all(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+
+    strip.set_filter("not-a-real-mode")
+
+    assert strip.count() == 2
+
+
+def test_filmstrip_context_menu_add_to_collection_toggles_membership_on(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg")])
+    strip.set_collections([{"id": "c1", "name": "Travel", "count": 0}])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            submenu = action.menu()
+            if submenu is None:
+                continue
+            for sub_action in submenu.actions():
+                if sub_action.text() == "Travel":
+                    assert sub_action.isChecked() is False
+                    return sub_action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.collection_membership_toggled) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert blocker.args == ["C:/photos/one.jpg", "c1", True]
+
+
+def test_filmstrip_context_menu_add_to_collection_toggles_membership_off(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    entry = _entry("C:/photos/one.jpg")
+    entry["collection_ids"] = ["c1"]
+    strip.set_entries([entry])
+    strip.set_collections([{"id": "c1", "name": "Travel", "count": 1}])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            submenu = action.menu()
+            if submenu is None:
+                continue
+            for sub_action in submenu.actions():
+                if sub_action.text() == "Travel":
+                    assert sub_action.isChecked() is True
+                    return sub_action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.collection_membership_toggled) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert blocker.args == ["C:/photos/one.jpg", "c1", False]
+
+
+def test_filmstrip_context_menu_new_collection_prompts_and_emits(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QInputDialog, QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg")])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            submenu = action.menu()
+            if submenu is None:
+                continue
+            for sub_action in submenu.actions():
+                if sub_action.text() == "New Collection...":
+                    return sub_action
+        return None
+
+    def fake_get_text(*_args, **_kwargs):
+        return "Travel", True
+
+    with patch.object(QMenu, "exec", fake_exec), patch.object(
+        QInputDialog, "getText", staticmethod(fake_get_text)
+    ):
+        with qtbot.waitSignal(strip.new_collection_for_entry_requested) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert blocker.args == ["C:/photos/one.jpg", "Travel"]
+
+
+def test_filmstrip_context_menu_new_collection_cancel_emits_nothing(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QInputDialog, QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg")])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            submenu = action.menu()
+            if submenu is None:
+                continue
+            for sub_action in submenu.actions():
+                if sub_action.text() == "New Collection...":
+                    return sub_action
+        return None
+
+    received = []
+    strip.new_collection_for_entry_requested.connect(lambda *args: received.append(args))
+
+    with patch.object(QMenu, "exec", fake_exec), patch.object(
+        QInputDialog, "getText", staticmethod(lambda *a, **k: ("Travel", False))
+    ):
+        strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert received == []
+
+
 def test_workspace_header_emits_primary_actions(qapp, qtbot):
     header = WorkspaceHeader()
     qtbot.addWidget(header)

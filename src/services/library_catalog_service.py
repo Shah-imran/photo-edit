@@ -52,6 +52,7 @@ class LibraryEntry:
     rating: int = 0
     flag: str = "none"
     keywords: list[str] = field(default_factory=list)
+    collection_ids: list[str] = field(default_factory=list)
 
     @property
     def normalized_path(self) -> str:
@@ -71,6 +72,7 @@ class LibraryEntry:
             "rating": self.rating,
             "flag": self.flag,
             "keywords": self.keywords,
+            "collection_ids": self.collection_ids,
         }
 
     @classmethod
@@ -88,6 +90,31 @@ class LibraryEntry:
             rating=_clamp_rating(payload.get("rating", 0)),
             flag=_normalize_flag(payload.get("flag", "none")),
             keywords=_normalize_keywords(payload.get("keywords", [])),
+            collection_ids=_normalize_collection_ids(payload.get("collection_ids", [])),
+        )
+
+
+@dataclass
+class CollectionRecord:
+    """A user-created, flat (non-nested) collection scoped to one library.
+
+    See docs/planning/implementation-notes/2026-10-13-collections.md --
+    collections are a new top-level entity, not a per-entry scalar field,
+    and deliberately do not cross library boundaries (no "id" is ever
+    looked up outside the library that owns it).
+    """
+
+    id: str
+    name: str
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "name": self.name}
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "CollectionRecord":
+        return cls(
+            id=str(payload.get("id", uuid.uuid4().hex)),
+            name=str(payload.get("name", "Collection")),
         )
 
 
@@ -100,6 +127,7 @@ class LibraryRecord:
     created_at: str
     updated_at: str
     entries: list[LibraryEntry] = field(default_factory=list)
+    collections: list[CollectionRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -108,6 +136,7 @@ class LibraryRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "entries": [entry.to_dict() for entry in self.entries],
+            "collections": [collection.to_dict() for collection in self.collections],
         }
 
     @classmethod
@@ -121,6 +150,11 @@ class LibraryRecord:
                 LibraryEntry.from_dict(entry)
                 for entry in payload.get("entries", [])
                 if isinstance(entry, dict)
+            ],
+            collections=[
+                CollectionRecord.from_dict(item)
+                for item in payload.get("collections", [])
+                if isinstance(item, dict)
             ],
         )
 
@@ -213,6 +247,36 @@ def _normalize_keywords(value) -> list[str]:
         if key in seen:
             continue
         seen.add(key)
+        cleaned.append(text)
+    return cleaned
+
+
+def _normalize_collection_ids(value) -> list[str]:
+    """Coerce a persisted/incoming ``collection_ids`` list to a clean
+    ``list[str]``.
+
+    Mirrors ``_normalize_keywords``'s defensive "coerce, never raise"
+    style: a non-list ``value`` normalizes to ``[]``, each item is
+    coerced to ``str`` and stripped, empty strings are dropped, and
+    duplicates are removed while preserving insertion order. Unlike
+    keywords, dedup here is a plain exact-string dedup (ids are opaque
+    tokens, not user-facing text), not case-insensitive.
+
+    This does *not* check that each id names a collection that still
+    exists in the library -- that cross-check (and the pruning of
+    dangling references when a collection is deleted) is
+    ``LibraryCatalogService.delete_collection``'s job, not this
+    load-time coercion's.
+    """
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
         cleaned.append(text)
     return cleaned
 
@@ -456,6 +520,138 @@ class LibraryCatalogService:
         library.updated_at = _utc_now_iso()
         self._save_catalog()
         return entry
+
+    def list_collections(self, library_id: str) -> list[CollectionRecord]:
+        """Return the flat list of collections for one library.
+
+        Never raises on an unknown ``library_id`` -- returns ``[]``
+        instead, matching the "defensive setter" style the rest of this
+        service already uses for bad input (unlike ``_require_library``'s
+        internal callers, which legitimately want a ``KeyError``).
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return []
+        return list(library.collections)
+
+    def create_collection(self, library_id: str, name: str) -> Optional[CollectionRecord]:
+        """Create a new, empty collection in one library.
+
+        An empty/whitespace-only ``name`` is defensively rejected (returns
+        ``None``, no catalog mutation) rather than silently creating an
+        unnamed collection -- there is no sensible auto-generated default
+        the way there is for a new library's name. Duplicate names ARE
+        allowed (no uniqueness check): two collections can share a
+        display name, distinguished only by id, the same way nothing in
+        this codebase stops two libraries from sharing a name either.
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        clean_name = name.strip() if isinstance(name, str) else ""
+        if not clean_name:
+            return None
+        record = CollectionRecord(id=uuid.uuid4().hex, name=clean_name)
+        library.collections.append(record)
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return record
+
+    def rename_collection(
+        self, library_id: str, collection_id: str, new_name: str
+    ) -> Optional[CollectionRecord]:
+        """Rename an existing collection. No-op (returns ``None``) on an
+        unknown library/collection id or an empty/whitespace-only name."""
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        collection = self._find_collection(library, collection_id)
+        if collection is None:
+            return None
+        clean_name = new_name.strip() if isinstance(new_name, str) else ""
+        if not clean_name or collection.name == clean_name:
+            return collection
+        collection.name = clean_name
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return collection
+
+    def delete_collection(self, library_id: str, collection_id: str) -> bool:
+        """Delete a collection and strip its id out of every entry's
+        ``collection_ids`` so no dangling reference survives the delete.
+
+        Returns ``True`` if a collection was actually removed, ``False``
+        on an unknown library/collection id (never raises).
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return False
+        collection = self._find_collection(library, collection_id)
+        if collection is None:
+            return False
+        library.collections = [
+            existing for existing in library.collections if existing.id != collection_id
+        ]
+        for entry in library.entries:
+            if collection_id in entry.collection_ids:
+                entry.collection_ids = [
+                    cid for cid in entry.collection_ids if cid != collection_id
+                ]
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return True
+
+    def add_entry_to_collection(
+        self, library_id: str, path: str, collection_id: str
+    ) -> Optional[LibraryEntry]:
+        """Add one entry to one collection. No-op on an unknown library,
+        collection, or path (returns ``None``, never raises); also a no-op
+        (no save) if the entry already belongs to that collection."""
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        if self._find_collection(library, collection_id) is None:
+            return None
+        try:
+            entry = self._require_entry(library, path)
+        except KeyError:
+            return None
+        if collection_id in entry.collection_ids:
+            return entry
+        entry.collection_ids = [*entry.collection_ids, collection_id]
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def remove_entry_from_collection(
+        self, library_id: str, path: str, collection_id: str
+    ) -> Optional[LibraryEntry]:
+        """Remove one entry from one collection. No-op on an unknown
+        library or path (returns ``None``, never raises); also a no-op (no
+        save) if the entry was not in that collection to begin with."""
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        try:
+            entry = self._require_entry(library, path)
+        except KeyError:
+            return None
+        if collection_id not in entry.collection_ids:
+            return entry
+        entry.collection_ids = [
+            cid for cid in entry.collection_ids if cid != collection_id
+        ]
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def _find_collection(
+        self, library: LibraryRecord, collection_id: str
+    ) -> Optional[CollectionRecord]:
+        for collection in library.collections:
+            if collection.id == collection_id:
+                return collection
+        return None
 
     def referenced_cache_keys(self) -> set[str]:
         keys: set[str] = set()

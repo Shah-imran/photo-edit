@@ -61,6 +61,8 @@ class FilmstripView(QWidget):
     rating_changed = pyqtSignal(str, int)
     flag_changed = pyqtSignal(str, str)
     keywords_changed = pyqtSignal(str, list)
+    collection_membership_toggled = pyqtSignal(str, str, bool)
+    new_collection_for_entry_requested = pyqtSignal(str, str)
     THUMBNAIL_SIZE = QSize(88, 62)
     CELL_SIZE = QSize(104, 78)
 
@@ -75,6 +77,7 @@ class FilmstripView(QWidget):
         self._filter_mode = "all"
         self._sort_mode = "added"
         self._search_text = ""
+        self._collections: list[dict] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 5, 8, 6)
@@ -165,6 +168,13 @@ class FilmstripView(QWidget):
         self._list.currentItemChanged.connect(self._on_current_item_changed)
         layout.addWidget(self._list)
 
+    def set_collections(self, collections: list[dict]) -> None:
+        """Cache the current library's flat collection list for the
+        context menu's "Add to Collection" submenu. Does not itself
+        trigger a re-render -- it's only read when the context menu is
+        opened."""
+        self._collections = [dict(collection) for collection in collections]
+
     def set_context(self, source_name: str) -> None:
         """Update the active library name shown above the thumbnails."""
         self._source_label.setText(source_name or "Library")
@@ -174,7 +184,19 @@ class FilmstripView(QWidget):
         self._render_entries()
 
     def set_filter(self, mode: str) -> None:
-        """Filter the strip using the smart-collection controls."""
+        """Filter the strip using the smart-collection controls, or a
+        user-created collection given as ``"collection:<id>"``.
+
+        The three smart collections ("all"/"favorites"/"recent") and the
+        dynamic per-collection mode share this one setter/signal rather
+        than inventing a second signal for collections -- see
+        docs/planning/implementation-notes/2026-10-13-collections.md.
+        """
+        if mode.startswith("collection:") and len(mode) > len("collection:"):
+            self._filter_mode = mode
+            self._filter_button.setText("Collection")
+            self._render_entries()
+            return
         if mode not in {"all", "favorites", "recent"}:
             mode = "all"
         self._filter_mode = mode
@@ -216,6 +238,13 @@ class FilmstripView(QWidget):
             entries = [entry for entry in entries if entry.get("favorite", False)]
         elif self._filter_mode == "recent":
             entries.sort(key=lambda entry: str(entry.get("added_at", "")), reverse=True)
+        elif self._filter_mode.startswith("collection:"):
+            collection_id = self._filter_mode[len("collection:") :]
+            entries = [
+                entry
+                for entry in entries
+                if collection_id in (entry.get("collection_ids") or [])
+            ]
         if self._search_text:
             entries = [
                 entry
@@ -320,6 +349,7 @@ class FilmstripView(QWidget):
         rating = _clamp_rating(payload.get("rating", 0))
         flag = _normalize_flag(payload.get("flag", "none"))
         keywords = _normalize_keywords_for_display(payload.get("keywords", []))
+        collection_ids = _normalize_keywords_for_display(payload.get("collection_ids", []))
         # Rating/flag/keywords are surfaced via the tooltip only -- the item
         # TEXT stays reserved for the existing favorite "★" marker and must
         # not be repurposed or overwritten here. See
@@ -343,6 +373,7 @@ class FilmstripView(QWidget):
         item.setData(Qt.ItemDataRole.UserRole + 3, rating)
         item.setData(Qt.ItemDataRole.UserRole + 4, flag)
         item.setData(Qt.ItemDataRole.UserRole + 5, keywords)
+        item.setData(Qt.ItemDataRole.UserRole + 6, collection_ids)
 
     def _show_context_menu(self, position) -> None:
         item = self._list.itemAt(position)
@@ -353,6 +384,9 @@ class FilmstripView(QWidget):
         flag = _normalize_flag(item.data(Qt.ItemDataRole.UserRole + 4))
         current_keywords = _normalize_keywords_for_display(
             item.data(Qt.ItemDataRole.UserRole + 5)
+        )
+        current_collection_ids = set(
+            _normalize_keywords_for_display(item.data(Qt.ItemDataRole.UserRole + 6))
         )
         menu = QMenu(self)
         favorite_action = menu.addAction(
@@ -380,6 +414,26 @@ class FilmstripView(QWidget):
         reject_action = menu.addAction("Flag as Reject")
         remove_flag_action = menu.addAction("Remove Flag") if flag != "none" else None
         keywords_action = menu.addAction("Edit Keywords...")
+        # "Add to Collection" submenu: one checkable action per existing
+        # collection (checked = currently a member) plus a trailing
+        # "New Collection..." entry. No existing collection/batch
+        # context-menu precedent existed to mirror beyond this file's own
+        # Favorite/Rating/Flag/Keywords actions, so this follows their
+        # same flat QMenu/QAction style. See
+        # docs/planning/implementation-notes/2026-10-13-collections.md.
+        collection_menu = menu.addMenu("Add to Collection")
+        collection_actions: dict = {}
+        for collection in self._collections:
+            collection_id = str(collection.get("id", ""))
+            if not collection_id:
+                continue
+            action = collection_menu.addAction(str(collection.get("name", "Collection")))
+            action.setCheckable(True)
+            action.setChecked(collection_id in current_collection_ids)
+            collection_actions[action] = collection_id
+        if collection_actions:
+            collection_menu.addSeparator()
+        new_collection_action = collection_menu.addAction("New Collection...")
         selected = menu.exec(self._list.viewport().mapToGlobal(position))
         if selected is None or not path:
             return
@@ -404,6 +458,18 @@ class FilmstripView(QWidget):
                 return
             new_keywords = [piece.strip() for piece in text.split(",") if piece.strip()]
             self.keywords_changed.emit(str(path), new_keywords)
+        elif selected in collection_actions:
+            collection_id = collection_actions[selected]
+            is_member = collection_id in current_collection_ids
+            self.collection_membership_toggled.emit(str(path), collection_id, not is_member)
+        elif selected is new_collection_action:
+            name, ok = QInputDialog.getText(self, "New Collection", "Collection name:")
+            if not ok:
+                return
+            clean_name = name.strip()
+            if not clean_name:
+                return
+            self.new_collection_for_entry_requested.emit(str(path), clean_name)
 
     def _placeholder_pixmap(self, missing: bool) -> QPixmap:
         pixmap = QPixmap(self.THUMBNAIL_SIZE)

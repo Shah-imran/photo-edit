@@ -451,3 +451,239 @@ class TestLibraryCatalogService:
             "alpha",
             "mango",
         ]
+
+    # -- Collections ---------------------------------------------------
+    # See docs/planning/implementation-notes/2026-10-13-collections.md.
+
+    def test_create_collection_returns_record_and_appears_in_list(
+        self, library_catalog_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+
+        record = service.create_collection(library_id, "Travel")
+
+        assert record is not None
+        assert record.name == "Travel"
+        assert [c.id for c in service.list_collections(library_id)] == [record.id]
+
+    def test_create_collection_rejects_empty_or_whitespace_name(
+        self, library_catalog_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+
+        assert service.create_collection(library_id, "") is None
+        assert service.create_collection(library_id, "   ") is None
+        assert service.list_collections(library_id) == []
+
+    def test_create_collection_unknown_library_returns_none(self, library_catalog_path):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+
+        assert service.create_collection("no-such-library", "Travel") is None
+
+    def test_create_collection_allows_duplicate_names(self, library_catalog_path):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+
+        first = service.create_collection(library_id, "Travel")
+        second = service.create_collection(library_id, "Travel")
+
+        assert first.id != second.id
+        assert len(service.list_collections(library_id)) == 2
+
+    def test_rename_collection_updates_name(self, library_catalog_path):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        record = service.create_collection(library_id, "Travel")
+
+        renamed = service.rename_collection(library_id, record.id, "Vacation")
+
+        assert renamed.name == "Vacation"
+        assert service.list_collections(library_id)[0].name == "Vacation"
+
+    def test_rename_collection_unknown_id_is_a_no_op(self, library_catalog_path):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+
+        assert service.rename_collection(library_id, "no-such-id", "New Name") is None
+
+    def test_rename_collection_rejects_empty_name(self, library_catalog_path):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        record = service.create_collection(library_id, "Travel")
+
+        result = service.rename_collection(library_id, record.id, "   ")
+
+        assert result.name == "Travel"
+
+    def test_list_collections_unknown_library_returns_empty_list(
+        self, library_catalog_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+
+        assert service.list_collections("no-such-library") == []
+
+    def test_add_entry_to_collection_sets_membership(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        record = service.create_collection(library_id, "Travel")
+
+        entry = service.add_entry_to_collection(library_id, sample_image_path, record.id)
+
+        assert entry.collection_ids == [record.id]
+
+    def test_add_entry_to_collection_is_a_no_op_when_already_a_member(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        record = service.create_collection(library_id, "Travel")
+        service.add_entry_to_collection(library_id, sample_image_path, record.id)
+        library = service.list_libraries()[0]
+        updated_at_after_first_add = library.updated_at
+
+        service.add_entry_to_collection(library_id, sample_image_path, record.id)
+
+        assert library.updated_at == updated_at_after_first_add
+
+    def test_add_entry_to_collection_unknown_collection_or_path_returns_none(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        record = service.create_collection(library_id, "Travel")
+
+        assert (
+            service.add_entry_to_collection(library_id, sample_image_path, "no-such-id")
+            is None
+        )
+        assert (
+            service.add_entry_to_collection(library_id, "/no/such/file.jpg", record.id)
+            is None
+        )
+
+    def test_remove_entry_from_collection_clears_membership(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        record = service.create_collection(library_id, "Travel")
+        service.add_entry_to_collection(library_id, sample_image_path, record.id)
+
+        entry = service.remove_entry_from_collection(
+            library_id, sample_image_path, record.id
+        )
+
+        assert entry.collection_ids == []
+
+    def test_remove_entry_from_collection_is_a_no_op_when_not_a_member(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        library = service.list_libraries()[0]
+        updated_at_before = library.updated_at
+
+        entry = service.remove_entry_from_collection(
+            library_id, sample_image_path, "no-such-id"
+        )
+
+        assert entry.collection_ids == []
+        assert library.updated_at == updated_at_before
+
+    def test_delete_collection_removes_it_and_strips_dangling_entry_references(
+        self, library_catalog_path, sample_image_path
+    ):
+        """The crux regression test: deleting a collection must not leave
+        any entry pointing at an id that no longer exists anywhere."""
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        record = service.create_collection(library_id, "Travel")
+        service.add_entry_to_collection(library_id, sample_image_path, record.id)
+        entry_before = service.get_entry(library_id, sample_image_path)
+        assert entry_before.collection_ids == [record.id]
+
+        deleted = service.delete_collection(library_id, record.id)
+
+        assert deleted is True
+        assert service.list_collections(library_id) == []
+        entry_after = service.get_entry(library_id, sample_image_path)
+        assert entry_after.collection_ids == []
+        assert record.id not in entry_after.collection_ids
+
+    def test_delete_collection_unknown_id_returns_false(self, library_catalog_path):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+
+        assert service.delete_collection(library_id, "no-such-id") is False
+
+    def test_delete_collection_unknown_library_returns_false(self, library_catalog_path):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+
+        assert service.delete_collection("no-such-library", "any-id") is False
+
+    def test_collections_and_membership_survive_reload(
+        self, library_catalog_path, sample_image_path
+    ):
+        first = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = first.get_current_library_id()
+        first.add_entries(library_id, [sample_image_path])
+        record = first.create_collection(library_id, "Travel")
+        first.add_entry_to_collection(library_id, sample_image_path, record.id)
+
+        reloaded = LibraryCatalogService(catalog_path=library_catalog_path)
+        reloaded_collections = reloaded.list_collections(library_id)
+        reloaded_entry = reloaded.get_entry(library_id, sample_image_path)
+
+        assert [c.id for c in reloaded_collections] == [record.id]
+        assert reloaded_collections[0].name == "Travel"
+        assert reloaded_entry.collection_ids == [record.id]
+
+    def test_collections_missing_from_old_catalog_payload_defaults_to_empty(self):
+        """Catalog files written before this slice have no "collections"
+        key on the library and no "collection_ids" key on any entry."""
+        from src.services.library_catalog_service import LibraryEntry, LibraryRecord
+
+        library = LibraryRecord.from_dict(
+            {
+                "id": "lib-1",
+                "name": "Library 1",
+                "created_at": "2024-01-01T00:00:00+00:00",
+                "updated_at": "2024-01-01T00:00:00+00:00",
+                "entries": [
+                    {
+                        "path": "/photos/old.jpg",
+                        "filename": "old.jpg",
+                        "added_at": "2024-01-01T00:00:00+00:00",
+                        "last_seen_mtime_ns": None,
+                        "last_seen_size": None,
+                        "status": "available",
+                    }
+                ],
+                # No "collections" key at all.
+            }
+        )
+
+        assert library.collections == []
+        assert library.entries[0].collection_ids == []
+
+    def test_normalize_collection_ids_rejects_non_list_input(self):
+        from src.services.library_catalog_service import _normalize_collection_ids
+
+        assert _normalize_collection_ids(None) == []
+        assert _normalize_collection_ids("abc") == []
+        assert _normalize_collection_ids(42) == []
+
+    def test_normalize_collection_ids_dedupes_and_drops_empty(self):
+        from src.services.library_catalog_service import _normalize_collection_ids
+
+        assert _normalize_collection_ids(["a", "a", "", "   ", "b"]) == ["a", "b"]
