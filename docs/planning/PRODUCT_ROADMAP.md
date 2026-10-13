@@ -94,7 +94,7 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | 10 | Partial | Built-in profile selector ([`builtin_profiles.py`](../../src/models/builtin_profiles.py)) + single-file JSON preset export/import (File menu); no browsable on-disk preset library, no LUT-based presets. |
 | 11 | Partial | Exposure, Contrast, Highlights, Shadows, Whites, and Blacks all exist and are wired (`src/processors/tonal_processor.py`) -- this row was stale, they were previously (incorrectly) listed as missing. The legacy, non-LR **Brightness** slider still coexists alongside them, unreconciled; removing or merging it is a product decision, not attempted here since it would mean dropping a working control. |
 | 12 | Partial | A Tone Curve section with a point-curve editor (`src/views/widgets/curve_editor.py`) and a general RGB histogram widget both exist -- this row was stale. Still a Gap: a histogram backdrop drawn *inside* the curve editor itself (PDF Sec.12's "histogram" is specifically curve-overlaid, not the separate histogram panel this app has) and per-R/G/B channel curve editing (today's curve editor is a single combined curve). |
-| 13 | Partial | Saturation, Vibrance, Temperature, and Tint all exist and are wired -- this row was stale, Temperature/Tint were previously (incorrectly) listed as missing. Still a Gap: WB presets (As Shot/Auto/daylight types/Custom). |
+| 13 | Done | Saturation, Vibrance, Temperature, and Tint all exist and are wired, and WB presets (As Shot, Daylight, Cloudy, Shade, Tungsten, Fluorescent, Flash) now exist (`src/models/wb_presets.py`), each setting Temperature/Tint to directional preset values within this app's own arbitrary `-100..100` slider units -- **not** calibrated Kelvin color temperatures. Still intentionally **not** built: a real pixel-analysis "Auto" white balance (a durable, separate future gap -- needs a gray-world/illuminant-estimation algorithm, not a preset lookup) and a literal "Custom" entry (that state is already implicit the moment Temperature/Tint are manually moved). |
 | 14-15 | Done | HSL Color Mixer (8 bands x Hue/Sat/Lum) and Color Grading (Shadows/Midtones/Highlights + Blending/Balance) both implemented; wheels approximated with sliders (see the respective implementation notes). |
 | 16 | Done | Texture, Clarity, Dehaze, Vignette, and Grain all implemented (see Phase G implementation notes). |
 | 17 | Done | Sharpening, Luminance NR, and Color NR all implemented, completing the Detail group. |
@@ -160,7 +160,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 
 - Replace or reconcile **Brightness** with LR-like pipeline: **Highlights, Shadows, Whites, Blacks** + Exposure/Contrast.
 - **Point curve** + RGB / R / G / B + histogram backdrop.
-- **Temperature/Tint** + WB presets.
+- **Temperature/Tint** + WB presets -- **Done** (see docs/planning/implementation-notes/2026-10-13-wb-presets.md).
 
 ### Phase F -- Color Mixer and Color Grading (PDF 14-15)
 

@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QApplication
 from unittest.mock import MagicMock
 
 from src.models.builtin_profiles import BUILTIN_PROFILES
+from src.models.wb_presets import WB_PRESETS
 from src.processors.color_grading_processor import default_color_grading_params
 from src.processors.hsl_mixer_processor import default_hsl_params
 from src.views.tools_panel import ToolsPanel
@@ -750,3 +751,70 @@ class TestToolsPanelProfileSelector:
         panel._profile_combo.setCurrentText("Landscape")
         panel._profile_apply_button.click()
         panel.set_adjustments.assert_not_called()
+
+
+class TestToolsPanelWbPresets:
+    """Tests for the White Balance preset combo + Apply button (WB
+    presets slice, Phase E)."""
+
+    def test_combo_populated_with_wb_preset_names_in_order(self, qapp):
+        panel = ToolsPanel()
+        combo_items = [
+            panel._wb_preset_combo.itemText(i)
+            for i in range(panel._wb_preset_combo.count())
+        ]
+        assert combo_items == list(WB_PRESETS.keys())
+        assert combo_items[0] == "As Shot"
+
+    def test_selecting_combo_entry_alone_does_not_change_sliders(self, qapp):
+        panel = ToolsPanel()
+        panel._wb_preset_combo.setCurrentText("Tungsten")
+        assert panel.get_adjustments()["temperature"] == 0.0
+        assert panel.get_adjustments()["tint"] == 0.0
+
+    def test_clicking_apply_sets_sliders_to_preset_values(self, qapp):
+        panel = ToolsPanel()
+        panel._wb_preset_combo.setCurrentText("Tungsten")
+        panel._wb_preset_apply_button.click()
+        preset = WB_PRESETS["Tungsten"]
+        assert panel.get_adjustments()["temperature"] == preset["temperature"]
+        assert panel.get_adjustments()["tint"] == preset["tint"]
+
+    def test_apply_emits_adjustments_changed_touching_only_wb_keys(self, qapp):
+        panel = ToolsPanel()
+        # Give some other sliders non-default values first, to prove
+        # Apply leaves them untouched.
+        panel._exposure_slider.set_value(1.5)
+        panel._saturation_slider.set_value(-30.0)
+        prior_adjustments = panel.get_adjustments()
+
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel._wb_preset_combo.setCurrentText("Fluorescent")
+        panel._wb_preset_apply_button.click()
+
+        assert received, "adjustments_changed was never emitted"
+        final = received[-1]
+        preset = WB_PRESETS["Fluorescent"]
+        assert final["temperature"] == preset["temperature"]
+        assert final["tint"] == preset["tint"]
+        for key, value in prior_adjustments.items():
+            if key in ("temperature", "tint"):
+                continue
+            assert final[key] == value, (
+                f"Applying a WB preset changed unrelated key {key!r}"
+            )
+
+    def test_apply_emits_slider_released(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.slider_released.connect(lambda: received.append(True))
+        panel._wb_preset_combo.setCurrentText("Daylight")
+        panel._wb_preset_apply_button.click()
+        assert received == [True]
+
+    def test_unknown_preset_name_is_a_no_op(self, qapp):
+        panel = ToolsPanel()
+        panel._apply_wb_preset("Not A Real Preset")
+        assert panel.get_adjustments()["temperature"] == 0.0
+        assert panel.get_adjustments()["tint"] == 0.0

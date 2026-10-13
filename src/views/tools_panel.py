@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 
 from src.models.builtin_profiles import BUILTIN_PROFILES
+from src.models.wb_presets import WB_PRESETS
 from src.processors.color_grading_processor import default_color_grading_params
 from src.processors.hsl_mixer_processor import default_hsl_params
 from src.utils.curve_math import normalize_points
@@ -47,6 +48,18 @@ class ToolsPanel(QWidget):
             applying the profile's values is ``MainWindow``'s job, the
             same separation of concerns every other ToolsPanel signal
             already follows.
+
+    White-balance presets (``WB_PRESETS`` in ``src/models/wb_presets.py``)
+    are deliberately handled differently from Profile: they only ever
+    touch the existing Temperature/Tint sliders, entirely inside
+    ``ToolsPanel`` (``_apply_wb_preset``), reusing the sliders' own
+    existing ``value_changed``/``slider_released`` signal paths exactly
+    as a real drag-and-release would. No new signal is emitted to
+    ``MainWindow`` for this -- unlike Profile, which replaces the whole
+    adjustment state and therefore needs ``MainWindow`` to call
+    ``ImageController.restore_adjustment_state``, a WB preset is fully
+    expressible as "move these two sliders," which the sliders already
+    know how to propagate on their own.
     """
 
     adjustments_changed = pyqtSignal(dict)
@@ -223,6 +236,23 @@ class ToolsPanel(QWidget):
 
         # Color section
         color_section, color_content_layout = self._create_section("Color")
+
+        # White-balance preset row (Phase E, "Temperature/Tint + WB
+        # presets" -- see docs/planning/implementation-notes/
+        # 2026-10-13-wb-presets.md). Mirrors the Profile section's own
+        # "selecting the combo alone does nothing, only Apply acts"
+        # pattern. Unlike Profile, this only ever touches the
+        # Temperature/Tint sliders below, never any other adjustment.
+        wb_preset_row = QWidget()
+        wb_preset_row_layout = QHBoxLayout(wb_preset_row)
+        wb_preset_row_layout.setContentsMargins(0, 0, 0, 4)
+        wb_preset_row_layout.setSpacing(6)
+        self._wb_preset_combo = QComboBox()
+        self._wb_preset_combo.addItems(list(WB_PRESETS.keys()))
+        wb_preset_row_layout.addWidget(self._wb_preset_combo, 1)
+        self._wb_preset_apply_button = QPushButton("Apply")
+        wb_preset_row_layout.addWidget(self._wb_preset_apply_button)
+        color_content_layout.addWidget(wb_preset_row)
 
         self._temperature_slider = AdjustmentSlider(
             "Temperature", min_value=-100.0, max_value=100.0, default_value=0.0,
@@ -495,6 +525,9 @@ class ToolsPanel(QWidget):
         self._profile_apply_button.clicked.connect(
             lambda: self.profile_apply_requested.emit(self._profile_combo.currentText())
         )
+        self._wb_preset_apply_button.clicked.connect(
+            lambda: self._apply_wb_preset(self._wb_preset_combo.currentText())
+        )
         # Value changed signals (during slider movement)
         self._exposure_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('exposure', v)
@@ -603,6 +636,27 @@ class ToolsPanel(QWidget):
     
     def _on_slider_released(self, value: float):
         """Handle any slider being released."""
+        self.slider_released.emit()
+
+    def _apply_wb_preset(self, preset_name: str) -> None:
+        """Apply a named white-balance preset's Temperature/Tint values.
+
+        Entirely self-contained inside ToolsPanel: this only ever
+        drives the existing Temperature/Tint sliders through their own
+        ``set_value``, which triggers their existing ``value_changed``
+        -> ``_on_adjustment_changed`` path exactly as a real drag
+        would (updating ``self._adjustments`` and emitting
+        ``adjustments_changed``), then manually emits ``slider_released``
+        to trigger the same final high-quality render a real
+        slider-release already triggers. No other adjustment is
+        touched, and no new signal is emitted to MainWindow -- unlike
+        Profile, this needs no ImageController wiring at all.
+        """
+        preset = WB_PRESETS.get(preset_name)
+        if preset is None:
+            return
+        self._temperature_slider.set_value(preset["temperature"])
+        self._tint_slider.set_value(preset["tint"])
         self.slider_released.emit()
 
     def _on_curve_editor_changed(self, points: list):
