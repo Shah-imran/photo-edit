@@ -225,3 +225,90 @@ class TestLibraryCatalogService:
         )
 
         assert entry.rating == 0
+
+    def test_flag_state_survives_reload(
+        self, library_catalog_path, sample_image_path
+    ):
+        first = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = first.get_current_library_id()
+        first.add_entries(library_id, [sample_image_path])
+        first.set_entry_flag(library_id, sample_image_path, "pick")
+
+        reloaded = LibraryCatalogService(catalog_path=library_catalog_path)
+        assert reloaded.get_entry(library_id, sample_image_path).flag == "pick"
+
+    def test_flag_defaults_to_none_for_new_entries(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+
+        assert service.get_entry(library_id, sample_image_path).flag == "none"
+
+    def test_set_entry_flag_is_a_no_op_when_unchanged(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        service.set_entry_flag(library_id, sample_image_path, "reject")
+        library = service.list_libraries()[0]
+        updated_at_after_first_set = library.updated_at
+
+        service.set_entry_flag(library_id, sample_image_path, "reject")
+
+        assert library.updated_at == updated_at_after_first_set
+
+    def test_set_entry_flag_normalizes_garbage_values_to_none(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        service.set_entry_flag(library_id, sample_image_path, "pick")
+
+        service.set_entry_flag(library_id, sample_image_path, "not-a-real-flag")
+        assert service.get_entry(library_id, sample_image_path).flag == "none"
+
+        service.set_entry_flag(library_id, sample_image_path, "pick")
+        service.set_entry_flag(library_id, sample_image_path, None)
+        assert service.get_entry(library_id, sample_image_path).flag == "none"
+
+    def test_flag_missing_from_old_catalog_payload_defaults_to_none(self):
+        """Catalog files written before this slice lack the "flag" key
+        entirely; reading them must default cleanly to "none" rather than error."""
+        from src.services.library_catalog_service import LibraryEntry
+
+        entry = LibraryEntry.from_dict(
+            {
+                "path": "/photos/old.jpg",
+                "filename": "old.jpg",
+                "added_at": "2024-01-01T00:00:00+00:00",
+                "last_seen_mtime_ns": None,
+                "last_seen_size": None,
+                "status": "available",
+                # No "favorite", "rating" or "flag" key at all -- pre-dates all three.
+            }
+        )
+
+        assert entry.favorite is False
+        assert entry.rating == 0
+        assert entry.flag == "none"
+
+    def test_flag_from_corrupt_payload_normalizes_to_none(self):
+        from src.services.library_catalog_service import LibraryEntry
+
+        entry = LibraryEntry.from_dict(
+            {
+                "path": "/photos/old.jpg",
+                "filename": "old.jpg",
+                "added_at": "2024-01-01T00:00:00+00:00",
+                "last_seen_mtime_ns": None,
+                "last_seen_size": None,
+                "status": "available",
+                "flag": "corrupt-garbage-value",
+            }
+        )
+
+        assert entry.flag == "none"

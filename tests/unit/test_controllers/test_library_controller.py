@@ -121,6 +121,18 @@ class TestLibraryController:
         _, entries = rebuilt.args
         assert entries[0]["rating"] == 3
 
+    def test_set_entry_flag_delegates_and_refreshes_entries(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entry_flag(sample_image_path, "pick")
+
+        _, entries = rebuilt.args
+        assert entries[0]["flag"] == "pick"
+
     def test_cleanup_stops_thumbnail_worker(
         self,
         qapp,

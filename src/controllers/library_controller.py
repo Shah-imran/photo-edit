@@ -279,6 +279,16 @@ class LibraryController(QObject):
         self._emit_libraries()
         self._rebuild_entries_for_current_library()
 
+    def set_entry_flag(self, file_path: str, flag: str) -> None:
+        """Update the pick/reject flag for the current library and refresh its views."""
+        if not self._current_library_id or not file_path:
+            return
+        self._catalog_service.set_entry_flag(
+            self._current_library_id, file_path, flag
+        )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
     def referenced_adjustment_preview_cache_keys(self) -> set[str]:
         return self._catalog_service.referenced_adjustment_preview_cache_keys()
 
@@ -331,6 +341,7 @@ class LibraryController(QObject):
             "added_at": entry.added_at,
             "favorite": entry.favorite,
             "rating": entry.rating,
+            "flag": entry.flag,
         }
 
         if entry.status != "available":
@@ -413,6 +424,7 @@ class LibraryController(QObject):
             "added_at": entry.added_at,
             "favorite": entry.favorite,
             "rating": entry.rating,
+            "flag": entry.flag,
         }
         if library_id == self._current_library_id:
             self.entry_thumbnail_updated.emit(file_path, payload)

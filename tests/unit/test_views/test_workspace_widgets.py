@@ -143,6 +143,142 @@ def test_filmstrip_favorite_and_rating_both_show_in_tooltip_together(qapp, qtbot
     assert item.toolTip() == "Favorite\nRating: ★★★★★\nC:/photos/zebra.jpg"
 
 
+def test_filmstrip_flag_appears_in_tooltip_only_and_leaves_text_alone(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    picked = _entry("C:/photos/zebra.jpg")
+    picked["flag"] = "pick"
+    rejected = _entry("C:/photos/alpha.jpg")
+    rejected["flag"] = "reject"
+    unflagged = _entry("C:/photos/beta.jpg")
+    strip.set_entries([picked, rejected, unflagged])
+
+    picked_item = strip._item_by_path["C:/photos/zebra.jpg"]
+    rejected_item = strip._item_by_path["C:/photos/alpha.jpg"]
+    unflagged_item = strip._item_by_path["C:/photos/beta.jpg"]
+
+    # Flag never touches the item TEXT -- that's reserved for favorite.
+    assert picked_item.text() == ""
+    assert picked_item.toolTip() == "Pick\nC:/photos/zebra.jpg"
+    assert picked_item.data(Qt.ItemDataRole.UserRole + 4) == "pick"
+
+    assert rejected_item.toolTip() == "Rejected\nC:/photos/alpha.jpg"
+    assert rejected_item.data(Qt.ItemDataRole.UserRole + 4) == "reject"
+
+    # "none" adds nothing to the tooltip.
+    assert unflagged_item.toolTip() == "C:/photos/beta.jpg"
+    assert unflagged_item.data(Qt.ItemDataRole.UserRole + 4) == "none"
+
+
+def test_filmstrip_favorite_rating_and_flag_all_show_in_tooltip_together(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    entry = _entry("C:/photos/zebra.jpg")
+    entry["favorite"] = True
+    entry["rating"] = 5
+    entry["flag"] = "pick"
+    strip.set_entries([entry])
+
+    item = strip._item_by_path["C:/photos/zebra.jpg"]
+    assert item.text() == "★"
+    assert item.toolTip() == "Favorite\nRating: ★★★★★\nPick\nC:/photos/zebra.jpg"
+
+
+def test_filmstrip_context_menu_flag_as_pick_emits_flag_changed(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg")])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text() == "Flag as Pick":
+                return action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.flag_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert blocker.args == ["C:/photos/one.jpg", "pick"]
+
+
+def test_filmstrip_context_menu_flag_as_reject_emits_flag_changed(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg")])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text() == "Flag as Reject":
+                return action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.flag_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert blocker.args == ["C:/photos/one.jpg", "reject"]
+
+
+def test_filmstrip_context_menu_remove_flag_emits_none(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    entry = _entry("C:/photos/one.jpg")
+    entry["flag"] = "pick"
+    strip.set_entries([entry])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text() == "Remove Flag":
+                return action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.flag_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert blocker.args == ["C:/photos/one.jpg", "none"]
+
+
+def test_filmstrip_context_menu_remove_flag_absent_when_unflagged(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg")])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    seen_action_texts = []
+
+    def fake_exec(self, *_args, **_kwargs):
+        seen_action_texts.extend(action.text() for action in self.actions())
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert "Flag as Pick" in seen_action_texts
+    assert "Flag as Reject" in seen_action_texts
+    assert "Remove Flag" not in seen_action_texts
+
+
 def test_filmstrip_context_menu_set_rating_emits_rating_changed(qapp, qtbot):
     from unittest.mock import patch
 

@@ -50,6 +50,7 @@ class LibraryEntry:
     adjustment_state: Optional[dict] = None
     favorite: bool = False
     rating: int = 0
+    flag: str = "none"
 
     @property
     def normalized_path(self) -> str:
@@ -67,6 +68,7 @@ class LibraryEntry:
             "adjustment_state": self.adjustment_state,
             "favorite": self.favorite,
             "rating": self.rating,
+            "flag": self.flag,
         }
 
     @classmethod
@@ -82,6 +84,7 @@ class LibraryEntry:
             adjustment_state=_optional_dict(payload.get("adjustment_state")),
             favorite=bool(payload.get("favorite", False)),
             rating=_clamp_rating(payload.get("rating", 0)),
+            flag=_normalize_flag(payload.get("flag", "none")),
         )
 
 
@@ -168,6 +171,19 @@ def _clamp_rating(value) -> int:
     except (TypeError, ValueError):
         return 0
     return max(0, min(5, rating))
+
+
+def _normalize_flag(value) -> str:
+    """Coerce a persisted/incoming pick/reject flag to "none"/"pick"/"reject".
+
+    Defensive against corrupt or old-format catalog data (a missing key,
+    ``None``, or any other garbage value, all coerce to "none") the same
+    way ``_clamp_rating`` defends against out-of-range/non-numeric rating
+    values -- never raises.
+    """
+    if value in ("pick", "reject"):
+        return value
+    return "none"
 
 
 class LibraryCatalogService:
@@ -366,6 +382,25 @@ class LibraryCatalogService:
         if entry.rating == rating:
             return entry
         entry.rating = rating
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def set_entry_flag(
+        self, library_id: str, path: str, flag: str
+    ) -> LibraryEntry:
+        """Persist a pick/reject flag ("none"/"pick"/"reject") for an entry.
+
+        Anything other than exactly "pick" or "reject" normalizes to
+        "none" rather than raising -- mirrors ``set_entry_rating``'s clamp
+        style for the same reasons (see ``_normalize_flag``).
+        """
+        library = self._require_library(library_id)
+        entry = self._require_entry(library, path)
+        flag = _normalize_flag(flag)
+        if entry.flag == flag:
+            return entry
+        entry.flag = flag
         library.updated_at = _utc_now_iso()
         self._save_catalog()
         return entry

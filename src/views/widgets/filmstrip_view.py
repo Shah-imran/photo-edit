@@ -29,12 +29,23 @@ def _clamp_rating(value) -> int:
     return max(0, min(5, rating))
 
 
+def _normalize_flag(value) -> str:
+    """Coerce an incoming pick/reject flag (e.g. from an entry payload) to
+    "none"/"pick"/"reject". Mirrors ``_clamp_rating``'s local-copy style in
+    this file (and the equivalent helper in ``library_catalog_service.py``)
+    -- never raises on missing/garbage data."""
+    if value in ("pick", "reject"):
+        return value
+    return "none"
+
+
 class FilmstripView(QWidget):
     """A compact view of the active library's images."""
 
     image_selected = pyqtSignal(str)
     favorite_toggled = pyqtSignal(str, bool)
     rating_changed = pyqtSignal(str, int)
+    flag_changed = pyqtSignal(str, str)
     THUMBNAIL_SIZE = QSize(88, 62)
     CELL_SIZE = QSize(104, 78)
 
@@ -218,19 +229,26 @@ class FilmstripView(QWidget):
         item.setIcon(QIcon(pixmap))
         favorite = bool(payload.get("favorite", False))
         rating = _clamp_rating(payload.get("rating", 0))
-        # Rating is surfaced via the tooltip only -- the item TEXT stays
-        # reserved for the existing favorite "★" marker and must not be
-        # repurposed or overwritten here. See
-        # docs/planning/implementation-notes/2026-10-13-ratings.md.
+        flag = _normalize_flag(payload.get("flag", "none"))
+        # Rating/flag are surfaced via the tooltip only -- the item TEXT
+        # stays reserved for the existing favorite "★" marker and must not
+        # be repurposed or overwritten here. See
+        # docs/planning/implementation-notes/2026-10-13-ratings.md and
+        # docs/planning/implementation-notes/2026-10-13-pick-reject-flags.md.
         item.setText("★" if favorite else "")
         tooltip = str(payload.get("tooltip") or Path(str(payload["path"])).name)
         prefix = ("Favorite\n" if favorite else "")
         if rating > 0:
             prefix += f"Rating: {'★' * rating}{'☆' * (5 - rating)}\n"
+        if flag == "pick":
+            prefix += "Pick\n"
+        elif flag == "reject":
+            prefix += "Rejected\n"
         item.setToolTip(prefix + tooltip)
         item.setData(Qt.ItemDataRole.UserRole + 1, payload.get("status"))
         item.setData(Qt.ItemDataRole.UserRole + 2, favorite)
         item.setData(Qt.ItemDataRole.UserRole + 3, rating)
+        item.setData(Qt.ItemDataRole.UserRole + 4, flag)
 
     def _show_context_menu(self, position) -> None:
         item = self._list.itemAt(position)
@@ -238,6 +256,7 @@ class FilmstripView(QWidget):
             return
         path = item.data(Qt.ItemDataRole.UserRole)
         favorite = bool(item.data(Qt.ItemDataRole.UserRole + 2))
+        flag = _normalize_flag(item.data(Qt.ItemDataRole.UserRole + 4))
         menu = QMenu(self)
         favorite_action = menu.addAction(
             "Remove from Favorites" if favorite else "Add to Favorites"
@@ -254,6 +273,15 @@ class FilmstripView(QWidget):
         ):
             rating_action = rating_menu.addAction(label)
             rating_actions[rating_action] = value
+        # Pick/Reject use three flat actions rather than a "Set Flag"
+        # submenu (unlike Rating's six-option submenu): with only three
+        # choices, a flat section reads more cleanly in this menu's
+        # existing visual structure than a one-level-deeper submenu would.
+        # "Remove Flag" is only shown when a flag is currently set, to
+        # avoid offering a no-op action.
+        pick_action = menu.addAction("Flag as Pick")
+        reject_action = menu.addAction("Flag as Reject")
+        remove_flag_action = menu.addAction("Remove Flag") if flag != "none" else None
         selected = menu.exec(self._list.viewport().mapToGlobal(position))
         if selected is None or not path:
             return
@@ -261,6 +289,12 @@ class FilmstripView(QWidget):
             self.favorite_toggled.emit(str(path), not favorite)
         elif selected in rating_actions:
             self.rating_changed.emit(str(path), rating_actions[selected])
+        elif selected is pick_action:
+            self.flag_changed.emit(str(path), "pick")
+        elif selected is reject_action:
+            self.flag_changed.emit(str(path), "reject")
+        elif remove_flag_action is not None and selected is remove_flag_action:
+            self.flag_changed.emit(str(path), "none")
 
     def _placeholder_pixmap(self, missing: bool) -> QPixmap:
         pixmap = QPixmap(self.THUMBNAIL_SIZE)

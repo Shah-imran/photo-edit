@@ -86,7 +86,7 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | 1 | Partial | Open/Import/Export/Exit exist [`main_window.py`](../../src/views/main_window.py). Missing: Search My Photos, Import Presets, Export with Previous, Edit in Photoshop, Migrate catalogs. |
 | 2 | Partial | Undo/Redo currently swap rendered image buffers only; they do **not** restore controller parameters, slider/curve UI, export state, or persisted adjustment state. A future state-aware history slice must fix this before undo/redo is considered complete. Reset adjustments exists. Missing: Copy/Paste, Select All/None, Next/Prev photo, albums/stacks/share, most Edit-menu album ops, Preferences dialog. |
 | 3 | Gap | No preferences UI; no account/cloud (acceptable deferral for desktop MVP). |
-| 4 | Partial | Ratings (0-5 stars) now exist (see docs/planning/implementation-notes/2026-10-13-ratings.md). Still a Gap: pick/reject flags, keywords, album actions, date/time, Photo Merge, Enhance, Versions, Copy/Paste **edit settings** (only partial overlap with undo stack). |
+| 4 | Partial | Ratings (0-5 stars, see docs/planning/implementation-notes/2026-10-13-ratings.md) and pick/reject flags (see docs/planning/implementation-notes/2026-10-13-pick-reject-flags.md) now exist. Still a Gap: keywords, album actions, date/time, Photo Merge, Enhance, Versions, Copy/Paste **edit settings** (only partial overlap with undo stack). |
 | 5-6 | Gap / unknown | View/Help menus minimal today (PDF Sections 5-6). |
 | 7 | Partial | [`export_dialog.py`](../../src/views/export_dialog.py) exists; sidebar richness vs PDF Sec.7 unknown. |
 | 8 | Gap | No dedicated search panel (PDF Sec.8). |
@@ -134,7 +134,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 ### Phase A -- Library DAM and workspace chrome (PDF 8-9, 24; parts of 1-2, 4)
 
 - Sort/filter; optional simple **collections** or folders (subset of Albums/Album folders).
-- **Ratings** and **pick/reject** (or flags); **keywords** on disk or sidecar (design choice: XMP vs JSON) -- **Partial**: Ratings (0-5 stars, mirroring the existing Favorite flag) are **Done** (see docs/planning/implementation-notes/2026-10-13-ratings.md); pick/reject flags and keywords remain **Gap** (next slice).
+- **Ratings** and **pick/reject** (or flags); **keywords** on disk or sidecar (design choice: XMP vs JSON) -- **Partial**: Ratings (0-5 stars, mirroring the existing Favorite flag) are **Done** (see docs/planning/implementation-notes/2026-10-13-ratings.md), and pick/reject flags (a tri-state "none"/"pick"/"reject" marker, mirroring the same pattern) are now also **Done** (see docs/planning/implementation-notes/2026-10-13-pick-reject-flags.md); keywords remain **Gap**.
 - **Search** box filtering library.
 - **Filmstrip** or bottom strip + **next/previous photo** (keyboard + UI).
 - Keeps scope smaller than full Lightroom Cloud sharing/stacks.
