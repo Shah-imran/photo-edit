@@ -765,6 +765,84 @@ class TestMainWindowSettingsPersistence:
         reopened.close()
 
 
+class TestCrashRecoveryNotice:
+    """Clean-shutdown-flag tracking and the recovery notice it gates.
+
+    See docs/planning/implementation-notes/
+    2026-10-13-crash-recovery-notice.md.
+    """
+
+    def _make_window(self, qtbot, tmp_path, settings):
+        window = MainWindow(
+            settings_service=settings,
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(
+                cache_dir=tmp_path / "cache"
+            ),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
+        qtbot.addWidget(window)
+        window.show()
+        qtbot.waitExposed(window)
+        return window
+
+    def test_clean_prior_session_shows_no_notice(self, qapp, qtbot, tmp_path):
+        ini_path = tmp_path / "main-window-clean.ini"
+        settings = SettingsService(
+            QSettings(str(ini_path), QSettings.Format.IniFormat)
+        )
+        assert settings.get_clean_shutdown() is True  # unset -> defaults True
+
+        with patch("src.views.main_window.QMessageBox.information") as mock_info:
+            window = self._make_window(qtbot, tmp_path, settings)
+            qtbot.wait(20)  # let the singleShot(0, ...) callback run
+            mock_info.assert_not_called()
+
+        # The new session is marked "in progress" regardless of whether
+        # the notice fired.
+        assert settings.get_clean_shutdown() is False
+        window.close()
+
+    def test_unclean_prior_session_shows_notice(self, qapp, qtbot, tmp_path):
+        ini_path = tmp_path / "main-window-unclean.ini"
+        settings = SettingsService(
+            QSettings(str(ini_path), QSettings.Format.IniFormat)
+        )
+        settings.set_clean_shutdown(False)
+        settings.sync()
+
+        with patch("src.views.main_window.QMessageBox.information") as mock_info:
+            window = self._make_window(qtbot, tmp_path, settings)
+            qtbot.wait(20)
+            mock_info.assert_called_once()
+            args, _ = mock_info.call_args
+            assert "may not have closed cleanly" in args[2]
+
+        # Same post-construction state as the clean case: the current
+        # session is marked "in progress" either way.
+        assert settings.get_clean_shutdown() is False
+        window.close()
+
+    def test_close_event_marks_shutdown_clean_and_syncs(self, qapp, qtbot, tmp_path):
+        ini_path = tmp_path / "main-window-close.ini"
+        settings = SettingsService(
+            QSettings(str(ini_path), QSettings.Format.IniFormat)
+        )
+        window = self._make_window(qtbot, tmp_path, settings)
+        qtbot.wait(20)
+        assert settings.get_clean_shutdown() is False
+
+        with patch.object(
+            settings, "sync", wraps=settings.sync
+        ) as mock_sync:
+            window.close()
+            mock_sync.assert_called()
+
+        assert settings.get_clean_shutdown() is True
+
+
 class TestAdjustmentPayloadRoundTrip:
     """Regression coverage for _adjustment_values_from_payload.
 

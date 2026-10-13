@@ -277,6 +277,24 @@ class TestSettingsServiceInteractiveProxyMaxSize:
         assert service.get_interactive_proxy_max_size() == 500
 
 
+class TestSettingsServiceCleanShutdown:
+    """Round-trip and default behavior for the clean-shutdown flag."""
+
+    def test_default_is_true(self, service):
+        assert service.get_clean_shutdown() is True
+
+    def test_set_false_round_trips_as_actual_bool(self, service):
+        service.set_clean_shutdown(False)
+        result = service.get_clean_shutdown()
+        assert result is False
+
+    def test_set_true_round_trips_as_actual_bool(self, service):
+        service.set_clean_shutdown(False)
+        service.set_clean_shutdown(True)
+        result = service.get_clean_shutdown()
+        assert result is True
+
+
 class TestSettingsServiceSync:
     """Sanity check for the explicit flush helper."""
 

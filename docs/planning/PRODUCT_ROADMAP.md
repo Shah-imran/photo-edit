@@ -190,7 +190,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 ### Phase K -- Session persistence (PDF 23; enables B)
 
 - Wire [`ProjectModel`](../../src/models/project_model.py): library entries, per-image adjustment state, optional keyword/rating persistence.
-- **Crash-safe draft autosave (professional):** background or event-coalesced snapshot of adjustment state + library index to a temp or sidecar path; on startup, offer recovery if a clean shutdown flag was not set. Requires **K0** schema stability and a detailed plan per [INCREMENTAL_WORKFLOW.md](INCREMENTAL_WORKFLOW.md) section 4.
+- **Crash-safe draft autosave (professional):** background or event-coalesced snapshot of adjustment state + library index to a temp or sidecar path; on startup, offer recovery if a clean shutdown flag was not set. Requires **K0** schema stability and a detailed plan per [INCREMENTAL_WORKFLOW.md](INCREMENTAL_WORKFLOW.md) section 4. -- **Partial** (covered: the event-coalesced adjustment-state snapshot already existed, via the pre-existing 400ms `_adjustment_persist_timer` + synchronous `LibraryCatalogService._save_catalog()` write-through on essentially every edit; this slice adds the missing clean-shutdown-flag tracking and a one-time "may not have closed cleanly" notice on next launch, see docs/planning/implementation-notes/2026-10-13-crash-recovery-notice.md; not covered: no literal snapshot/sidecar file format, and no restore-from-snapshot flow -- there is nothing to restore beyond what is already continuously persisted).
 
 ### Professional shell (non-PDF; plan alongside B and K)
 

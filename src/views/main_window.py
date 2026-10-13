@@ -87,6 +87,25 @@ class MainWindow(QMainWindow):
         
         # One settings service shared by the window and its consumers.
         self._settings_service = settings_service or SettingsService()
+
+        # Crash-recovery notice bookkeeping (see docs/planning/
+        # implementation-notes/2026-10-13-crash-recovery-notice.md).
+        # Read the PREVIOUS session's clean-shutdown flag before doing
+        # anything else, then immediately mark the CURRENT session as
+        # "in progress" (not yet cleanly closed). Order matters: if the
+        # read happened after the write, it would always see the
+        # just-written False and never detect a real crash. ``sync()``
+        # is called right away so this False reaches disk promptly --
+        # QSettings does not guarantee an immediate flush to the backing
+        # store on every setValue() (it may buffer, depending on
+        # platform/backend), and this flag's entire purpose is to
+        # survive a crash that happens moments later, so relying on
+        # whatever implicit flush QSettings gets around to on its own
+        # would defeat the feature.
+        self._last_shutdown_was_clean = self._settings_service.get_clean_shutdown()
+        self._settings_service.set_clean_shutdown(False)
+        self._settings_service.sync()
+
         self._catalog_service = (
             catalog_service if catalog_service is not None else LibraryCatalogService()
         )
@@ -144,6 +163,36 @@ class MainWindow(QMainWindow):
         self._restore_window_state()
         self._library_controller.initialize()
         self._restore_last_session_image()
+
+        # Defer the recovery notice until after the window is actually
+        # shown. __init__ runs before show(); a QMessageBox popping up
+        # mid-construction, before anything is visible, would be
+        # confusing. QTimer.singleShot(0, ...) queues the call on the Qt
+        # event loop instead of firing it synchronously here, so it runs
+        # once the loop starts processing events -- which, per
+        # src/main.py's window.show() then app.exec() sequence (and per
+        # qtbot.waitExposed in tests, which also pumps the event loop),
+        # is always after the window is visible.
+        QTimer.singleShot(0, self._maybe_show_crash_recovery_notice)
+
+    def _maybe_show_crash_recovery_notice(self) -> None:
+        """Show a one-time notice if the previous session did not exit cleanly.
+
+        Does nothing on the ordinary clean-shutdown-then-relaunch case.
+        This is a session-level honesty notice, not a restore flow: there
+        is nothing to "recover" beyond what the existing debounced
+        adjustment-persist timer / library catalog save already wrote to
+        disk continuously during the previous session.
+        """
+        if self._last_shutdown_was_clean:
+            return
+        QMessageBox.information(
+            self,
+            "PhotoEdit",
+            "PhotoEdit may not have closed cleanly last time. Your edits "
+            "are saved automatically as you work, so no changes should "
+            "have been lost.",
+        )
 
     def _setup_ui(self):
         """Set up the main UI components."""
@@ -1267,6 +1316,7 @@ class MainWindow(QMainWindow):
         self._image_preview_cache_service.remove_orphaned_cache(
             self._library_controller.referenced_adjustment_preview_cache_keys()
         )
+        self._settings_service.set_clean_shutdown(True)
         self._settings_service.sync()
         self._library_controller.cleanup()
         self._library_view.cleanup()

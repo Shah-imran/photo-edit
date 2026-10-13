@@ -36,6 +36,7 @@ _KEY_CONFIRM_EXPORT_OVERWRITE = "export/confirm_overwrite"
 _KEY_LAST_EXPORT_OPTIONS = "export/last_options"
 _KEY_PROXY_MAX_SIZE = "performance/proxy_max_size"
 _KEY_INTERACTIVE_PROXY_MAX_SIZE = "performance/interactive_proxy_max_size"
+_KEY_CLEAN_SHUTDOWN = "session/clean_shutdown"
 
 
 class SettingsService:
@@ -256,6 +257,33 @@ class SettingsService:
     def set_interactive_proxy_max_size(self, size: int) -> None:
         """Persist the preferred interactive/drag proxy max dimension (px)."""
         self._settings.setValue(_KEY_INTERACTIVE_PROXY_MAX_SIZE, int(size))
+
+    def get_clean_shutdown(self) -> bool:
+        """Return whether the previous session reached a clean shutdown.
+
+        Defaults to ``True`` when the preference has never been
+        explicitly set, so a fresh install (or a settings store wiped by
+        a test) never shows a false-positive "may not have closed
+        cleanly" recovery notice on its very first launch. Unlike
+        :meth:`get_proxy_max_size`'s ``contains()``-first pattern (which
+        needs to distinguish "never set" from "explicitly set" because it
+        has no sane in-process default), this flag always wants a real
+        default of ``True``, so the plain ``type=bool`` pattern from
+        :meth:`get_confirm_export_overwrite` is used instead -- it keeps
+        ``QSettings`` from handing back the stored ``"false"``/``"true"``
+        string on platforms that persist booleans as text (a string is
+        always truthy in Python).
+        """
+        return bool(self._settings.value(_KEY_CLEAN_SHUTDOWN, True, type=bool))
+
+    def set_clean_shutdown(self, clean: bool) -> None:
+        """Persist whether the current session is (or was) cleanly closed.
+
+        Callers set this to ``False`` early in startup (the session is
+        now "in progress") and back to ``True`` in a clean
+        ``closeEvent`` -- see ``MainWindow`` for the exact sequencing.
+        """
+        self._settings.setValue(_KEY_CLEAN_SHUTDOWN, bool(clean))
 
     def sync(self) -> None:
         """Flush pending changes to the underlying store."""
