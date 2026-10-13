@@ -317,6 +317,17 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction(
             self._create_action(
+                "Select &All", self._filmstrip_view.select_all, "Ctrl+A"
+            )
+        )
+        edit_menu.addAction(
+            self._create_action(
+                "Select &None", self._filmstrip_view.select_none, "Ctrl+Shift+A"
+            )
+        )
+        edit_menu.addSeparator()
+        edit_menu.addAction(
+            self._create_action(
                 "&Preferences...", self._show_preferences, "Ctrl+,"
             )
         )

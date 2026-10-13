@@ -824,6 +824,33 @@ def test_filmstrip_single_click_still_opens_exactly_one_image_unregressed(
     assert received == ["C:/photos/two.jpg"]
 
 
+def test_filmstrip_select_all_selects_every_shown_item(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+
+    strip.select_all()
+
+    assert len(strip._list.selectedItems()) == 2
+
+
+def test_filmstrip_select_none_clears_selection_without_changing_current_item(
+    qapp, qtbot
+):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+    strip.select_all()
+    strip._list.setCurrentRow(0)
+
+    strip.select_none()
+
+    assert strip._list.selectedItems() == []
+    # Clearing the selection must not change which item is "current" --
+    # the single-image-open flow is unaffected by selection state.
+    assert strip.current_path() == "C:/photos/one.jpg"
+
+
 def test_filmstrip_batch_context_menu_only_triggers_when_right_clicked_item_is_selected(
     qapp, qtbot
 ):

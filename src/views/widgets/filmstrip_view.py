@@ -192,6 +192,24 @@ class FilmstripView(QWidget):
         self._list.currentItemChanged.connect(self._on_current_item_changed)
         layout.addWidget(self._list)
 
+    def select_all(self) -> None:
+        """Select every item currently shown in the strip (Edit > Select
+        All, PDF section 2). Multi-select UI itself is unaffected by
+        this -- see docs/planning/implementation-notes/
+        2026-10-13-multi-select-batch-actions.md; this just invokes the
+        same ``ExtendedSelection`` mode's own "select all" behavior
+        programmatically, the way Ctrl+A already does for free when the
+        list itself has keyboard focus."""
+        self._list.selectAll()
+
+    def select_none(self) -> None:
+        """Clear the current selection (Edit > Select None, PDF section
+        2) without changing which item is "current" -- a plain click
+        still opens exactly one image in the editor regardless of
+        selection state, so clearing the selection here has no effect on
+        the open image."""
+        self._list.clearSelection()
+
     def set_collections(self, collections: list[dict]) -> None:
         """Cache the current library's flat collection list for the
         context menu's "Add to Collection" submenu. Does not itself
