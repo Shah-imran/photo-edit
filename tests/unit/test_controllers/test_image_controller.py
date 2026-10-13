@@ -261,6 +261,7 @@ class TestImageController:
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
+            "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
         }
         controller.cleanup()
 
@@ -305,6 +306,7 @@ class TestImageController:
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
+            "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
         }
         assert controller.image_model.get_current_image() is not None
         assert controller.can_undo() is False
@@ -1434,6 +1436,197 @@ class TestImageControllerStraighten:
         )
         assert controller.can_undo() is True
         assert controller.undo() is True
+
+
+class TestImageControllerCrop:
+    """Phase I (Geometry and Crop), slice 1 -- the data/processing layer
+    for the Crop tool. See docs/planning/implementation-notes/
+    2026-10-13-crop-processor.md."""
+
+    def test_default_crop_is_full_frame(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_restore_adjustment_state_applies_crop(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"crop": {"x0": 0.1, "y0": 0.2, "x1": 0.8, "y1": 0.9}}
+        )
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.1,
+            "y0": 0.2,
+            "x1": 0.8,
+            "y1": 0.9,
+        }
+
+    def test_missing_crop_key_defaults_to_full_frame(self, qapp, sample_image):
+        """Backward compatibility: an old catalog/preset payload that
+        pre-dates this slice and omits "crop" entirely must default
+        cleanly to the full-frame rectangle -- the same pattern every
+        prior non-flat-key addition (tone_curve/hsl/color_grading)
+        already established."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"exposure": 1.0})
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_restore_adjustment_state_tolerates_malformed_crop(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"crop": "not a dict"})
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_restore_adjustment_state_clamps_out_of_range_crop(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"crop": {"x0": -0.5, "y0": -0.5, "x1": 1.5, "y1": 1.5}}
+        )
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_crop_reaches_export_image_and_shrinks_it(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original_shape = pil_to_linear(sample_image).shape
+
+        controller.restore_adjustment_state(
+            {"crop": {"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75}}
+        )
+
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape != original_shape
+        assert export.shape[0] < original_shape[0]
+        assert export.shape[1] < original_shape[1]
+
+    def test_on_crop_changed_round_trips_and_adds_to_history(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_crop_changed({"x0": 0.1, "y0": 0.1, "x1": 0.6, "y1": 0.6})
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.1,
+            "y0": 0.1,
+            "x1": 0.6,
+            "y1": 0.6,
+        }
+        assert controller.can_undo() is True
+
+    def test_on_crop_changed_normalizes_defensively(self, qapp, sample_image):
+        """on_crop_changed must not trust its caller, mirroring
+        CropProcessor's own clamp/swap logic."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_crop_changed({"x0": 0.9, "y0": -1.0, "x1": 0.1, "y1": 2.0})
+
+        state = controller.get_adjustment_state()["crop"]
+        assert state["x0"] == 0.1
+        assert state["x1"] == 0.9
+        assert state["y0"] == 0.0
+        assert state["y1"] == 1.0
+
+    def test_crop_undo_restores_full_crop_state(self, qapp, sample_image):
+        """Crop to rect A, then crop to rect B, undo, assert the crop
+        state equals rect A's values, not rect B's -- mirrors the core
+        state-aware undo/redo regression pattern."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        rect_a = {"x0": 0.1, "y0": 0.1, "x1": 0.5, "y1": 0.5}
+        rect_b = {"x0": 0.2, "y0": 0.2, "x1": 0.6, "y1": 0.6}
+        controller.on_crop_changed(rect_a)
+        controller.on_crop_changed(rect_b)
+
+        assert controller.get_adjustment_state()["crop"] == rect_b
+
+        assert controller.undo() is True
+
+        assert controller.get_adjustment_state()["crop"] == rect_a
+
+    def test_crop_undo_restores_image_shape_too(self, qapp, sample_image):
+        """Undo must restore both the crop state AND the actual image
+        shape, not just the pixel-buffer-only behavior this slice's
+        state-aware undo/redo infrastructure was built to fix."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original_shape = pil_to_linear(sample_image).shape
+
+        controller.on_crop_changed({"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75})
+        cropped_shape = controller.get_current_image().shape
+        assert cropped_shape != original_shape
+
+        controller.on_crop_changed({"x0": 0.1, "y0": 0.1, "x1": 0.4, "y1": 0.4})
+        smaller_shape = controller.get_current_image().shape
+        assert smaller_shape != cropped_shape
+
+        assert controller.undo() is True
+
+        assert controller.get_current_image().shape == cropped_shape
+
+    def test_reset_to_original_clears_crop(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_crop_changed({"x0": 0.1, "y0": 0.1, "x1": 0.5, "y1": 0.5})
+
+        controller.reset_to_original()
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_loading_a_different_image_clears_crop(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_crop_changed({"x0": 0.1, "y0": 0.1, "x1": 0.5, "y1": 0.5})
+
+        controller._apply_loaded_image("other.jpg", pil_to_linear(sample_image))
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
 
 
 class TestImageControllerStateAwareUndoRedo:

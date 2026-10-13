@@ -847,3 +847,81 @@ class TestProcessingWorkerStraighten:
         key_b = worker._cache_key(request_b, source)
 
         assert key_a != key_b
+
+
+class TestProcessingWorkerCrop:
+    """Crop is applied strictly LAST, after Straighten -- the one
+    deliberately shape-changing processor in this codebase. See
+    docs/planning/implementation-notes/2026-10-13-crop-processor.md."""
+
+    def test_crop_params_reach_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._crop_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1,
+            crop_params={"x0": 0.1, "y0": 0.1, "x1": 0.9, "y1": 0.9},
+            use_proxy=False,
+        ))
+        assert calls == [{"x0": 0.1, "y0": 0.1, "x1": 0.9, "y1": 0.9}]
+
+    def test_empty_crop_params_skips_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._crop_processor,
+            "process",
+            lambda image, **kwargs: calls.append(kwargs) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1,
+            crop_params={},
+            use_proxy=False,
+        ))
+        assert calls == []
+
+    def test_crop_actually_shrinks_the_full_resolution_result(self):
+        """Confirm the worker's real end-to-end pipeline (not a mocked
+        processor) produces a genuinely smaller output for a real crop --
+        the one deliberate shape change in this codebase."""
+        worker = ProcessingWorker()
+        source = _linear_image(width=100, height=80)
+        worker.set_image(source)
+
+        results = []
+        worker.processing_complete.connect(lambda rid, image: results.append(image))
+        worker._process_request(ProcessingRequest(
+            request_id=1,
+            crop_params={"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75},
+            use_proxy=False,
+        ))
+
+        assert len(results) == 1
+        assert results[0].shape != source.shape
+        assert results[0].shape[0] < source.shape[0]
+        assert results[0].shape[1] < source.shape[1]
+
+    def test_different_crop_params_produce_different_cache_keys(self):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        request_a = ProcessingRequest(
+            request_id=1, crop_params={}, use_proxy=True
+        )
+        request_b = ProcessingRequest(
+            request_id=2,
+            crop_params={"x0": 0.1, "y0": 0.1, "x1": 0.9, "y1": 0.9},
+            use_proxy=True,
+        )
+        source = worker._proxy_manager.get_proxy(interactive=True)
+
+        key_a = worker._cache_key(request_a, source)
+        key_b = worker._cache_key(request_b, source)
+
+        assert key_a != key_b

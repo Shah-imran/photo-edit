@@ -398,6 +398,44 @@ class TestCombinedAdjustmentCommand:
         command.undo()
         assert model.get_current_image() is previous
 
+    def test_crop_only_and_undo(self, sample_linear_image):
+        """Crop is the one processor that deliberately changes shape --
+        confirm the combined command's synchronous fallback applies it
+        correctly and undo restores the uncropped image."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+        previous = model.get_current_image()
+        command = CombinedAdjustmentCommand(
+            model, crop_params={"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75}
+        )
+        command.execute()
+        assert model.is_modified() is True
+        new_image = model.get_current_image()
+        assert new_image.shape != sample_linear_image.shape
+        assert new_image.shape[0] < sample_linear_image.shape[0]
+        assert new_image.shape[1] < sample_linear_image.shape[1]
+        command.undo()
+        assert model.get_current_image() is previous
+
+    def test_crop_applied_after_straighten(self, sample_linear_image):
+        """Crop must be the absolute last step, after Straighten -- see
+        docs/planning/implementation-notes/2026-10-13-crop-processor.md
+        section 1."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+        command = CombinedAdjustmentCommand(
+            model,
+            straighten_params={"straighten": 10.0},
+            crop_params={"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75},
+        )
+        command.execute()
+        new_image = model.get_current_image()
+        # If crop ran before straighten, straighten's warpAffine (which
+        # locks output to its own input's exact dimensions) would have
+        # re-grown the shape back to the original, uncropped size.
+        assert new_image.shape[0] < sample_linear_image.shape[0]
+        assert new_image.shape[1] < sample_linear_image.shape[1]
+
 
 class TestAdjustmentStateCommand:
     """Test cases for AdjustmentStateCommand -- the state-aware command

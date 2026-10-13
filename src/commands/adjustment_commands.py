@@ -28,6 +28,7 @@ from src.processors.remove_chromatic_aberration_processor import (
 )
 from src.processors.defringe_processor import DefringeProcessor
 from src.processors.straighten_processor import StraightenProcessor
+from src.processors.crop_processor import CropProcessor
 from src.utils.color_pipeline import LinearImage
 
 if TYPE_CHECKING:
@@ -140,6 +141,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         remove_ca_params: Dict[str, float] = None,
         defringe_params: Dict[str, float] = None,
         straighten_params: Dict[str, float] = None,
+        crop_params: Dict[str, float] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -194,6 +196,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._defringe_params = defringe_params or {}
         self._straighten_processor = StraightenProcessor()
         self._straighten_params = straighten_params or {}
+        self._crop_processor = CropProcessor()
+        self._crop_params = crop_params or {}
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -282,6 +286,12 @@ class CombinedAdjustmentCommand(BaseCommand):
             result = self._straighten_processor.process(
                 result, **self._straighten_params
             )
+
+        # Crop is applied strictly LAST, after every other processor
+        # (including Straighten) -- see docs/planning/implementation-notes/
+        # 2026-10-13-crop-processor.md section 1.
+        if self._crop_params:
+            result = self._crop_processor.process(result, **self._crop_params)
 
         self._new_image = result
         self._image_model.current_image = result

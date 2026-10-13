@@ -38,6 +38,7 @@ from src.processors.remove_chromatic_aberration_processor import (
 )
 from src.processors.defringe_processor import DefringeProcessor
 from src.processors.straighten_processor import StraightenProcessor
+from src.processors.crop_processor import CropProcessor
 from src.commands.adjustment_commands import (
     AdjustmentStateCommand,
     CombinedAdjustmentCommand,
@@ -149,6 +150,12 @@ class ImageController(QObject):
     # -- nested under one "color_grading" key -- see
     # docs/planning/implementation-notes/2026-09-30-color-grading.md.
     _COLOR_GRADING_DEFAULTS = default_color_grading_params()
+    # Crop's 4 keys are also non-flat (nested under one "crop" key, same
+    # reasoning as tone_curve/hsl/color_grading above), but unlike those,
+    # its identity/"no crop" default is the full-frame rectangle, not all
+    # zeros -- see docs/planning/implementation-notes/
+    # 2026-10-13-crop-processor.md section 4.
+    _CROP_DEFAULTS = {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
 
     def __init__(
         self,
@@ -199,6 +206,7 @@ class ImageController(QObject):
         self._remove_ca_processor = RemoveChromaticAberrationProcessor()
         self._defringe_processor = DefringeProcessor()
         self._straighten_processor = StraightenProcessor()
+        self._crop_processor = CropProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
@@ -219,6 +227,17 @@ class ImageController(QObject):
         self._remove_ca_params: Dict[str, float] = {}
         self._defringe_params: Dict[str, float] = {}
         self._straighten_params: Dict[str, float] = {}
+        # Unlike every other _xxx_params field, Crop's natural "no crop"
+        # default ({"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}, the full
+        # frame) is a non-empty dict, so it cannot double as its own
+        # falsy "not yet touched" sentinel the way the other fields'
+        # all-zero defaults do. _crop_params is therefore kept at {}
+        # (falsy, matching the skip-if-empty convention used everywhere
+        # else) whenever there is no actual crop, and only populated
+        # with the real {"x0": ..., ...} values when a non-identity crop
+        # is set -- see docs/planning/implementation-notes/
+        # 2026-10-13-crop-processor.md section 4.
+        self._crop_params: Dict[str, float] = {}
 
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
@@ -487,6 +506,7 @@ class ImageController(QObject):
         self._remove_ca_params = {}
         self._defringe_params = {}
         self._straighten_params = {}
+        self._crop_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._pending_history_previous_state = None
@@ -629,6 +649,12 @@ class ImageController(QObject):
             result = self._straighten_processor.process(
                 result, **self._straighten_params
             )
+        # Crop is applied strictly LAST, after every other processor
+        # (including Straighten) -- see CropProcessor's module
+        # docstring and docs/planning/implementation-notes/
+        # 2026-10-13-crop-processor.md section 1 for why.
+        if self._crop_params:
+            result = self._crop_processor.process(result, **self._crop_params)
         return result
 
     def refresh_view(self) -> None:
@@ -645,14 +671,17 @@ class ImageController(QObject):
     def get_adjustment_state(self) -> Dict[str, Any]:
         """Return the current normalized adjustment payload.
 
-        Includes three non-flat keys alongside the eleven float keys:
+        Includes four non-flat keys alongside the flat float keys:
         ``"tone_curve"`` (a JSON-plain list of ``[x, y]`` control points --
         see docs/planning/implementation-notes/2026-09-29-tone-curve.md
         section 4), ``"hsl"`` (a flat 24-key dict for the Color Mixer --
         see docs/planning/implementation-notes/2026-09-30-hsl-color-mixer.md
-        section 4), and ``"color_grading"`` (a flat 11-key dict -- see
+        section 4), ``"color_grading"`` (a flat 11-key dict -- see
         docs/planning/implementation-notes/2026-09-30-color-grading.md
-        section 4).
+        section 4), and ``"crop"`` (a 4-key ``{"x0", "y0", "x1", "y1"}``
+        dict of normalized fractions, defaulting to the full-frame
+        rectangle -- see docs/planning/implementation-notes/
+        2026-10-13-crop-processor.md section 4).
         """
         state: Dict[str, Any] = self._ADJUSTMENT_DEFAULTS.copy()
         state.update(self._exposure_params)
@@ -677,6 +706,7 @@ class ImageController(QObject):
         state.update(self._remove_ca_params)
         state.update(self._defringe_params)
         state.update(self._straighten_params)
+        state["crop"] = {**self._CROP_DEFAULTS, **self._crop_params}
         return state
 
     def _apply_state_params(
@@ -693,10 +723,10 @@ class ImageController(QObject):
 
         Returns:
             A dict with the normalized pieces actually applied --
-            ``"normalized"`` (the 18-key flat float dict),
-            ``"curve_points"``, ``"hsl_values"`` and
-            ``"color_grading_values"`` -- so callers that need to reason
-            about "are there any non-default changes" (as
+            ``"normalized"`` (the flat float dict), ``"curve_points"``,
+            ``"hsl_values"``, ``"color_grading_values"`` and
+            ``"crop_values"`` -- so callers that need to reason about
+            "are there any non-default changes" (as
             ``restore_adjustment_state`` does) don't have to recompute them.
         """
         normalized = self._normalize_adjustment_state(adjustments)
@@ -708,6 +738,9 @@ class ImageController(QObject):
         )
         color_grading_values = self._normalize_color_grading_state(
             adjustments.get("color_grading") if adjustments else None
+        )
+        crop_values = self._normalize_crop_state(
+            adjustments.get("crop") if adjustments else None
         )
 
         self._exposure_params = {
@@ -745,12 +778,16 @@ class ImageController(QObject):
         self._remove_ca_params = {"remove_ca": normalized["remove_ca"]}
         self._defringe_params = {"defringe": normalized["defringe"]}
         self._straighten_params = {"straighten": normalized["straighten"]}
+        self._crop_params = (
+            {} if self._is_identity_crop(crop_values) else crop_values
+        )
 
         return {
             "normalized": normalized,
             "curve_points": curve_points,
             "hsl_values": hsl_values,
             "color_grading_values": color_grading_values,
+            "crop_values": crop_values,
         }
 
     def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
@@ -776,6 +813,7 @@ class ImageController(QObject):
         curve_points = applied["curve_points"]
         hsl_values = applied["hsl_values"]
         color_grading_values = applied["color_grading_values"]
+        crop_values = applied["crop_values"]
 
         if not self.has_image():
             return
@@ -788,6 +826,7 @@ class ImageController(QObject):
                 color_grading_values.get(key, 0.0) != default
                 for key, default in self._COLOR_GRADING_DEFAULTS.items()
             )
+            or not self._is_identity_crop(crop_values)
         )
         if not has_changes:
             self._image_model.reset_to_original()
@@ -832,6 +871,8 @@ class ImageController(QObject):
         result = self._straighten_processor.process(
             result, **self._straighten_params
         )
+        if self._crop_params:
+            result = self._crop_processor.process(result, **self._crop_params)
         self._image_model.current_image = result
         self.refresh_view()
 
@@ -857,6 +898,7 @@ class ImageController(QObject):
         self._remove_ca_params = {}
         self._defringe_params = {}
         self._straighten_params = {}
+        self._crop_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._pending_history_previous_state = None
@@ -1006,6 +1048,7 @@ class ImageController(QObject):
         remove_ca_params: Dict[str, float] = None,
         defringe_params: Dict[str, float] = None,
         straighten_params: Dict[str, float] = None,
+        crop_params: Dict[str, float] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -1065,6 +1108,13 @@ class ImageController(QObject):
             self._defringe_params = defringe_params
         if straighten_params:
             self._straighten_params = straighten_params
+        if crop_params is not None:
+            # Like curve_params (and unlike every other _xxx_params
+            # field), {} is a legitimate, meaningful value here -- it is
+            # Crop's own "identity/no crop" sentinel (see _CROP_DEFAULTS'
+            # docstring) -- so the guard checks "is not None", not
+            # truthiness, to allow a caller to explicitly reset it.
+            self._crop_params = crop_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -1089,6 +1139,7 @@ class ImageController(QObject):
                         remove_ca_params=self._remove_ca_params,
                         defringe_params=self._defringe_params,
                         straighten_params=self._straighten_params,
+                        crop_params=self._crop_params,
                     )
                 )
             else:
@@ -1113,6 +1164,7 @@ class ImageController(QObject):
                         remove_ca_params=self._remove_ca_params,
                         defringe_params=self._defringe_params,
                         straighten_params=self._straighten_params,
+                        crop_params=self._crop_params,
                         interactive_preview=True,
                     )
                 )
@@ -1148,6 +1200,7 @@ class ImageController(QObject):
                 remove_ca_params=self._remove_ca_params,
                 defringe_params=self._defringe_params,
                 straighten_params=self._straighten_params,
+                crop_params=self._crop_params,
             )
             command.execute()
 
@@ -1364,6 +1417,7 @@ class ImageController(QObject):
                 'remove_ca': self._remove_ca_params,
                 'defringe': self._defringe_params,
                 'straighten': self._straighten_params,
+                'crop': self._crop_params,
             })
             mode = "debounced-threaded"
         else:
@@ -1449,6 +1503,7 @@ class ImageController(QObject):
                 'remove_ca': self._remove_ca_params,
                 'defringe': self._defringe_params,
                 'straighten': self._straighten_params,
+                'crop': self._crop_params,
             })
         else:
             self.apply_adjustments(
@@ -1504,6 +1559,7 @@ class ImageController(QObject):
                 'remove_ca': self._remove_ca_params,
                 'defringe': self._defringe_params,
                 'straighten': self._straighten_params,
+                'crop': self._crop_params,
             })
         else:
             self.apply_adjustments(
@@ -1559,6 +1615,7 @@ class ImageController(QObject):
                 'remove_ca': self._remove_ca_params,
                 'defringe': self._defringe_params,
                 'straighten': self._straighten_params,
+                'crop': self._crop_params,
             })
         else:
             self.apply_adjustments(
@@ -1571,6 +1628,40 @@ class ImageController(QObject):
                 self._color_grading_params,
                 add_to_history=False,
             )
+
+    def on_crop_changed(self, crop: Dict[str, float]) -> None:
+        """Handle a crop-rectangle change.
+
+        Set programmatically for now -- slice 2 (a later, separate
+        change) wires this to interactive drag-handle UI; this method is
+        this slice's entire "UI surface" and is meant to be called
+        directly, not through any slider/mouse interaction yet. Mirrors
+        :meth:`on_curve_changed`/:meth:`on_hsl_changed`'s pattern: it
+        captures the pre-gesture state via
+        :meth:`_capture_pending_history_state`, normalizes/clamps the
+        incoming rectangle the same defensive way
+        :class:`~src.processors.crop_processor.CropProcessor` itself
+        does (never trusting the caller), and stores the result.
+
+        Unlike a slider drag, a crop change from the later UI slice will
+        most likely be a single discrete "Apply" action rather than a
+        continuous stream of in-flight values -- there is no interactive
+        preview/debounce dance here. The new rectangle is routed
+        directly through :meth:`apply_adjustments` with
+        ``add_to_history=True``, so it participates fully in the
+        state-aware undo/redo system (see
+        docs/planning/implementation-notes/
+        2026-10-13-state-aware-undo-redo.md) in a single step.
+        """
+        if not self.has_image():
+            return
+
+        self._capture_pending_history_state()
+
+        normalized = self._normalize_crop_state(crop)
+        crop_params = {} if self._is_identity_crop(normalized) else normalized
+
+        self.apply_adjustments(crop_params=crop_params, add_to_history=True)
 
     def _on_throttled_adjustment(self, params: dict) -> None:
         """Handle throttled live preview updates during slider drags."""
@@ -1598,6 +1689,7 @@ class ImageController(QObject):
         remove_ca_params = params.get('remove_ca', {})
         defringe_params = params.get('defringe', {})
         straighten_params = params.get('straighten', {})
+        crop_params = params.get('crop', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
@@ -1617,6 +1709,7 @@ class ImageController(QObject):
             remove_ca_params=remove_ca_params,
             defringe_params=defringe_params,
             straighten_params=straighten_params,
+            crop_params=crop_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1656,6 +1749,7 @@ class ImageController(QObject):
         remove_ca_params = params.get('remove_ca', {})
         defringe_params = params.get('defringe', {})
         straighten_params = params.get('straighten', {})
+        crop_params = params.get('crop', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -1678,6 +1772,7 @@ class ImageController(QObject):
             remove_ca_params=remove_ca_params,
             defringe_params=defringe_params,
             straighten_params=straighten_params,
+            crop_params=crop_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1796,6 +1891,7 @@ class ImageController(QObject):
                 remove_ca_params=self._remove_ca_params,
                 defringe_params=self._defringe_params,
                 straighten_params=self._straighten_params,
+                crop_params=self._crop_params,
                 interactive_preview=False,
             )
 
@@ -1838,7 +1934,8 @@ class ImageController(QObject):
             any(v != 0 for v in self._remove_ca_params.values()) or
             any(v != 0 for v in self._defringe_params.values()) or
             any(v != 0 for v in self._straighten_params.values()) or
-            not is_identity_curve(self._curve_params.get("points"))
+            not is_identity_curve(self._curve_params.get("points")) or
+            bool(self._crop_params)
         )
 
     def _submit_delayed_final_render(self) -> None:
@@ -1872,6 +1969,7 @@ class ImageController(QObject):
             remove_ca_params=self._remove_ca_params,
             defringe_params=self._defringe_params,
             straighten_params=self._straighten_params,
+            crop_params=self._crop_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -1960,6 +2058,7 @@ class ImageController(QObject):
                 remove_ca_params=self._remove_ca_params.copy(),
                 defringe_params=self._defringe_params.copy(),
                 straighten_params=self._straighten_params.copy(),
+                crop_params=self._crop_params.copy(),
             )
             command.execute()
 
@@ -1997,6 +2096,51 @@ class ImageController(QObject):
     ) -> Dict[str, float]:
         """Return a complete 11-key Color Grading payload, defaulted to identity."""
         return self._normalize_floats(raw_color_grading, self._COLOR_GRADING_DEFAULTS)
+
+    def _normalize_crop_state(
+        self,
+        raw_crop: Optional[Dict[str, float]],
+    ) -> Dict[str, float]:
+        """Return a complete 4-key ``{"x0", "y0", "x1", "y1"}`` crop
+        rectangle, defaulted to the full frame and defensively clamped.
+
+        Unlike :meth:`_normalize_floats` (reused by the other three
+        non-flat categories), this cannot just float-coerce each key
+        against a default: the 4 values are mutually constrained (each
+        in ``[0.0, 1.0]``, and ``x1``/``y1`` must not be below
+        ``x0``/``y0``). The exact same clamp/swap logic
+        :class:`~src.processors.crop_processor.CropProcessor` itself
+        applies is mirrored here so a malformed/out-of-range persisted
+        rectangle (an old catalog entry, a malformed imported preset) is
+        never trusted blindly, consistent with how the processor treats
+        its own input.
+        """
+        normalized = self._normalize_floats(raw_crop, self._CROP_DEFAULTS)
+        x0, y0, x1, y1 = (
+            normalized["x0"],
+            normalized["y0"],
+            normalized["x1"],
+            normalized["y1"],
+        )
+        x0 = max(0.0, min(1.0, x0))
+        x1 = max(0.0, min(1.0, x1))
+        y0 = max(0.0, min(1.0, y0))
+        y1 = max(0.0, min(1.0, y1))
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        return {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+
+    @staticmethod
+    def _is_identity_crop(crop_values: Dict[str, float]) -> bool:
+        """True if ``crop_values`` is the full-frame (no-op) rectangle."""
+        return (
+            crop_values.get("x0", 0.0) <= 0.0
+            and crop_values.get("y0", 0.0) <= 0.0
+            and crop_values.get("x1", 1.0) >= 1.0
+            and crop_values.get("y1", 1.0) >= 1.0
+        )
 
     @staticmethod
     def _normalize_floats(

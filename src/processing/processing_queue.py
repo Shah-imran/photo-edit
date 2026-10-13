@@ -43,6 +43,7 @@ class ProcessingRequest:
     remove_ca_params: Dict[str, float] = field(default_factory=dict)
     defringe_params: Dict[str, float] = field(default_factory=dict)
     straighten_params: Dict[str, float] = field(default_factory=dict)
+    crop_params: Dict[str, float] = field(default_factory=dict)
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
     cancelled: bool = False
@@ -113,6 +114,7 @@ class ProcessingQueue:
         remove_ca_params: Optional[Dict[str, float]] = None,
         defringe_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
+        crop_params: Optional[Dict[str, float]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> ProcessingRequest:
@@ -152,6 +154,7 @@ class ProcessingQueue:
                 remove_ca_params=remove_ca_params or {},
                 defringe_params=defringe_params or {},
                 straighten_params=straighten_params or {},
+                crop_params=crop_params or {},
                 use_proxy=use_proxy,
                 interactive_preview=interactive_preview,
             )

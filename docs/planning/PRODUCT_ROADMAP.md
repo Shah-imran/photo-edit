@@ -99,7 +99,7 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | 16 | Done | Texture, Clarity, Dehaze, Vignette, and Grain all implemented (see Phase G implementation notes). |
 | 17 | Done | Sharpening, Luminance NR, and Color NR all implemented, completing the Detail group. |
 | 18 | Partial | Remove CA and Defringe implemented; no lens-profile-based corrections (no profile database exists -- durable gap). |
-| 19-20 | Partial | Straighten (rotation, dimension-preserving) implemented; no Upright modes, Distortion/Scale/Offset, or interactive Crop tool (needs new canvas-overlay UI infrastructure). |
+| 19-20 | Partial | Straighten (rotation, dimension-preserving) implemented; no Upright modes, Distortion/Scale/Offset. Crop's data/processing layer (`CropProcessor`, full pipeline/undo-redo/export wiring, a programmatic `on_crop_changed` API) now exists, but the interactive drag-handle Crop tool itself does not yet (needs new canvas-overlay UI infrastructure). |
 | 21-22 | Gap | No Healing or Masking. |
 | 23 | Partial | Some actions via menus; no dedicated overflow/settings pattern. |
 | 24 | Partial | [`library_view.py`](../../src/views/library_view.py) left panel + thumbs, plus a bottom filmstrip (`filmstrip_view.py`) -- the "no bottom filmstrip" note here was stale. Still a Gap vs PDF Sec.24: no bulk/multi-select across entries (confirmed absent by grep -- see docs/planning/implementation-notes/2026-10-13-keywords.md's non-goals). |

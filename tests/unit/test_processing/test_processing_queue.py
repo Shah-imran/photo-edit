@@ -176,6 +176,16 @@ class TestProcessingQueue:
         )
         assert request.straighten_params == {"straighten": 15.0}
 
+    def test_create_request_threads_crop_params(self):
+        request = ProcessingQueue().create_request(
+            crop_params={"x0": 0.1, "y0": 0.1, "x1": 0.9, "y1": 0.9}
+        )
+        assert request.crop_params == {"x0": 0.1, "y0": 0.1, "x1": 0.9, "y1": 0.9}
+
+    def test_create_request_defaults_crop_params_to_empty_dict(self):
+        request = ProcessingQueue().create_request()
+        assert request.crop_params == {}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()
