@@ -650,7 +650,12 @@ class ImageController(QObject):
         """
         return self._image_model.get_current_image()
 
-    def get_export_image(self, apply_crop: bool = True, mask_override: Any = _UNSET):
+    def get_export_image(
+        self,
+        apply_crop: bool = True,
+        mask_override: Any = _UNSET,
+        heal_spots_override: Any = _UNSET,
+    ):
         """Get the full-resolution image for export.
 
         Recomputes directly from the original image and the currently
@@ -681,6 +686,15 @@ class ImageController(QObject):
                 Left at the private ``_UNSET`` sentinel by every other call
                 site, which keeps today's "use whatever mask is actually
                 committed" behavior.
+            heal_spots_override: Mirrors ``mask_override``'s exact pattern,
+                for the healing tool UI's own live-preview mechanism
+                (:meth:`preview_heal_spots`). When passed (including
+                explicitly ``[]``), a LIST of heal-spot dicts used IN
+                PLACE OF ``self._healing_params`` for this one recompute
+                only -- ``self._healing_params`` itself is left completely
+                untouched. Left at the private ``_UNSET`` sentinel by
+                every other call site. See docs/planning/
+                implementation-notes/2026-10-13-healing-tool-ui.md.
 
         Returns:
             Full-resolution ``LinearImage`` with current adjustments
@@ -698,8 +712,13 @@ class ImageController(QObject):
         # Exposure) -- it is a repair operation on the as-shot pixels, not
         # a creative adjustment. See docs/planning/implementation-notes/
         # 2026-10-13-healing-processor.md.
-        if self._healing_params:
-            result = self._healing_processor.process(result, **self._healing_params)
+        healing_params = (
+            self._healing_params
+            if heal_spots_override is _UNSET
+            else ({"heal_spots": heal_spots_override} if heal_spots_override else {})
+        )
+        if healing_params:
+            result = self._healing_processor.process(result, **healing_params)
         if self._exposure_params:
             result = self._exposure_processor.process(result, **self._exposure_params)
         if self._tonal_params:
@@ -1973,6 +1992,47 @@ class ImageController(QObject):
             return
         normalized = self._normalize_mask_state(mask)
         preview = self.get_export_image(mask_override=normalized)
+        if preview is not None:
+            self._image_view.set_image(
+                preview, emit_loaded=False, preserve_view_scale=True
+            )
+
+    def preview_heal_spots(self, heal_spots: list) -> None:
+        """Display an in-progress, UNCOMMITTED heal-spot list, live.
+
+        This is the healing-tool-UI slice's live-preview mechanism, used
+        while spots are being placed/removed on the overlay, BEFORE the
+        user clicks Apply. Mirrors :meth:`preview_mask`'s exact pattern
+        and rationale (see docs/planning/implementation-notes/
+        2026-10-13-mask-tool-ui.md section 3.5 and
+        2026-10-13-healing-tool-ui.md) -- in short:
+
+        - It recomputes a FULL preview image via
+          ``get_export_image(heal_spots_override=normalized)``, the same
+          always-synchronous-and-correct recompute path export already
+          uses (unaffected by ``self._use_threading`` or the documented
+          gap where the non-threaded ``apply_adjustments`` live-preview
+          fallback branch doesn't reach every processor).
+        - It does NOT touch ``self._healing_params`` (the committed heal
+          spots), ``self._image_model.current_image``, or the history
+          stack in any way -- a call here can never be mistaken for, or
+          leave a stray trace in, a real edit. Safe to call any number of
+          times (every drag frame).
+        - It displays the result via ``ImageView.set_image`` directly,
+          exactly like ``preview_mask``.
+
+        Args:
+            heal_spots: The in-progress, possibly still mid-drag, list of
+                heal-spot dicts. Defensively normalized/clamped via
+                :meth:`_normalize_heal_spots_state`, exactly like
+                ``on_heal_spots_changed`` does, so a mid-drag value
+                briefly outside ``[0, 1]`` can never reach the processor
+                un-clamped.
+        """
+        if not self.has_image():
+            return
+        normalized = self._normalize_heal_spots_state(heal_spots)
+        preview = self.get_export_image(heal_spots_override=normalized)
         if preview is not None:
             self._image_view.set_image(
                 preview, emit_loaded=False, preserve_view_scale=True

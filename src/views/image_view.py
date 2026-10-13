@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 from src.utils.color_pipeline import LinearImage, to_linear
 from src.processing.display_frame import DisplayFrame, linear_to_display_rgb
 from src.views.widgets.crop_overlay import CropOverlay
+from src.views.widgets.healing_overlay import HealingOverlay
 from src.views.widgets.mask_overlay import MaskOverlay
 
 
@@ -153,6 +154,7 @@ class ImageView(QWidget):
         self._loading_overlay: Optional[_LoadingOverlay] = None
         self._crop_overlay: Optional[CropOverlay] = None
         self._mask_overlay: Optional[MaskOverlay] = None
+        self._healing_overlay: Optional[HealingOverlay] = None
 
         self._setup_ui()
 
@@ -405,6 +407,8 @@ class ImageView(QWidget):
             self._crop_overlay.resize(self._image_canvas.size())
         if self._mask_overlay is not None and self._mask_overlay.isVisible():
             self._mask_overlay.resize(self._image_canvas.size())
+        if self._healing_overlay is not None and self._healing_overlay.isVisible():
+            self._healing_overlay.resize(self._image_canvas.size())
 
     # -- Crop mode --------------------------------------------------------
 
@@ -487,6 +491,36 @@ class ImageView(QWidget):
 
     def get_mask_overlay(self) -> Optional[MaskOverlay]:
         return self._mask_overlay
+
+    # -- Healing mode -------------------------------------------------------
+
+    def enter_healing_mode(self, initial_spots: list) -> None:
+        """Show the interactive healing overlay over the canvas.
+
+        Mirrors ``enter_crop_mode``/``enter_mask_mode`` exactly. Like mask
+        mode (and unlike crop mode), the caller does NOT need to have
+        swapped in any different display image first -- the canvas keeps
+        showing whatever it was already showing; only the overlay itself
+        is new.
+        """
+        if self._healing_overlay is None:
+            self._healing_overlay = HealingOverlay(self._image_canvas)
+        self._healing_overlay.resize(self._image_canvas.size())
+        self._healing_overlay.move(0, 0)
+        self._healing_overlay.set_spots(initial_spots)
+        self._healing_overlay.show()
+        self._healing_overlay.raise_()
+
+    def exit_healing_mode(self) -> None:
+        """Hide the healing overlay (kept alive, not destroyed, for reuse)."""
+        if self._healing_overlay is not None:
+            self._healing_overlay.hide()
+
+    def is_in_healing_mode(self) -> bool:
+        return self._healing_overlay is not None and self._healing_overlay.isVisible()
+
+    def get_healing_overlay(self) -> Optional[HealingOverlay]:
+        return self._healing_overlay
 
     def _preserve_scale_after_pixmap_swap(
         self,

@@ -110,13 +110,17 @@ class EditingToolStrip(QFrame):
         mask_tool_requested: Emitted when the Mask button is clicked, the
             UI entry point into the interactive mask overlay (see
             ``ImageView.enter_mask_mode``/``MainWindow._enter_mask_mode``).
+        heal_tool_requested: Emitted when the Heal button is clicked, the
+            UI entry point into the interactive healing overlay (see
+            ``ImageView.enter_healing_mode``/``MainWindow._enter_healing_mode``).
 
-    Heal/Transform remain disabled placeholders -- only Crop and Mask are
-    wired up (Crop in the prior slice, Mask in this one).
+    Transform remains a disabled placeholder -- Crop/Mask/Heal are now all
+    wired up (Crop and Mask in prior slices, Heal in this one).
     """
 
     crop_tool_requested = pyqtSignal()
     mask_tool_requested = pyqtSignal()
+    heal_tool_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -136,6 +140,7 @@ class EditingToolStrip(QFrame):
         layout.setSpacing(2)
         self._crop_button: Optional[QToolButton] = None
         self._mask_button: Optional[QToolButton] = None
+        self._heal_button: Optional[QToolButton] = None
         for label, icon_name in (
             ("Crop", "crop"),
             ("Heal", "heal"),
@@ -159,6 +164,13 @@ class EditingToolStrip(QFrame):
                 )
                 button.clicked.connect(self.mask_tool_requested)
                 self._mask_button = button
+            elif label == "Heal":
+                button.setEnabled(True)
+                button.setToolTip(
+                    "Remove small blemishes/spots (heal or clone)"
+                )
+                button.clicked.connect(self.heal_tool_requested)
+                self._heal_button = button
             else:
                 button.setEnabled(False)
                 button.setToolTip(f"{label} is planned but not implemented yet")

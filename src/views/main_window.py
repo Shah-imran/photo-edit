@@ -43,6 +43,7 @@ from src.views.preferences_dialog import PreferencesDialog
 from src.views.library_view import LibraryView
 from src.views.theme import apply_theme
 from src.views.widgets.crop_toolbar import CropToolbar
+from src.views.widgets.healing_toolbar import HealingToolbar
 from src.views.widgets.mask_toolbar import MaskToolbar
 from src.views.widgets.filmstrip_view import FilmstripView
 from src.views.widgets.image_toolbar import ImageToolBar
@@ -133,6 +134,9 @@ class MainWindow(QMainWindow):
         self._mask_toolbar = MaskToolbar()
         self._mask_toolbar.hide()
         self._mask_overlay_signal_connected = False
+        self._healing_toolbar = HealingToolbar()
+        self._healing_toolbar.hide()
+        self._healing_overlay_signal_connected = False
         self._filmstrip_view = FilmstripView()
         self._workspace_header = WorkspaceHeader()
         self._library_controller = LibraryController(
@@ -217,6 +221,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._image_toolbar)
         layout.addWidget(self._crop_toolbar)
         layout.addWidget(self._mask_toolbar)
+        layout.addWidget(self._healing_toolbar)
         layout.addWidget(self._filmstrip_view)
         
         # Left panel - Library
@@ -461,6 +466,14 @@ class MainWindow(QMainWindow):
         self._mask_toolbar.mask_type_changed.connect(self._on_mask_type_changed)
         self._mask_toolbar.invert_changed.connect(self._on_mask_invert_changed)
         self._mask_toolbar.adjustments_changed.connect(self._on_mask_adjustments_changed)
+        self._tools_panel.heal_tool_requested.connect(self._enter_healing_mode)
+        self._healing_toolbar.apply_requested.connect(self._apply_healing)
+        self._healing_toolbar.cancel_requested.connect(self._cancel_healing)
+        self._healing_toolbar.remove_last_requested.connect(self._on_heal_remove_last)
+        self._healing_toolbar.clear_all_requested.connect(self._on_heal_clear_all)
+        self._healing_toolbar.mode_changed.connect(self._on_heal_mode_changed)
+        self._healing_toolbar.feather_changed.connect(self._on_heal_feather_changed)
+        self._healing_toolbar.opacity_changed.connect(self._on_heal_opacity_changed)
         self._library_view.image_selected.connect(self._on_library_image_selected)
         self._filmstrip_view.image_selected.connect(self._on_library_image_selected)
         self._library_view.import_requested.connect(self._import_images)
@@ -921,13 +934,12 @@ class MainWindow(QMainWindow):
         if not self._image_controller.has_image():
             self._status_bar.showMessage("No image to crop", 2000)
             return
-        # The two interactive modes can never be simultaneously active --
-        # entering Crop while Mask mode happens to be active cancels Mask
-        # first (without committing it), mirroring _enter_mask_mode's own
-        # symmetric check below. See docs/planning/implementation-notes/
-        # 2026-10-13-mask-tool-ui.md section 5.
-        if self._image_view.is_in_mask_mode():
-            self._cancel_mask()
+        # Crop/Mask/Heal can never be simultaneously active -- see
+        # _exit_any_interactive_tool_mode's own docstring and
+        # docs/planning/implementation-notes/2026-10-13-healing-tool-ui.md
+        # section 5 (extending the Crop/Mask pairwise check this slice's
+        # predecessor established into a three-way shared helper).
+        self._exit_any_interactive_tool_mode()
         state = self._image_controller.get_adjustment_state()
         self._pre_crop_mode_adjustment_state = state
         crop = state.get("crop") or {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
@@ -986,10 +998,9 @@ class MainWindow(QMainWindow):
         if not self._image_controller.has_image():
             self._status_bar.showMessage("No image to mask", 2000)
             return
-        # Mutual exclusivity with Crop mode -- see _enter_crop_mode's own
-        # symmetric check.
-        if self._image_view.is_in_crop_mode():
-            self._cancel_crop()
+        # Crop/Mask/Heal can never be simultaneously active -- see
+        # _exit_any_interactive_tool_mode.
+        self._exit_any_interactive_tool_mode()
 
         state = self._image_controller.get_adjustment_state()
         mask = state.get("mask") or {}
@@ -1080,6 +1091,139 @@ class MainWindow(QMainWindow):
         candidate = overlay.get_geometry()
         candidate.update(self._mask_toolbar.get_adjustments())
         self._image_controller.preview_mask(candidate)
+
+    # -- Crop/Mask/Heal three-way mutual exclusion --------------------------
+
+    def _exit_any_interactive_tool_mode(self) -> None:
+        """Cancel whichever of Crop/Mask/Heal mode is currently active.
+
+        Crop, Mask, and Heal can never be simultaneously active. Each
+        ``_enter_X_mode`` calls this FIRST, so entering any one of the
+        three tools while mid-edit on either of the OTHER two always
+        discards that other edit (never commits it) -- exactly like
+        clicking its own Cancel button would. A shared helper, rather
+        than three separate pairwise checks, keeps this DRY as a third
+        mode is added (see docs/planning/implementation-notes/
+        2026-10-13-healing-tool-ui.md section 5, which also refactors the
+        prior slice's own Crop<->Mask pairwise checks into this form).
+        """
+        if self._image_view.is_in_crop_mode():
+            self._cancel_crop()
+        if self._image_view.is_in_mask_mode():
+            self._cancel_mask()
+        if self._image_view.is_in_healing_mode():
+            self._cancel_healing()
+
+    # -- Healing mode ---------------------------------------------------------
+
+    def _enter_healing_mode(self) -> None:
+        """Show the interactive healing overlay+toolbar over the current
+        image.
+
+        Mirrors ``_enter_mask_mode`` exactly: like Mask (and unlike Crop),
+        the canvas keeps showing whatever it is already showing -- no
+        image swap is needed, since the live-preview mechanism
+        (``ImageController.preview_heal_spots``) shows exactly the
+        in-progress candidate's effect. See docs/planning/
+        implementation-notes/2026-10-13-healing-tool-ui.md.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to heal", 2000)
+            return
+        # Crop/Mask/Heal can never be simultaneously active.
+        self._exit_any_interactive_tool_mode()
+
+        state = self._image_controller.get_adjustment_state()
+        heal_spots = state.get("heal_spots") or []
+
+        self._image_view.enter_healing_mode(heal_spots)
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None and not self._healing_overlay_signal_connected:
+            overlay.spots_changed.connect(self._on_heal_editing_changed)
+            self._healing_overlay_signal_connected = True
+
+        self._healing_toolbar.set_values("heal", 0.3, 1.0)
+        if overlay is not None:
+            overlay.set_pending_mode("heal")
+            overlay.set_pending_feather(0.3)
+            overlay.set_pending_opacity(1.0)
+        self._healing_toolbar.show()
+        self._image_toolbar.hide()
+
+    def _apply_healing(self) -> None:
+        """Commit the overlay's full spot list via ``on_heal_spots_changed``
+        -- the ONE real, committed, undoable edit."""
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            self._image_controller.on_heal_spots_changed(overlay.get_spots())
+        self._image_view.exit_healing_mode()
+        self._healing_toolbar.hide()
+        self._image_toolbar.show()
+        self._status_bar.showMessage("Healing applied", 2000)
+
+    def _cancel_healing(self) -> None:
+        """Exit healing mode without committing.
+
+        Nothing was ever mutated on the committed engine state while
+        editing (see ``_on_heal_editing_changed``/
+        ``ImageController.preview_heal_spots``), so cancelling only needs
+        to hide the overlay/toolbar and ask the controller to re-display
+        whatever image is still actually current -- mirrors
+        ``_cancel_mask``'s own trivial simplicity exactly.
+        """
+        self._image_view.exit_healing_mode()
+        self._healing_toolbar.hide()
+        self._image_toolbar.show()
+        self._image_controller.refresh_view()
+
+    def _on_heal_remove_last(self) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.remove_last()
+
+    def _on_heal_clear_all(self) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.clear_all()
+
+    def _on_heal_mode_changed(self, mode: str) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.set_pending_mode(mode)
+        # Per spec, every toolbar pending-value-change signal also drives
+        # the live-preview path, even though a mode/feather/opacity change
+        # by itself only affects the NEXT spot placed (not any already-
+        # placed spot) -- see docs/planning/implementation-notes/
+        # 2026-10-13-healing-tool-ui.md. Harmless (and correctly a no-op
+        # on the displayed image) when nothing is placed yet.
+        self._on_heal_editing_changed()
+
+    def _on_heal_feather_changed(self, feather: float) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.set_pending_feather(feather)
+        self._on_heal_editing_changed()
+
+    def _on_heal_opacity_changed(self, opacity: float) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.set_pending_opacity(opacity)
+        self._on_heal_editing_changed()
+
+    def _on_heal_editing_changed(self, *_args) -> None:
+        """Live-preview the CURRENT in-progress heal-spot list.
+
+        Wired to the overlay's ``spots_changed`` signal (emitted on a new
+        spot placement, Remove Last, or Clear All). Hands the overlay's
+        full in-progress list to
+        ``ImageController.preview_heal_spots`` -- a display-only call
+        that never touches history or the committed heal-spot state. See
+        docs/planning/implementation-notes/2026-10-13-healing-tool-ui.md.
+        """
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is None:
+            return
+        self._image_controller.preview_heal_spots(overlay.get_spots())
 
     def _reset_adjustments(self):
         """Handle reset adjustments action."""
