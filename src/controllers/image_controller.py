@@ -37,6 +37,7 @@ from src.processors.remove_chromatic_aberration_processor import (
     RemoveChromaticAberrationProcessor,
 )
 from src.processors.defringe_processor import DefringeProcessor
+from src.processors.geometry_processor import GeometryProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.processors.crop_processor import CropProcessor
 from src.processors.mask_processor import MaskProcessor
@@ -141,6 +142,12 @@ class ImageController(QObject):
         "remove_ca": 0.0,
         "defringe": 0.0,
         "straighten": 0.0,
+        "distortion": 0.0,
+        "vertical": 0.0,
+        "horizontal": 0.0,
+        "scale": 100.0,
+        "offset_x": 0.0,
+        "offset_y": 0.0,
     }
     # Tone curve control points are not floats, so they are kept out of
     # _ADJUSTMENT_DEFAULTS (which _normalize_adjustment_state float-casts
@@ -163,6 +170,22 @@ class ImageController(QObject):
     # zeros -- see docs/planning/implementation-notes/
     # 2026-10-13-crop-processor.md section 4.
     _CROP_DEFAULTS = {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+    # Geometry's 6 keys are flat floats, same as texture/dehaze/etc., and
+    # ARE part of the top-level get_adjustment_state()/_ADJUSTMENT_DEFAULTS
+    # contract (unlike crop/mask/heal_spots, no separate nested key) --
+    # but "scale"'s own identity value is 100.0, not 0.0, so this subset
+    # is pulled out here for the several spots that need to check "is
+    # geometry at its identity" without assuming every key defaults to
+    # zero. See docs/planning/implementation-notes/
+    # 2026-10-13-geometry-processor.md section 2.
+    _GEOMETRY_DEFAULTS = {
+        "distortion": 0.0,
+        "vertical": 0.0,
+        "horizontal": 0.0,
+        "scale": 100.0,
+        "offset_x": 0.0,
+        "offset_y": 0.0,
+    }
     # The mask's one slot (state key "mask") has no meaningful "neutral"
     # geometry the way crop's full-frame rectangle is a real, applyable
     # identity -- there is no gradient/ellipse that is simultaneously
@@ -258,6 +281,7 @@ class ImageController(QObject):
         self._color_nr_processor = ColorNoiseReductionProcessor()
         self._remove_ca_processor = RemoveChromaticAberrationProcessor()
         self._defringe_processor = DefringeProcessor()
+        self._geometry_processor = GeometryProcessor()
         self._straighten_processor = StraightenProcessor()
         self._crop_processor = CropProcessor()
         self._mask_processor = MaskProcessor()
@@ -281,6 +305,7 @@ class ImageController(QObject):
         self._color_nr_params: Dict[str, float] = {}
         self._remove_ca_params: Dict[str, float] = {}
         self._defringe_params: Dict[str, float] = {}
+        self._geometry_params: Dict[str, float] = {}
         self._straighten_params: Dict[str, float] = {}
         # Unlike every other _xxx_params field, Crop's natural "no crop"
         # default ({"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}, the full
@@ -579,6 +604,7 @@ class ImageController(QObject):
         self._color_nr_params = {}
         self._remove_ca_params = {}
         self._defringe_params = {}
+        self._geometry_params = {}
         self._straighten_params = {}
         self._crop_params = {}
         self._mask_params = {}
@@ -765,6 +791,16 @@ class ImageController(QObject):
             result = self._defringe_processor.process(
                 result, **self._defringe_params
             )
+        # Geometry (Distortion/Vertical/Horizontal/Scale/Offset) runs
+        # immediately BEFORE Straighten -- it corrects as-shot lens/
+        # perspective distortion, which should be undone before the
+        # user's own final small-angle Straighten tweak is applied on
+        # top of the now-rectified frame. See docs/planning/
+        # implementation-notes/2026-10-13-geometry-processor.md section 2.
+        if self._geometry_params:
+            result = self._geometry_processor.process(
+                result, **self._geometry_params
+            )
         if self._straighten_params:
             result = self._straighten_processor.process(
                 result, **self._straighten_params
@@ -843,6 +879,7 @@ class ImageController(QObject):
         state.update(self._color_nr_params)
         state.update(self._remove_ca_params)
         state.update(self._defringe_params)
+        state.update(self._geometry_params)
         state.update(self._straighten_params)
         state["crop"] = {**self._CROP_DEFAULTS, **self._crop_params}
         state["mask"] = self._mask_params.copy() if self._mask_params else None
@@ -925,6 +962,14 @@ class ImageController(QObject):
         self._color_nr_params = {"color_nr": normalized["color_nr"]}
         self._remove_ca_params = {"remove_ca": normalized["remove_ca"]}
         self._defringe_params = {"defringe": normalized["defringe"]}
+        self._geometry_params = {
+            "distortion": normalized["distortion"],
+            "vertical": normalized["vertical"],
+            "horizontal": normalized["horizontal"],
+            "scale": normalized["scale"],
+            "offset_x": normalized["offset_x"],
+            "offset_y": normalized["offset_y"],
+        }
         self._straighten_params = {"straighten": normalized["straighten"]}
         self._crop_params = (
             {} if self._is_identity_crop(crop_values) else crop_values
@@ -975,7 +1020,14 @@ class ImageController(QObject):
             return
 
         has_changes = (
-            any(value != 0.0 for value in normalized.values())
+            # Compared against each key's own default (not a bare 0.0)
+            # because "scale" (Geometry) defaults to 100.0, not 0.0 --
+            # see docs/planning/implementation-notes/
+            # 2026-10-13-geometry-processor.md section 2.
+            any(
+                normalized[key] != default
+                for key, default in self._ADJUSTMENT_DEFAULTS.items()
+            )
             or not is_identity_curve(curve_points)
             or any(value != 0.0 for value in hsl_values.values())
             or any(
@@ -1028,6 +1080,9 @@ class ImageController(QObject):
         result = self._defringe_processor.process(
             result, **self._defringe_params
         )
+        result = self._geometry_processor.process(
+            result, **self._geometry_params
+        )
         result = self._straighten_processor.process(
             result, **self._straighten_params
         )
@@ -1059,6 +1114,7 @@ class ImageController(QObject):
         self._color_nr_params = {}
         self._remove_ca_params = {}
         self._defringe_params = {}
+        self._geometry_params = {}
         self._straighten_params = {}
         self._crop_params = {}
         self._mask_params = {}
@@ -1211,6 +1267,7 @@ class ImageController(QObject):
         color_nr_params: Dict[str, float] = None,
         remove_ca_params: Dict[str, float] = None,
         defringe_params: Dict[str, float] = None,
+        geometry_params: Dict[str, float] = None,
         straighten_params: Dict[str, float] = None,
         crop_params: Dict[str, float] = None,
         mask_params: Dict[str, Any] = None,
@@ -1272,6 +1329,8 @@ class ImageController(QObject):
             self._remove_ca_params = remove_ca_params
         if defringe_params:
             self._defringe_params = defringe_params
+        if geometry_params:
+            self._geometry_params = geometry_params
         if straighten_params:
             self._straighten_params = straighten_params
         if crop_params is not None:
@@ -1318,6 +1377,7 @@ class ImageController(QObject):
                         color_nr_params=self._color_nr_params,
                         remove_ca_params=self._remove_ca_params,
                         defringe_params=self._defringe_params,
+                        geometry_params=self._geometry_params,
                         straighten_params=self._straighten_params,
                         crop_params=self._crop_params,
                         mask_params=self._mask_params,
@@ -1345,6 +1405,7 @@ class ImageController(QObject):
                         color_nr_params=self._color_nr_params,
                         remove_ca_params=self._remove_ca_params,
                         defringe_params=self._defringe_params,
+                        geometry_params=self._geometry_params,
                         straighten_params=self._straighten_params,
                         crop_params=self._crop_params,
                         mask_params=self._mask_params,
@@ -1383,6 +1444,7 @@ class ImageController(QObject):
                 color_nr_params=self._color_nr_params,
                 remove_ca_params=self._remove_ca_params,
                 defringe_params=self._defringe_params,
+                geometry_params=self._geometry_params,
                 straighten_params=self._straighten_params,
                 crop_params=self._crop_params,
                 mask_params=self._mask_params,
@@ -1488,6 +1550,11 @@ class ImageController(QObject):
                     result, **self._defringe_params
                 )
 
+            if self._geometry_params:
+                result = self._geometry_processor.process(
+                    result, **self._geometry_params
+                )
+
             if self._straighten_params:
                 result = self._straighten_processor.process(
                     result, **self._straighten_params
@@ -1575,6 +1642,14 @@ class ImageController(QObject):
         defringe_params = {
             "defringe": adjustments.get("defringe", 0.0)
         }
+        geometry_params = {
+            "distortion": adjustments.get("distortion", 0.0),
+            "vertical": adjustments.get("vertical", 0.0),
+            "horizontal": adjustments.get("horizontal", 0.0),
+            "scale": adjustments.get("scale", 100.0),
+            "offset_x": adjustments.get("offset_x", 0.0),
+            "offset_y": adjustments.get("offset_y", 0.0),
+        }
         straighten_params = {
             "straighten": adjustments.get("straighten", 0.0)
         }
@@ -1594,6 +1669,7 @@ class ImageController(QObject):
         self._color_nr_params = color_nr_params
         self._remove_ca_params = remove_ca_params
         self._defringe_params = defringe_params
+        self._geometry_params = geometry_params
         self._straighten_params = straighten_params
 
         if self._use_threading and self._debouncer is not None:
@@ -1620,6 +1696,7 @@ class ImageController(QObject):
                 'color_nr': self._color_nr_params,
                 'remove_ca': self._remove_ca_params,
                 'defringe': self._defringe_params,
+                'geometry': self._geometry_params,
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
                 'mask': self._mask_params,
@@ -1708,6 +1785,7 @@ class ImageController(QObject):
                 'color_nr': self._color_nr_params,
                 'remove_ca': self._remove_ca_params,
                 'defringe': self._defringe_params,
+                'geometry': self._geometry_params,
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
                 'mask': self._mask_params,
@@ -1766,6 +1844,7 @@ class ImageController(QObject):
                 'color_nr': self._color_nr_params,
                 'remove_ca': self._remove_ca_params,
                 'defringe': self._defringe_params,
+                'geometry': self._geometry_params,
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
                 'mask': self._mask_params,
@@ -1824,6 +1903,7 @@ class ImageController(QObject):
                 'color_nr': self._color_nr_params,
                 'remove_ca': self._remove_ca_params,
                 'defringe': self._defringe_params,
+                'geometry': self._geometry_params,
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
                 'mask': self._mask_params,
@@ -2063,6 +2143,7 @@ class ImageController(QObject):
         color_nr_params = params.get('color_nr', {})
         remove_ca_params = params.get('remove_ca', {})
         defringe_params = params.get('defringe', {})
+        geometry_params = params.get('geometry', {})
         straighten_params = params.get('straighten', {})
         crop_params = params.get('crop', {})
         mask_params = params.get('mask', {})
@@ -2085,6 +2166,7 @@ class ImageController(QObject):
             color_nr_params=color_nr_params,
             remove_ca_params=remove_ca_params,
             defringe_params=defringe_params,
+            geometry_params=geometry_params,
             straighten_params=straighten_params,
             crop_params=crop_params,
             mask_params=mask_params,
@@ -2127,6 +2209,7 @@ class ImageController(QObject):
         color_nr_params = params.get('color_nr', {})
         remove_ca_params = params.get('remove_ca', {})
         defringe_params = params.get('defringe', {})
+        geometry_params = params.get('geometry', {})
         straighten_params = params.get('straighten', {})
         crop_params = params.get('crop', {})
         mask_params = params.get('mask', {})
@@ -2152,6 +2235,7 @@ class ImageController(QObject):
             color_nr_params=color_nr_params,
             remove_ca_params=remove_ca_params,
             defringe_params=defringe_params,
+            geometry_params=geometry_params,
             straighten_params=straighten_params,
             crop_params=crop_params,
             mask_params=mask_params,
@@ -2273,6 +2357,7 @@ class ImageController(QObject):
                 color_nr_params=self._color_nr_params,
                 remove_ca_params=self._remove_ca_params,
                 defringe_params=self._defringe_params,
+                geometry_params=self._geometry_params,
                 straighten_params=self._straighten_params,
                 crop_params=self._crop_params,
                 mask_params=self._mask_params,
@@ -2318,6 +2403,10 @@ class ImageController(QObject):
             any(v != 0 for v in self._color_nr_params.values()) or
             any(v != 0 for v in self._remove_ca_params.values()) or
             any(v != 0 for v in self._defringe_params.values()) or
+            any(
+                self._geometry_params.get(key, default) != default
+                for key, default in self._GEOMETRY_DEFAULTS.items()
+            ) or
             any(v != 0 for v in self._straighten_params.values()) or
             not is_identity_curve(self._curve_params.get("points")) or
             bool(self._crop_params) or
@@ -2355,6 +2444,7 @@ class ImageController(QObject):
             color_nr_params=self._color_nr_params,
             remove_ca_params=self._remove_ca_params,
             defringe_params=self._defringe_params,
+            geometry_params=self._geometry_params,
             straighten_params=self._straighten_params,
             crop_params=self._crop_params,
             mask_params=self._mask_params,
@@ -2446,6 +2536,7 @@ class ImageController(QObject):
                 color_nr_params=self._color_nr_params.copy(),
                 remove_ca_params=self._remove_ca_params.copy(),
                 defringe_params=self._defringe_params.copy(),
+                geometry_params=self._geometry_params.copy(),
                 straighten_params=self._straighten_params.copy(),
                 crop_params=self._crop_params.copy(),
                 mask_params=self._mask_params.copy(),

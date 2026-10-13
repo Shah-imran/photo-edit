@@ -27,6 +27,7 @@ from src.processors.remove_chromatic_aberration_processor import (
     RemoveChromaticAberrationProcessor,
 )
 from src.processors.defringe_processor import DefringeProcessor
+from src.processors.geometry_processor import GeometryProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.processors.crop_processor import CropProcessor
 from src.processors.mask_processor import MaskProcessor
@@ -142,6 +143,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         color_nr_params: Dict[str, float] = None,
         remove_ca_params: Dict[str, float] = None,
         defringe_params: Dict[str, float] = None,
+        geometry_params: Dict[str, float] = None,
         straighten_params: Dict[str, float] = None,
         crop_params: Dict[str, float] = None,
         mask_params: Dict[str, Any] = None,
@@ -198,6 +200,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._remove_ca_params = remove_ca_params or {}
         self._defringe_processor = DefringeProcessor()
         self._defringe_params = defringe_params or {}
+        self._geometry_processor = GeometryProcessor()
+        self._geometry_params = geometry_params or {}
         self._straighten_processor = StraightenProcessor()
         self._straighten_params = straighten_params or {}
         self._crop_processor = CropProcessor()
@@ -293,6 +297,14 @@ class CombinedAdjustmentCommand(BaseCommand):
         if self._defringe_params:
             result = self._defringe_processor.process(
                 result, **self._defringe_params
+            )
+
+        # Geometry runs immediately BEFORE Straighten -- see
+        # docs/planning/implementation-notes/
+        # 2026-10-13-geometry-processor.md section 2.
+        if self._geometry_params:
+            result = self._geometry_processor.process(
+                result, **self._geometry_params
             )
 
         if self._straighten_params:

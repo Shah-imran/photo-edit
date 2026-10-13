@@ -668,15 +668,29 @@ class TestToolsPanelOptics:
 
 
 class TestToolsPanelGeometry:
-    """Phase I (Geometry) -- Straighten.
+    """Phase I (Geometry) -- Straighten, plus Distortion/Vertical/
+    Horizontal/Scale/X-Y Offset.
 
     This mirrors the Optics/Remove CA slice's precedent for creating a
     brand new section (rather than extending an existing one), since
-    Geometry did not exist before this slice. Only Straighten lives here
-    -- the full interactive Crop tool and Upright modes are explicitly
-    out of scope for this slice (see
-    docs/planning/implementation-notes/2026-10-12-straighten.md section 1).
+    Geometry did not exist before the Straighten slice. Straighten was
+    added first (see docs/planning/implementation-notes/
+    2026-10-12-straighten.md section 1); Distortion/Vertical/Horizontal/
+    Scale/Offset fill in the rest of the slider-based half (see
+    docs/planning/implementation-notes/2026-10-13-geometry-processor.md).
+    Upright modes and "Constrain Crop" remain explicitly out of scope.
     """
+
+    # (slider attribute, adjustments-dict key, min, max, default)
+    _GEOMETRY_SLIDERS = [
+        ("_straighten_slider", "straighten", -45.0, 45.0, 0.0),
+        ("_distortion_slider", "distortion", -100.0, 100.0, 0.0),
+        ("_vertical_slider", "vertical", -100.0, 100.0, 0.0),
+        ("_horizontal_slider", "horizontal", -100.0, 100.0, 0.0),
+        ("_scale_slider", "scale", 50.0, 150.0, 100.0),
+        ("_offset_x_slider", "offset_x", -50.0, 50.0, 0.0),
+        ("_offset_y_slider", "offset_y", -50.0, 50.0, 0.0),
+    ]
 
     def test_geometry_section_exists_and_starts_collapsed(self, qapp):
         panel = ToolsPanel()
@@ -701,16 +715,72 @@ class TestToolsPanelGeometry:
         assert panel.get_adjustments()["straighten"] == -20.0
         assert received == []
 
-    def test_reset_geometry_resets_only_straighten(self, qapp):
+    @pytest.mark.parametrize(
+        "slider_attr,key,min_value,max_value,default",
+        _GEOMETRY_SLIDERS,
+    )
+    def test_geometry_slider_range_default_and_signal(
+        self, qapp, slider_attr, key, min_value, max_value, default
+    ):
+        panel = ToolsPanel()
+        slider = getattr(panel, slider_attr)
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert slider._spin_box.minimum() == min_value
+        assert slider._spin_box.maximum() == max_value
+        assert panel.get_adjustments()[key] == default
+        new_value = max_value if max_value != default else min_value
+        slider.set_value(new_value)
+        assert received[-1][key] == new_value
+
+    @pytest.mark.parametrize(
+        "slider_attr,key,min_value,max_value,default",
+        _GEOMETRY_SLIDERS,
+    )
+    def test_geometry_slider_restore_without_emitting(
+        self, qapp, slider_attr, key, min_value, max_value, default
+    ):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        new_value = max_value if max_value != default else min_value
+        panel.set_adjustments({key: new_value}, emit_signal=False)
+        assert panel.get_adjustments()[key] == new_value
+        assert received == []
+
+    def test_reset_geometry_resets_straighten_and_all_five_new_sliders(self, qapp):
         panel = ToolsPanel()
         panel._straighten_slider.set_value(30.0)
+        panel._distortion_slider.set_value(50.0)
+        panel._vertical_slider.set_value(-40.0)
+        panel._horizontal_slider.set_value(25.0)
+        panel._scale_slider.set_value(130.0)
+        panel._offset_x_slider.set_value(20.0)
+        panel._offset_y_slider.set_value(-15.0)
         panel._clarity_slider.set_value(40.0)
         # Geometry's reset button is now the last one, since Geometry is
         # the final section added after Optics.
         geometry_reset_button = panel._section_reset_buttons[-1]
         geometry_reset_button.click()
-        assert panel.get_adjustments()["straighten"] == 0.0
-        assert panel.get_adjustments()["clarity"] == 40.0
+        adjustments = panel.get_adjustments()
+        assert adjustments["straighten"] == 0.0
+        assert adjustments["distortion"] == 0.0
+        assert adjustments["vertical"] == 0.0
+        assert adjustments["horizontal"] == 0.0
+        assert adjustments["scale"] == 100.0
+        assert adjustments["offset_x"] == 0.0
+        assert adjustments["offset_y"] == 0.0
+        assert adjustments["clarity"] == 40.0
+
+    def test_geometry_sliders_disabled_by_set_enabled_false(self, qapp):
+        panel = ToolsPanel()
+        panel.set_enabled(False)
+        assert panel._distortion_slider.isEnabled() is False
+        assert panel._vertical_slider.isEnabled() is False
+        assert panel._horizontal_slider.isEnabled() is False
+        assert panel._scale_slider.isEnabled() is False
+        assert panel._offset_x_slider.isEnabled() is False
+        assert panel._offset_y_slider.isEnabled() is False
 
 
 class TestToolsPanelProfileSelector:

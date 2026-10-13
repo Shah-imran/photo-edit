@@ -38,6 +38,7 @@ from src.processors.remove_chromatic_aberration_processor import (
     RemoveChromaticAberrationProcessor,
 )
 from src.processors.defringe_processor import DefringeProcessor
+from src.processors.geometry_processor import GeometryProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.processors.crop_processor import CropProcessor
 from src.processors.mask_processor import MaskProcessor
@@ -130,6 +131,7 @@ class ProcessingWorker(QObject):
         self._color_nr_processor = ColorNoiseReductionProcessor()
         self._remove_ca_processor = RemoveChromaticAberrationProcessor()
         self._defringe_processor = DefringeProcessor()
+        self._geometry_processor = GeometryProcessor()
         self._straighten_processor = StraightenProcessor()
         self._crop_processor = CropProcessor()
         self._mask_processor = MaskProcessor()
@@ -212,6 +214,7 @@ class ProcessingWorker(QObject):
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
         defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
         mask_params: Optional[Dict[str, Any]] = None,
@@ -253,6 +256,7 @@ class ProcessingWorker(QObject):
             color_nr_params=color_nr_params,
             remove_ca_params=remove_ca_params,
             defringe_params=defringe_params,
+            geometry_params=geometry_params,
             straighten_params=straighten_params,
             crop_params=crop_params,
             mask_params=mask_params,
@@ -286,6 +290,7 @@ class ProcessingWorker(QObject):
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
         defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
         mask_params: Optional[Dict[str, Any]] = None,
@@ -327,6 +332,7 @@ class ProcessingWorker(QObject):
             color_nr_params,
             remove_ca_params,
             defringe_params,
+            geometry_params,
             straighten_params,
             crop_params,
             mask_params,
@@ -354,6 +360,7 @@ class ProcessingWorker(QObject):
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
         defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
         mask_params: Optional[Dict[str, Any]] = None,
@@ -393,6 +400,7 @@ class ProcessingWorker(QObject):
             color_nr_params,
             remove_ca_params,
             defringe_params,
+            geometry_params,
             straighten_params,
             crop_params,
             mask_params,
@@ -513,6 +521,7 @@ class ProcessingWorker(QObject):
                 request.color_nr_params,
                 request.remove_ca_params,
                 request.defringe_params,
+                request.geometry_params,
                 request.straighten_params,
                 request.crop_params,
                 request.mask_params,
@@ -598,6 +607,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.color_nr_params.items())),
             tuple(sorted(request.remove_ca_params.items())),
             tuple(sorted(request.defringe_params.items())),
+            tuple(sorted(request.geometry_params.items())),
             tuple(sorted(request.straighten_params.items())),
             tuple(sorted(request.crop_params.items())),
             tuple(sorted(request.mask_params.items())),
@@ -643,6 +653,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.color_nr_params.items())),
             tuple(sorted(request.remove_ca_params.items())),
             tuple(sorted(request.defringe_params.items())),
+            tuple(sorted(request.geometry_params.items())),
             tuple(sorted(request.straighten_params.items())),
             tuple(sorted(request.crop_params.items())),
             tuple(sorted(request.mask_params.items())),
@@ -669,6 +680,7 @@ class ProcessingWorker(QObject):
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
         defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
         mask_params: Optional[Dict[str, Any]] = None,
@@ -799,6 +811,22 @@ class ProcessingWorker(QObject):
             result = self._defringe_processor.process(result, **defringe_params)
             defringe_ms = _elapsed_ms(defringe_start)
 
+        # Geometry (Distortion/Vertical/Horizontal/Scale/Offset) runs
+        # immediately BEFORE Straighten -- see docs/planning/
+        # implementation-notes/2026-10-13-geometry-processor.md section 2.
+        geometry_ms = 0.0
+        if geometry_params and (
+            geometry_params.get("distortion", 0.0) != 0.0
+            or geometry_params.get("vertical", 0.0) != 0.0
+            or geometry_params.get("horizontal", 0.0) != 0.0
+            or geometry_params.get("scale", 100.0) != 100.0
+            or geometry_params.get("offset_x", 0.0) != 0.0
+            or geometry_params.get("offset_y", 0.0) != 0.0
+        ):
+            geometry_start = perf_counter()
+            result = self._geometry_processor.process(result, **geometry_params)
+            geometry_ms = _elapsed_ms(geometry_start)
+
         straighten_ms = 0.0
         if straighten_params and straighten_params.get("straighten", 0.0) != 0.0:
             straighten_start = perf_counter()
@@ -836,7 +864,7 @@ class ProcessingWorker(QObject):
             "color_grading_ms=%.2f texture_ms=%.2f clarity_ms=%.2f dehaze_ms=%.2f "
             "vignette_ms=%.2f grain_ms=%.2f sharpening_ms=%.2f "
             "luminance_nr_ms=%.2f color_nr_ms=%.2f remove_ca_ms=%.2f "
-            "defringe_ms=%.2f straighten_ms=%.2f mask_ms=%.2f crop_ms=%.2f "
+            "defringe_ms=%.2f geometry_ms=%.2f straighten_ms=%.2f mask_ms=%.2f crop_ms=%.2f "
             "total_ms=%.2f",
             image.shape,
             copy_ms,
@@ -858,6 +886,7 @@ class ProcessingWorker(QObject):
             color_nr_ms,
             remove_ca_ms,
             defringe_ms,
+            geometry_ms,
             straighten_ms,
             mask_ms,
             crop_ms,

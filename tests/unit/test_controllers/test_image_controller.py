@@ -258,6 +258,12 @@ class TestImageController:
             "remove_ca": 0.0,
             "defringe": 0.0,
             "straighten": 0.0,
+            "distortion": 0.0,
+            "vertical": 0.0,
+            "horizontal": 0.0,
+            "scale": 100.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -305,6 +311,12 @@ class TestImageController:
             "remove_ca": 0.0,
             "defringe": 0.0,
             "straighten": 0.0,
+            "distortion": 0.0,
+            "vertical": 0.0,
+            "horizontal": 0.0,
+            "scale": 100.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
@@ -1440,6 +1452,91 @@ class TestImageControllerStraighten:
         )
         assert controller.can_undo() is True
         assert controller.undo() is True
+
+
+class TestImageControllerGeometry:
+    """Phase I (Geometry) -- Distortion/Vertical/Horizontal/Scale/Offset.
+    See docs/planning/implementation-notes/
+    2026-10-13-geometry-processor.md."""
+
+    _ALL_GEOMETRY = {
+        "distortion": 40.0,
+        "vertical": -30.0,
+        "horizontal": 20.0,
+        "scale": 120.0,
+        "offset_x": 10.0,
+        "offset_y": -5.0,
+    }
+
+    def test_geometry_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state(self._ALL_GEOMETRY)
+        state = controller.get_adjustment_state()
+        for key, value in self._ALL_GEOMETRY.items():
+            assert state[key] == value
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape == pil_to_linear(sample_image).shape
+
+    def test_missing_geometry_restores_identity_defaults(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        state = controller.get_adjustment_state()
+        assert state["distortion"] == 0.0
+        assert state["vertical"] == 0.0
+        assert state["horizontal"] == 0.0
+        assert state["scale"] == 100.0
+        assert state["offset_x"] == 0.0
+        assert state["offset_y"] == 0.0
+
+    def test_geometry_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            geometry_params=self._ALL_GEOMETRY, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+    def test_geometry_scale_identity_alone_is_not_a_pending_change(
+        self, qapp, sample_image
+    ):
+        """scale=100 is Geometry's own identity value, not 0.0 -- make
+        sure the "any pending change" bookkeeping compares against each
+        key's own default (not a bare 0.0) so a restored state sitting
+        exactly at every identity value is correctly treated as "no
+        changes", exercising the same bug class a naive ``!= 0.0`` check
+        over all of ``_ADJUSTMENT_DEFAULTS`` would hit for ``scale``."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"scale": 100.0})
+        assert controller._has_pending_adjustment_changes() is False
+
+    def test_geometry_runs_before_straighten_pipeline_order(
+        self, qapp, sample_image
+    ):
+        """Pipeline-order regression: Geometry and Straighten combined
+        must differ from applying either alone, and from applying them
+        in a different relative order would be indistinguishable at the
+        processor level -- but the controller must at least route both
+        into the single recompute chain without skipping either."""
+        controller = ImageController(ImageView(), use_threading=False)
+        distinct = pil_to_linear(sample_image).copy()
+        distinct[20:40, 60:80] = 0.0  # off-center detail so warps are visible
+        controller._apply_loaded_image("sample.jpg", distinct)
+
+        geometry_only = controller.get_export_image()
+        controller.restore_adjustment_state({"distortion": 60.0})
+        after_geometry = controller.get_export_image()
+        controller.restore_adjustment_state(
+            {"distortion": 60.0, "straighten": 15.0}
+        )
+        after_both = controller.get_export_image()
+
+        assert not np.array_equal(after_geometry, geometry_only)
+        assert not np.array_equal(after_both, after_geometry)
+        assert after_both.shape == pil_to_linear(sample_image).shape
 
 
 class TestImageControllerCrop:

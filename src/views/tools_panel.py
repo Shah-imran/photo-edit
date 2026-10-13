@@ -104,6 +104,12 @@ class ToolsPanel(QWidget):
             'remove_ca': 0.0,
             'defringe': 0.0,
             'straighten': 0.0,
+            'distortion': 0.0,
+            'vertical': 0.0,
+            'horizontal': 0.0,
+            'scale': 100.0,
+            'offset_x': 0.0,
+            'offset_y': 0.0,
         }
         self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
         self._hsl_values: Dict[str, float] = default_hsl_params()
@@ -408,22 +414,65 @@ class ToolsPanel(QWidget):
         )
         content_layout.addWidget(optics_section)
 
-        # Geometry section (Phase I -- Straighten). See
-        # docs/planning/implementation-notes/2026-10-12-straighten.md
-        # section 1 for why this section holds *only* Straighten -- the
-        # full interactive Crop tool, Upright modes, and Distortion/
-        # Scale/Offset controls are explicitly out of scope for this
-        # slice and remain a separate, larger future undertaking.
+        # Geometry section (Phase I -- PDF sections 19-20). Straighten
+        # (small-angle rotation, see docs/planning/implementation-notes/
+        # 2026-10-12-straighten.md) was this section's first slice;
+        # Distortion/Vertical/Horizontal/Scale/X-Y Offset (see
+        # docs/planning/implementation-notes/
+        # 2026-10-13-geometry-processor.md) fill in the rest of the
+        # slider-based half. Upright modes (Auto/Guided/Level/Vertical/
+        # Full) and "Constrain Crop" remain explicitly out of scope --
+        # see that note's section 1 -- since they need vanishing-point
+        # detection or a dedicated guided-line UI, both much larger
+        # efforts than a plain slider.
         geometry_section, geometry_content_layout = self._create_section("Geometry")
         self._straighten_slider = AdjustmentSlider(
             "Straighten", min_value=-45.0, max_value=45.0,
             default_value=0.0, step=0.1, decimals=1
         )
         geometry_content_layout.addWidget(self._straighten_slider)
+        self._distortion_slider = AdjustmentSlider(
+            "Distortion", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._distortion_slider)
+        self._vertical_slider = AdjustmentSlider(
+            "Vertical", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._vertical_slider)
+        self._horizontal_slider = AdjustmentSlider(
+            "Horizontal", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._horizontal_slider)
+        self._scale_slider = AdjustmentSlider(
+            "Scale", min_value=50.0, max_value=150.0,
+            default_value=100.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._scale_slider)
+        self._offset_x_slider = AdjustmentSlider(
+            "X Offset", min_value=-50.0, max_value=50.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._offset_x_slider)
+        self._offset_y_slider = AdjustmentSlider(
+            "Y Offset", min_value=-50.0, max_value=50.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._offset_y_slider)
         geometry_section.add_header_widget(
             self._reset_button_for(
                 "Reset Geometry",
-                lambda: self._reset_sliders(self._straighten_slider),
+                lambda: self._reset_sliders(
+                    self._straighten_slider,
+                    self._distortion_slider,
+                    self._vertical_slider,
+                    self._horizontal_slider,
+                    self._scale_slider,
+                    self._offset_x_slider,
+                    self._offset_y_slider,
+                ),
             )
         )
         content_layout.addWidget(geometry_section)
@@ -600,6 +649,24 @@ class ToolsPanel(QWidget):
         self._straighten_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('straighten', v)
         )
+        self._distortion_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('distortion', v)
+        )
+        self._vertical_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('vertical', v)
+        )
+        self._horizontal_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('horizontal', v)
+        )
+        self._scale_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('scale', v)
+        )
+        self._offset_x_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('offset_x', v)
+        )
+        self._offset_y_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('offset_y', v)
+        )
 
         # Slider released signals (for final processing)
         self._exposure_slider.slider_released.connect(self._on_slider_released)
@@ -624,6 +691,12 @@ class ToolsPanel(QWidget):
         self._remove_ca_slider.slider_released.connect(self._on_slider_released)
         self._defringe_slider.slider_released.connect(self._on_slider_released)
         self._straighten_slider.slider_released.connect(self._on_slider_released)
+        self._distortion_slider.slider_released.connect(self._on_slider_released)
+        self._vertical_slider.slider_released.connect(self._on_slider_released)
+        self._horizontal_slider.slider_released.connect(self._on_slider_released)
+        self._scale_slider.slider_released.connect(self._on_slider_released)
+        self._offset_x_slider.slider_released.connect(self._on_slider_released)
+        self._offset_y_slider.slider_released.connect(self._on_slider_released)
 
         self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
@@ -816,6 +889,12 @@ class ToolsPanel(QWidget):
             'remove_ca': float(adjustments.get('remove_ca', 0.0)),
             'defringe': float(adjustments.get('defringe', 0.0)),
             'straighten': float(adjustments.get('straighten', 0.0)),
+            'distortion': float(adjustments.get('distortion', 0.0)),
+            'vertical': float(adjustments.get('vertical', 0.0)),
+            'horizontal': float(adjustments.get('horizontal', 0.0)),
+            'scale': float(adjustments.get('scale', 100.0)),
+            'offset_x': float(adjustments.get('offset_x', 0.0)),
+            'offset_y': float(adjustments.get('offset_y', 0.0)),
         }
         curve_points = normalize_points(adjustments.get('tone_curve'))
         hsl_values = default_hsl_params()
@@ -860,6 +939,12 @@ class ToolsPanel(QWidget):
             self._remove_ca_slider.set_value(merged['remove_ca'])
             self._defringe_slider.set_value(merged['defringe'])
             self._straighten_slider.set_value(merged['straighten'])
+            self._distortion_slider.set_value(merged['distortion'])
+            self._vertical_slider.set_value(merged['vertical'])
+            self._horizontal_slider.set_value(merged['horizontal'])
+            self._scale_slider.set_value(merged['scale'])
+            self._offset_x_slider.set_value(merged['offset_x'])
+            self._offset_y_slider.set_value(merged['offset_y'])
             self._curve_editor.set_points(curve_points)
             self._hsl_mixer_panel.set_values(hsl_values)
             self._color_grading_panel.set_values(color_grading_values)
@@ -906,6 +991,12 @@ class ToolsPanel(QWidget):
         self._remove_ca_slider.setEnabled(enabled)
         self._defringe_slider.setEnabled(enabled)
         self._straighten_slider.setEnabled(enabled)
+        self._distortion_slider.setEnabled(enabled)
+        self._vertical_slider.setEnabled(enabled)
+        self._horizontal_slider.setEnabled(enabled)
+        self._scale_slider.setEnabled(enabled)
+        self._offset_x_slider.setEnabled(enabled)
+        self._offset_y_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)
         for button in self._section_reset_buttons:
             button.setEnabled(enabled)

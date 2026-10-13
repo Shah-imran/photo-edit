@@ -42,6 +42,7 @@ class ProcessingRequest:
     color_nr_params: Dict[str, float] = field(default_factory=dict)
     remove_ca_params: Dict[str, float] = field(default_factory=dict)
     defringe_params: Dict[str, float] = field(default_factory=dict)
+    geometry_params: Dict[str, float] = field(default_factory=dict)
     straighten_params: Dict[str, float] = field(default_factory=dict)
     crop_params: Dict[str, float] = field(default_factory=dict)
     mask_params: Dict[str, Any] = field(default_factory=dict)
@@ -115,6 +116,7 @@ class ProcessingQueue:
         color_nr_params: Optional[Dict[str, float]] = None,
         remove_ca_params: Optional[Dict[str, float]] = None,
         defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
         mask_params: Optional[Dict[str, Any]] = None,
@@ -157,6 +159,7 @@ class ProcessingQueue:
                 color_nr_params=color_nr_params or {},
                 remove_ca_params=remove_ca_params or {},
                 defringe_params=defringe_params or {},
+                geometry_params=geometry_params or {},
                 straighten_params=straighten_params or {},
                 crop_params=crop_params or {},
                 mask_params=mask_params or {},
