@@ -925,3 +925,105 @@ class TestProcessingWorkerCrop:
         key_b = worker._cache_key(request_b, source)
 
         assert key_a != key_b
+
+
+class TestProcessingWorkerMask:
+    """Mask is applied after every other adjustment (including
+    Straighten) and strictly BEFORE Crop. See
+    docs/planning/implementation-notes/2026-10-13-mask-processor.md."""
+
+    _MASK = {"type": "linear", "x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0,
+             "exposure": 1.0, "contrast": 0.0, "saturation": 0.0, "clarity": 0.0}
+
+    def test_mask_params_reach_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._mask_processor,
+            "process",
+            lambda image, mask=None: calls.append(mask) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1,
+            mask_params=self._MASK,
+            use_proxy=False,
+        ))
+        assert calls == [self._MASK]
+
+    def test_empty_mask_params_skips_processor(self, monkeypatch):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+        calls = []
+        monkeypatch.setattr(
+            worker._mask_processor,
+            "process",
+            lambda image, mask=None: calls.append(mask) or image,
+        )
+        worker._process_request(ProcessingRequest(
+            request_id=1,
+            mask_params={},
+            use_proxy=False,
+        ))
+        assert calls == []
+
+    def test_mask_actually_changes_the_full_resolution_result(self):
+        """Confirm the worker's real end-to-end pipeline (not a mocked
+        processor) produces a genuinely different output for a real
+        mask, while preserving shape (mask never changes shape)."""
+        worker = ProcessingWorker()
+        source = _linear_image(width=100, height=80)
+        worker.set_image(source)
+
+        results = []
+        worker.processing_complete.connect(lambda rid, image: results.append(image))
+        worker._process_request(ProcessingRequest(
+            request_id=1,
+            mask_params=self._MASK,
+            use_proxy=False,
+        ))
+
+        assert len(results) == 1
+        assert results[0].shape == source.shape
+        assert not (results[0] == source).all()
+
+    def test_different_mask_params_produce_different_cache_keys(self):
+        worker = ProcessingWorker()
+        worker.set_image(_linear_image())
+
+        request_a = ProcessingRequest(
+            request_id=1, mask_params={}, use_proxy=True
+        )
+        request_b = ProcessingRequest(
+            request_id=2,
+            mask_params=self._MASK,
+            use_proxy=True,
+        )
+        source = worker._proxy_manager.get_proxy(interactive=True)
+
+        key_a = worker._cache_key(request_a, source)
+        key_b = worker._cache_key(request_b, source)
+
+        assert key_a != key_b
+
+    def test_mask_applied_before_crop(self):
+        """Pipeline-order regression: with both a mask and a crop
+        active, the final shape must reflect the crop (mask never
+        changes shape, so this just confirms crop still runs and mask
+        doesn't interfere with it)."""
+        worker = ProcessingWorker()
+        source = _linear_image(width=100, height=80)
+        worker.set_image(source)
+
+        results = []
+        worker.processing_complete.connect(lambda rid, image: results.append(image))
+        worker._process_request(ProcessingRequest(
+            request_id=1,
+            mask_params=self._MASK,
+            crop_params={"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75},
+            use_proxy=False,
+        ))
+
+        assert len(results) == 1
+        assert results[0].shape[0] < source.shape[0]
+        assert results[0].shape[1] < source.shape[1]

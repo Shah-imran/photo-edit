@@ -29,6 +29,7 @@ from src.processors.remove_chromatic_aberration_processor import (
 from src.processors.defringe_processor import DefringeProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.processors.crop_processor import CropProcessor
+from src.processors.mask_processor import MaskProcessor
 from src.utils.color_pipeline import LinearImage
 
 if TYPE_CHECKING:
@@ -142,6 +143,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         defringe_params: Dict[str, float] = None,
         straighten_params: Dict[str, float] = None,
         crop_params: Dict[str, float] = None,
+        mask_params: Dict[str, Any] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -198,6 +200,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._straighten_params = straighten_params or {}
         self._crop_processor = CropProcessor()
         self._crop_params = crop_params or {}
+        self._mask_processor = MaskProcessor()
+        self._mask_params = mask_params or {}
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -287,9 +291,15 @@ class CombinedAdjustmentCommand(BaseCommand):
                 result, **self._straighten_params
             )
 
+        # Mask is applied after every other adjustment (including
+        # Straighten) and strictly BEFORE Crop -- see
+        # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
+        if self._mask_params:
+            result = self._mask_processor.process(result, mask=self._mask_params)
+
         # Crop is applied strictly LAST, after every other processor
-        # (including Straighten) -- see docs/planning/implementation-notes/
-        # 2026-10-13-crop-processor.md section 1.
+        # (including Straighten and Mask) -- see docs/planning/
+        # implementation-notes/2026-10-13-crop-processor.md section 1.
         if self._crop_params:
             result = self._crop_processor.process(result, **self._crop_params)
 

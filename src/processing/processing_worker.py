@@ -40,6 +40,7 @@ from src.processors.remove_chromatic_aberration_processor import (
 from src.processors.defringe_processor import DefringeProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.processors.crop_processor import CropProcessor
+from src.processors.mask_processor import MaskProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils.color_pipeline import LinearImage
 
@@ -130,6 +131,7 @@ class ProcessingWorker(QObject):
         self._defringe_processor = DefringeProcessor()
         self._straighten_processor = StraightenProcessor()
         self._crop_processor = CropProcessor()
+        self._mask_processor = MaskProcessor()
 
         # Thread control
         self._running = False
@@ -210,6 +212,7 @@ class ProcessingWorker(QObject):
         defringe_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
+        mask_params: Optional[Dict[str, Any]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -249,6 +252,7 @@ class ProcessingWorker(QObject):
             defringe_params=defringe_params,
             straighten_params=straighten_params,
             crop_params=crop_params,
+            mask_params=mask_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -280,6 +284,7 @@ class ProcessingWorker(QObject):
         defringe_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
+        mask_params: Optional[Dict[str, Any]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -319,6 +324,7 @@ class ProcessingWorker(QObject):
             defringe_params,
             straighten_params,
             crop_params,
+            mask_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -344,6 +350,7 @@ class ProcessingWorker(QObject):
         defringe_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
+        mask_params: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -381,6 +388,7 @@ class ProcessingWorker(QObject):
             defringe_params,
             straighten_params,
             crop_params,
+            mask_params,
             use_proxy=False,
         )
 
@@ -499,6 +507,7 @@ class ProcessingWorker(QObject):
                 request.defringe_params,
                 request.straighten_params,
                 request.crop_params,
+                request.mask_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -582,6 +591,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.defringe_params.items())),
             tuple(sorted(request.straighten_params.items())),
             tuple(sorted(request.crop_params.items())),
+            tuple(sorted(request.mask_params.items())),
         )
 
     @staticmethod
@@ -607,6 +617,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.defringe_params.items())),
             tuple(sorted(request.straighten_params.items())),
             tuple(sorted(request.crop_params.items())),
+            tuple(sorted(request.mask_params.items())),
         )
 
     def _apply_adjustments(
@@ -631,6 +642,7 @@ class ProcessingWorker(QObject):
         defringe_params: Optional[Dict[str, float]] = None,
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
+        mask_params: Optional[Dict[str, Any]] = None,
     ) -> LinearImage:
         """Apply exposure, tonal, white balance, curve, color, HSL mixer,
         and Color Grading adjustments to a ``LinearImage``."""
@@ -751,9 +763,22 @@ class ProcessingWorker(QObject):
             result = self._straighten_processor.process(result, **straighten_params)
             straighten_ms = _elapsed_ms(straighten_start)
 
+        # Mask is applied after every other adjustment (including
+        # Straighten) and strictly BEFORE Crop -- it blends pixel VALUES
+        # only (never changes shape), so its geometry is expressed in the
+        # full, pre-crop frame's own normalized coordinates and never
+        # needs to account for a separate, edit-time-dependent crop
+        # rectangle. See docs/planning/implementation-notes/
+        # 2026-10-13-mask-processor.md.
+        mask_ms = 0.0
+        if mask_params:
+            mask_start = perf_counter()
+            result = self._mask_processor.process(result, mask=mask_params)
+            mask_ms = _elapsed_ms(mask_start)
+
         # Crop is applied strictly LAST, after every other processor
-        # (including Straighten) -- it is the only processor in this
-        # codebase that deliberately changes output shape. See
+        # (including Straighten and Mask) -- it is the only processor in
+        # this codebase that deliberately changes output shape. See
         # docs/planning/implementation-notes/2026-10-13-crop-processor.md
         # section 1.
         crop_ms = 0.0
@@ -768,7 +793,8 @@ class ProcessingWorker(QObject):
             "color_grading_ms=%.2f texture_ms=%.2f clarity_ms=%.2f dehaze_ms=%.2f "
             "vignette_ms=%.2f grain_ms=%.2f sharpening_ms=%.2f "
             "luminance_nr_ms=%.2f color_nr_ms=%.2f remove_ca_ms=%.2f "
-            "defringe_ms=%.2f straighten_ms=%.2f crop_ms=%.2f total_ms=%.2f",
+            "defringe_ms=%.2f straighten_ms=%.2f mask_ms=%.2f crop_ms=%.2f "
+            "total_ms=%.2f",
             image.shape,
             copy_ms,
             exposure_ms,
@@ -789,6 +815,7 @@ class ProcessingWorker(QObject):
             remove_ca_ms,
             defringe_ms,
             straighten_ms,
+            mask_ms,
             crop_ms,
             _elapsed_ms(total_start),
         )

@@ -39,6 +39,7 @@ from src.processors.remove_chromatic_aberration_processor import (
 from src.processors.defringe_processor import DefringeProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.processors.crop_processor import CropProcessor
+from src.processors.mask_processor import MaskProcessor
 from src.commands.adjustment_commands import (
     AdjustmentStateCommand,
     CombinedAdjustmentCommand,
@@ -156,6 +157,35 @@ class ImageController(QObject):
     # zeros -- see docs/planning/implementation-notes/
     # 2026-10-13-crop-processor.md section 4.
     _CROP_DEFAULTS = {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+    # The mask's one slot (state key "mask") has no meaningful "neutral"
+    # geometry the way crop's full-frame rectangle is a real, applyable
+    # identity -- there is no gradient/ellipse that is simultaneously
+    # valid and a no-op. So, unlike crop, "no mask" is represented
+    # externally as None, not an empty-but-complete dict -- see
+    # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
+    # Internally, self._mask_params still follows crop's own {}-sentinel
+    # convention (see __init__ below); only the externally-visible
+    # get_adjustment_state()["mask"] / on_mask_changed(mask) contract uses
+    # None.
+    _MASK_LINEAR_DEFAULTS = {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+    _MASK_RADIAL_DEFAULTS = {
+        "cx": 0.5,
+        "cy": 0.5,
+        "rx": 0.25,
+        "ry": 0.25,
+        "feather": 0.5,
+    }
+    # The one, small, fixed local-adjustment subset a mask supports (see
+    # docs/planning/implementation-notes/2026-10-13-mask-processor.md for
+    # the full list of deferred parameters). Ranges match each
+    # underlying processor's own real valid range.
+    _MASK_ADJUSTMENT_RANGES = {
+        "exposure": (-5.0, 5.0),
+        "contrast": (-100.0, 100.0),
+        "saturation": (-100.0, 100.0),
+        "clarity": (-100.0, 100.0),
+    }
+    _MASK_TYPES = ("linear", "radial")
 
     def __init__(
         self,
@@ -207,6 +237,7 @@ class ImageController(QObject):
         self._defringe_processor = DefringeProcessor()
         self._straighten_processor = StraightenProcessor()
         self._crop_processor = CropProcessor()
+        self._mask_processor = MaskProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
@@ -238,6 +269,15 @@ class ImageController(QObject):
         # is set -- see docs/planning/implementation-notes/
         # 2026-10-13-crop-processor.md section 4.
         self._crop_params: Dict[str, float] = {}
+        # Mask's single slot follows the exact same internal falsy/{}
+        # "not yet touched" sentinel convention as _crop_params (see
+        # above) -- {} means "no mask", a populated dict means an active
+        # one. Unlike crop, this needs no identity-collapsing step: the
+        # normalizer itself (_normalize_mask_state) returns {} directly
+        # for "no mask" (None, or an unrecognized/missing "type"), since
+        # there is no other "neutral" mask geometry to collapse from. See
+        # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
+        self._mask_params: Dict[str, Any] = {}
 
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
@@ -507,6 +547,7 @@ class ImageController(QObject):
         self._defringe_params = {}
         self._straighten_params = {}
         self._crop_params = {}
+        self._mask_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._pending_history_previous_state = None
@@ -658,8 +699,15 @@ class ImageController(QObject):
             result = self._straighten_processor.process(
                 result, **self._straighten_params
             )
+        # Mask is applied after every other adjustment (including
+        # Straighten) and strictly BEFORE Crop -- it blends pixel values
+        # only, never changes shape, so its geometry is always expressed
+        # in the full, pre-crop frame's own normalized coordinates. See
+        # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
+        if self._mask_params:
+            result = self._mask_processor.process(result, mask=self._mask_params)
         # Crop is applied strictly LAST, after every other processor
-        # (including Straighten) -- see CropProcessor's module
+        # (including Straighten and Mask) -- see CropProcessor's module
         # docstring and docs/planning/implementation-notes/
         # 2026-10-13-crop-processor.md section 1 for why.
         if apply_crop and self._crop_params:
@@ -690,7 +738,13 @@ class ImageController(QObject):
         section 4), and ``"crop"`` (a 4-key ``{"x0", "y0", "x1", "y1"}``
         dict of normalized fractions, defaulting to the full-frame
         rectangle -- see docs/planning/implementation-notes/
-        2026-10-13-crop-processor.md section 4).
+        2026-10-13-crop-processor.md section 4), and ``"mask"`` (the
+        single active local-adjustment mask -- ``None`` when absent, or
+        a dict shaped per
+        docs/planning/implementation-notes/2026-10-13-mask-processor.md
+        section 4; unlike every other non-flat key, its "no mask"
+        default is ``None``, not an empty/identity dict, since there is
+        no neutral mask geometry).
         """
         state: Dict[str, Any] = self._ADJUSTMENT_DEFAULTS.copy()
         state.update(self._exposure_params)
@@ -716,6 +770,7 @@ class ImageController(QObject):
         state.update(self._defringe_params)
         state.update(self._straighten_params)
         state["crop"] = {**self._CROP_DEFAULTS, **self._crop_params}
+        state["mask"] = self._mask_params.copy() if self._mask_params else None
         return state
 
     def _apply_state_params(
@@ -733,8 +788,8 @@ class ImageController(QObject):
         Returns:
             A dict with the normalized pieces actually applied --
             ``"normalized"`` (the flat float dict), ``"curve_points"``,
-            ``"hsl_values"``, ``"color_grading_values"`` and
-            ``"crop_values"`` -- so callers that need to reason about
+            ``"hsl_values"``, ``"color_grading_values"``, ``"crop_values"``
+            and ``"mask_values"`` -- so callers that need to reason about
             "are there any non-default changes" (as
             ``restore_adjustment_state`` does) don't have to recompute them.
         """
@@ -750,6 +805,9 @@ class ImageController(QObject):
         )
         crop_values = self._normalize_crop_state(
             adjustments.get("crop") if adjustments else None
+        )
+        mask_values = self._normalize_mask_state(
+            adjustments.get("mask") if adjustments else None
         )
 
         self._exposure_params = {
@@ -790,6 +848,7 @@ class ImageController(QObject):
         self._crop_params = (
             {} if self._is_identity_crop(crop_values) else crop_values
         )
+        self._mask_params = mask_values
 
         return {
             "normalized": normalized,
@@ -797,6 +856,7 @@ class ImageController(QObject):
             "hsl_values": hsl_values,
             "color_grading_values": color_grading_values,
             "crop_values": crop_values,
+            "mask_values": mask_values,
         }
 
     def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
@@ -823,6 +883,7 @@ class ImageController(QObject):
         hsl_values = applied["hsl_values"]
         color_grading_values = applied["color_grading_values"]
         crop_values = applied["crop_values"]
+        mask_values = applied["mask_values"]
 
         if not self.has_image():
             return
@@ -836,6 +897,7 @@ class ImageController(QObject):
                 for key, default in self._COLOR_GRADING_DEFAULTS.items()
             )
             or not self._is_identity_crop(crop_values)
+            or bool(mask_values)
         )
         if not has_changes:
             self._image_model.reset_to_original()
@@ -880,6 +942,8 @@ class ImageController(QObject):
         result = self._straighten_processor.process(
             result, **self._straighten_params
         )
+        if self._mask_params:
+            result = self._mask_processor.process(result, mask=self._mask_params)
         if self._crop_params:
             result = self._crop_processor.process(result, **self._crop_params)
         self._image_model.current_image = result
@@ -908,6 +972,7 @@ class ImageController(QObject):
         self._defringe_params = {}
         self._straighten_params = {}
         self._crop_params = {}
+        self._mask_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._pending_history_previous_state = None
@@ -1058,6 +1123,7 @@ class ImageController(QObject):
         defringe_params: Dict[str, float] = None,
         straighten_params: Dict[str, float] = None,
         crop_params: Dict[str, float] = None,
+        mask_params: Dict[str, Any] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -1124,6 +1190,13 @@ class ImageController(QObject):
             # docstring) -- so the guard checks "is not None", not
             # truthiness, to allow a caller to explicitly reset it.
             self._crop_params = crop_params
+        if mask_params is not None:
+            # Like crop_params, {} is a legitimate, meaningful value here
+            # -- it is mask's own internal "no mask" sentinel (see
+            # _MASK_TYPES' usage in _normalize_mask_state) -- so the guard
+            # checks "is not None", not truthiness, to allow a caller
+            # (including on_mask_changed) to explicitly clear it.
+            self._mask_params = mask_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -1149,6 +1222,7 @@ class ImageController(QObject):
                         defringe_params=self._defringe_params,
                         straighten_params=self._straighten_params,
                         crop_params=self._crop_params,
+                        mask_params=self._mask_params,
                     )
                 )
             else:
@@ -1174,6 +1248,7 @@ class ImageController(QObject):
                         defringe_params=self._defringe_params,
                         straighten_params=self._straighten_params,
                         crop_params=self._crop_params,
+                        mask_params=self._mask_params,
                         interactive_preview=True,
                     )
                 )
@@ -1210,6 +1285,7 @@ class ImageController(QObject):
                 defringe_params=self._defringe_params,
                 straighten_params=self._straighten_params,
                 crop_params=self._crop_params,
+                mask_params=self._mask_params,
             )
             command.execute()
 
@@ -1306,6 +1382,16 @@ class ImageController(QObject):
             if self._straighten_params:
                 result = self._straighten_processor.process(
                     result, **self._straighten_params
+                )
+
+            if self._mask_params:
+                result = self._mask_processor.process(
+                    result, **self._mask_params
+                )
+
+            if self._crop_params:
+                result = self._crop_processor.process(
+                    result, **self._crop_params
                 )
 
             self._image_model.current_image = result
@@ -1427,6 +1513,7 @@ class ImageController(QObject):
                 'defringe': self._defringe_params,
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
+                'mask': self._mask_params,
             })
             mode = "debounced-threaded"
         else:
@@ -1513,6 +1600,7 @@ class ImageController(QObject):
                 'defringe': self._defringe_params,
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
+                'mask': self._mask_params,
             })
         else:
             self.apply_adjustments(
@@ -1569,6 +1657,7 @@ class ImageController(QObject):
                 'defringe': self._defringe_params,
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
+                'mask': self._mask_params,
             })
         else:
             self.apply_adjustments(
@@ -1625,6 +1714,7 @@ class ImageController(QObject):
                 'defringe': self._defringe_params,
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
+                'mask': self._mask_params,
             })
         else:
             self.apply_adjustments(
@@ -1672,6 +1762,43 @@ class ImageController(QObject):
 
         self.apply_adjustments(crop_params=crop_params, add_to_history=True)
 
+    def on_mask_changed(self, mask: Optional[Dict[str, Any]]) -> None:
+        """Set (or clear, with ``None``) the single active local-adjustment
+        mask.
+
+        Set programmatically for now -- a later, separate slice wires
+        this to interactive drag UI (a draggable gradient line for
+        linear, a draggable ellipse for radial, reusing ``CropOverlay``'s
+        established coordinate-math approach) plus a small panel of the
+        mask's own Exposure/Contrast/Saturation/Clarity sliders. Mirrors
+        :meth:`on_crop_changed`'s pattern exactly: captures the
+        pre-gesture state via :meth:`_capture_pending_history_state`,
+        normalizes/validates the incoming dict defensively (never
+        trusting the caller -- the dict may come from an old catalog
+        entry, a malformed imported preset, or interactive UI input in
+        the later slice), and commits via
+        ``apply_adjustments(..., add_to_history=True)`` as a single
+        discrete step, participating fully in the state-aware undo/redo
+        system (see docs/planning/implementation-notes/
+        2026-10-13-state-aware-undo-redo.md).
+
+        Args:
+            mask: ``None`` to clear the active mask, or a dict shaped per
+                the module-level state contract (see
+                docs/planning/implementation-notes/
+                2026-10-13-mask-processor.md section 4). An unrecognized
+                ``"type"`` (or a missing one) is treated the same as
+                ``None``.
+        """
+        if not self.has_image():
+            return
+
+        self._capture_pending_history_state()
+
+        normalized = self._normalize_mask_state(mask)
+
+        self.apply_adjustments(mask_params=normalized, add_to_history=True)
+
     def _on_throttled_adjustment(self, params: dict) -> None:
         """Handle throttled live preview updates during slider drags."""
         start = perf_counter()
@@ -1699,6 +1826,7 @@ class ImageController(QObject):
         defringe_params = params.get('defringe', {})
         straighten_params = params.get('straighten', {})
         crop_params = params.get('crop', {})
+        mask_params = params.get('mask', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
@@ -1719,6 +1847,7 @@ class ImageController(QObject):
             defringe_params=defringe_params,
             straighten_params=straighten_params,
             crop_params=crop_params,
+            mask_params=mask_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1759,6 +1888,7 @@ class ImageController(QObject):
         defringe_params = params.get('defringe', {})
         straighten_params = params.get('straighten', {})
         crop_params = params.get('crop', {})
+        mask_params = params.get('mask', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -1782,6 +1912,7 @@ class ImageController(QObject):
             defringe_params=defringe_params,
             straighten_params=straighten_params,
             crop_params=crop_params,
+            mask_params=mask_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1901,6 +2032,7 @@ class ImageController(QObject):
                 defringe_params=self._defringe_params,
                 straighten_params=self._straighten_params,
                 crop_params=self._crop_params,
+                mask_params=self._mask_params,
                 interactive_preview=False,
             )
 
@@ -1944,7 +2076,8 @@ class ImageController(QObject):
             any(v != 0 for v in self._defringe_params.values()) or
             any(v != 0 for v in self._straighten_params.values()) or
             not is_identity_curve(self._curve_params.get("points")) or
-            bool(self._crop_params)
+            bool(self._crop_params) or
+            bool(self._mask_params)
         )
 
     def _submit_delayed_final_render(self) -> None:
@@ -1979,6 +2112,7 @@ class ImageController(QObject):
             defringe_params=self._defringe_params,
             straighten_params=self._straighten_params,
             crop_params=self._crop_params,
+            mask_params=self._mask_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -2068,6 +2202,7 @@ class ImageController(QObject):
                 defringe_params=self._defringe_params.copy(),
                 straighten_params=self._straighten_params.copy(),
                 crop_params=self._crop_params.copy(),
+                mask_params=self._mask_params.copy(),
             )
             command.execute()
 
@@ -2150,6 +2285,63 @@ class ImageController(QObject):
             and crop_values.get("x1", 1.0) >= 1.0
             and crop_values.get("y1", 1.0) >= 1.0
         )
+
+    def _normalize_mask_state(
+        self,
+        raw_mask: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Return the internal mask-params dict: ``{}`` ("no mask") for
+        ``None``/malformed input or an unrecognized/missing ``"type"``,
+        otherwise a fully-populated, defensively-clamped dict.
+
+        Mirrors :meth:`_normalize_crop_state`'s "never trust the caller"
+        reasoning (the dict may come from an old catalog entry, a
+        malformed imported preset, or interactive UI input in a later
+        slice) but, unlike crop, there is no separate "collapse to the
+        identity sentinel" step: an unrecognized/missing ``"type"`` IS
+        the identity signal here, so it returns ``{}`` directly. See
+        docs/planning/implementation-notes/2026-10-13-mask-processor.md
+        section 4 for the full state-shape contract.
+        """
+        if not raw_mask or not isinstance(raw_mask, dict):
+            return {}
+        mask_type = raw_mask.get("type")
+        if mask_type not in self._MASK_TYPES:
+            return {}
+
+        result: Dict[str, Any] = {
+            "type": mask_type,
+            "invert": bool(raw_mask.get("invert", False)),
+        }
+
+        if mask_type == "linear":
+            for key, default in self._MASK_LINEAR_DEFAULTS.items():
+                value = self._safe_float(raw_mask.get(key, default), default)
+                result[key] = max(0.0, min(1.0, value))
+        else:  # "radial"
+            for key, default in self._MASK_RADIAL_DEFAULTS.items():
+                value = self._safe_float(raw_mask.get(key, default), default)
+                if key in ("cx", "cy"):
+                    value = max(0.0, min(1.0, value))
+                elif key in ("rx", "ry"):
+                    value = max(1e-4, min(1.0, value))
+                else:  # "feather"
+                    value = max(0.0, min(1.0, value))
+                result[key] = value
+
+        for key, (low, high) in self._MASK_ADJUSTMENT_RANGES.items():
+            value = self._safe_float(raw_mask.get(key, 0.0), 0.0)
+            result[key] = max(low, min(high, value))
+
+        return result
+
+    @staticmethod
+    def _safe_float(value: Any, default: float) -> float:
+        """Coerce ``value`` to a float, tolerating bad types/values."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _normalize_floats(

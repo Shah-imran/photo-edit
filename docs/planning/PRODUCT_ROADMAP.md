@@ -100,7 +100,7 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | 17 | Done | Sharpening, Luminance NR, and Color NR all implemented, completing the Detail group. |
 | 18 | Partial | Remove CA and Defringe implemented; no lens-profile-based corrections (no profile database exists -- durable gap). |
 | 19-20 | Partial | Straighten (rotation, dimension-preserving) implemented; no Upright modes, Distortion/Scale/Offset. **Crop tool -- Done**: both the data/processing layer (`CropProcessor`, full pipeline/undo-redo/export wiring, `ImageController.on_crop_changed`) and the interactive UI (drag-handle `CropOverlay` with corner/edge handles, rule-of-thirds grid, aspect-ratio presets via `CropToolbar`, wired through `EditingToolStrip`'s Crop button and `MainWindow`) now exist -- see docs/planning/implementation-notes/2026-10-13-crop-processor.md and docs/planning/implementation-notes/2026-10-13-crop-tool-ui.md. |
-| 21-22 | Gap | No Healing or Masking. |
+| 21-22 | Partial | Healing is untouched/separate (still a Gap). Masking: linear/radial gradient masks implemented (single slot, 4-parameter local Exposure/Contrast/Saturation/Clarity stack, data layer only -- see docs/planning/implementation-notes/2026-10-13-mask-processor.md); no interactive drag UI yet, no brush masks, no multi-mask stack, no full global parameter set within a mask, no AI/sky/subject selection. |
 | 23 | Partial | Some actions via menus; no dedicated overflow/settings pattern. |
 | 24 | Partial | [`library_view.py`](../../src/views/library_view.py) left panel + thumbs, plus a bottom filmstrip (`filmstrip_view.py`) -- the "no bottom filmstrip" note here was stale. Still a Gap vs PDF Sec.24: no bulk/multi-select across entries (confirmed absent by grep -- see docs/planning/implementation-notes/2026-10-13-keywords.md's non-goals). |
 
@@ -185,7 +185,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 ### Phase J -- Healing and Masking (PDF 21-22)
 
 - Healing brush: clone/heal, size/feather/opacity, visualize spots (simplified).
-- Masking: start with **brush / linear gradient / radial** + adjustment stack; AI/sky/subject **later**.
+- Masking: start with **brush / linear gradient / radial** + adjustment stack; AI/sky/subject **later** -- linear/radial gradient masks (single slot, 4-parameter local adjustment stack: Exposure/Contrast/Saturation/Clarity) **Done** for the data/processing layer (see docs/planning/implementation-notes/2026-10-13-mask-processor.md); brush masks, a multi-mask stack, the full global parameter set within a mask, AI/sky/subject selection, and the interactive drag UI (a separate, later slice) remain.
 
 ### Phase K -- Session persistence (PDF 23; enables B)
 

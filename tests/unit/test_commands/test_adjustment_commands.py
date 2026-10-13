@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -435,6 +436,66 @@ class TestCombinedAdjustmentCommand:
         # re-grown the shape back to the original, uncropped size.
         assert new_image.shape[0] < sample_linear_image.shape[0]
         assert new_image.shape[1] < sample_linear_image.shape[1]
+
+    def test_mask_only_and_undo(self, sample_linear_image):
+        """Confirm the combined command's synchronous fallback applies a
+        mask correctly (shape preserved, pixels changed) and undo
+        restores the pre-mask image."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+        previous = model.get_current_image()
+        mask = {
+            "type": "linear",
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+            "exposure": 2.0,
+            "contrast": 0.0,
+            "saturation": 0.0,
+            "clarity": 0.0,
+        }
+        command = CombinedAdjustmentCommand(model, mask_params=mask)
+        command.execute()
+        assert model.is_modified() is True
+        new_image = model.get_current_image()
+        assert new_image.shape == sample_linear_image.shape
+        assert not (new_image == sample_linear_image).all()
+        command.undo()
+        assert model.get_current_image() is previous
+
+    def test_mask_applied_after_straighten_and_before_crop(
+        self, sample_linear_image
+    ):
+        """Mask must run after Straighten and strictly before Crop -- see
+        docs/planning/implementation-notes/2026-10-13-mask-processor.md."""
+        model = ImageModel()
+        model.set_original_image(sample_linear_image)
+        mask = {
+            "type": "radial",
+            "cx": 0.5,
+            "cy": 0.5,
+            "rx": 0.3,
+            "ry": 0.3,
+            "feather": 0.4,
+            "exposure": 1.5,
+            "contrast": 0.0,
+            "saturation": 0.0,
+            "clarity": 0.0,
+        }
+        command = CombinedAdjustmentCommand(
+            model,
+            straighten_params={"straighten": 10.0},
+            mask_params=mask,
+            crop_params={"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75},
+        )
+        command.execute()
+        new_image = model.get_current_image()
+        # Crop still ran strictly last: output is smaller than the
+        # original, uncropped source.
+        assert new_image.shape[0] < sample_linear_image.shape[0]
+        assert new_image.shape[1] < sample_linear_image.shape[1]
+        assert np.all(np.isfinite(new_image))
 
 
 class TestAdjustmentStateCommand:

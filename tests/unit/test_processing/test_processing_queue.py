@@ -186,6 +186,15 @@ class TestProcessingQueue:
         request = ProcessingQueue().create_request()
         assert request.crop_params == {}
 
+    def test_create_request_threads_mask_params(self):
+        mask = {"type": "linear", "x0": 0.1, "y0": 0.0, "x1": 0.9, "y1": 1.0}
+        request = ProcessingQueue().create_request(mask_params=mask)
+        assert request.mask_params == mask
+
+    def test_create_request_defaults_mask_params_to_empty_dict(self):
+        request = ProcessingQueue().create_request()
+        assert request.mask_params == {}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()
