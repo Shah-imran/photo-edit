@@ -39,8 +39,8 @@ from src.processors.remove_chromatic_aberration_processor import (
 from src.processors.defringe_processor import DefringeProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.commands.adjustment_commands import (
+    AdjustmentStateCommand,
     CombinedAdjustmentCommand,
-    ImageStateChangeCommand,
 )
 from src.processing.display_frame import DisplayFrame
 from src.processing.processing_worker import ProcessingWorker
@@ -101,6 +101,14 @@ class ImageController(QObject):
     image_load_started = pyqtSignal(str)
     image_preview_ready = pyqtSignal(str)
     image_load_finished = pyqtSignal(str, bool)
+    # Emitted after apply_history_state() re-applies a full (image,
+    # adjustment-state) snapshot -- on undo, redo, and also on an ordinary
+    # adjustment commit (both paths push an AdjustmentStateCommand; see
+    # docs/planning/implementation-notes/2026-10-13-state-aware-undo-redo.md).
+    # Carries the same dict shape as get_adjustment_state(). MainWindow
+    # listens to this to resync the ToolsPanel sliders/curve/HSL/Color
+    # Grading widgets and re-persist to the library catalog.
+    adjustment_state_restored = pyqtSignal(dict)
     _worker_image_set_requested = pyqtSignal(object)
     _ADJUSTMENT_DEFAULTS = {
         "exposure": 0.0,
@@ -221,6 +229,7 @@ class ImageController(QObject):
         self._latest_load_request_id: int = -1
         self._pending_final_request_id: int = -1
         self._pending_history_previous_image = None
+        self._pending_history_previous_state: Optional[Dict[str, Any]] = None
         self._load_parent_widget: Optional[QWidget] = None
         self._load_threads: list[QThread] = []
         self._load_workers: list[_ImageLoadWorker] = []
@@ -480,6 +489,7 @@ class ImageController(QObject):
         self._straighten_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
+        self._pending_history_previous_state = None
         self._final_render_timer.stop()
 
         # Set image in processing worker for proxy generation
@@ -669,8 +679,26 @@ class ImageController(QObject):
         state.update(self._straighten_params)
         return state
 
-    def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
-        """Apply a saved adjustment payload without creating undo history."""
+    def _apply_state_params(
+        self, adjustments: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Set every internal ``_xxx_params`` field from a full
+        adjustment-state dict (the same shape ``get_adjustment_state()``
+        returns), normalizing defensively.
+
+        Pure bookkeeping -- does not touch ``image_model``, history, or
+        pending processing state; callers (``restore_adjustment_state`` and
+        ``apply_history_state``) handle those themselves, since their needs
+        differ.
+
+        Returns:
+            A dict with the normalized pieces actually applied --
+            ``"normalized"`` (the 18-key flat float dict),
+            ``"curve_points"``, ``"hsl_values"`` and
+            ``"color_grading_values"`` -- so callers that need to reason
+            about "are there any non-default changes" (as
+            ``restore_adjustment_state`` does) don't have to recompute them.
+        """
         normalized = self._normalize_adjustment_state(adjustments)
         curve_points = normalize_points(
             adjustments.get("tone_curve") if adjustments else None
@@ -681,20 +709,6 @@ class ImageController(QObject):
         color_grading_values = self._normalize_color_grading_state(
             adjustments.get("color_grading") if adjustments else None
         )
-        self._history_service.clear_history()
-        self._pending_history_previous_image = None
-        self._pending_final_request_id = -1
-        self._final_render_timer.stop()
-        if self._debouncer is not None:
-            self._debouncer.cancel()
-        if self._processing_worker is not None and hasattr(
-            self._processing_worker, "cancel_pending"
-        ):
-            self._processing_worker.cancel_pending()
-        if self._final_processing_worker is not None and hasattr(
-            self._final_processing_worker, "cancel_pending"
-        ):
-            self._final_processing_worker.cancel_pending()
 
         self._exposure_params = {
             "exposure": normalized["exposure"],
@@ -731,6 +745,37 @@ class ImageController(QObject):
         self._remove_ca_params = {"remove_ca": normalized["remove_ca"]}
         self._defringe_params = {"defringe": normalized["defringe"]}
         self._straighten_params = {"straighten": normalized["straighten"]}
+
+        return {
+            "normalized": normalized,
+            "curve_points": curve_points,
+            "hsl_values": hsl_values,
+            "color_grading_values": color_grading_values,
+        }
+
+    def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
+        """Apply a saved adjustment payload without creating undo history."""
+        self._history_service.clear_history()
+        self._pending_history_previous_image = None
+        self._pending_history_previous_state = None
+        self._pending_final_request_id = -1
+        self._final_render_timer.stop()
+        if self._debouncer is not None:
+            self._debouncer.cancel()
+        if self._processing_worker is not None and hasattr(
+            self._processing_worker, "cancel_pending"
+        ):
+            self._processing_worker.cancel_pending()
+        if self._final_processing_worker is not None and hasattr(
+            self._final_processing_worker, "cancel_pending"
+        ):
+            self._final_processing_worker.cancel_pending()
+
+        applied = self._apply_state_params(adjustments)
+        normalized = applied["normalized"]
+        curve_points = applied["curve_points"]
+        hsl_values = applied["hsl_values"]
+        color_grading_values = applied["color_grading_values"]
 
         if not self.has_image():
             return
@@ -814,6 +859,7 @@ class ImageController(QObject):
         self._straighten_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
+        self._pending_history_previous_state = None
         self._final_render_timer.stop()
 
         # Cancel any pending processing
@@ -846,6 +892,39 @@ class ImageController(QObject):
         if result:
             self.refresh_view()
         return result
+
+    def apply_history_state(self, image, state: Dict[str, Any]) -> None:
+        """Re-apply a full (image, adjustment-state) snapshot during
+        undo/redo (and on an ordinary adjustment commit, via the same
+        ``AdjustmentStateCommand``).
+
+        Unlike :meth:`restore_adjustment_state` (used for switching images,
+        Paste Edit Settings, Profile apply, preset import -- all of which
+        clear history and may recompute from the original image), this
+        method keeps history intact, reuses an ALREADY-RENDERED image
+        buffer (no reprocessing -- undo/redo must stay cheap), and is the
+        only place that emits :attr:`adjustment_state_restored` so the UI
+        and persisted catalog state resync.
+
+        Deliberately does not call :meth:`refresh_view` itself: ``undo()``/
+        ``redo()`` above already repaint the canvas once the command has
+        run, and the normal (non-undo) commit path that also calls this
+        method via ``AdjustmentStateCommand.execute()`` relies on there
+        being no extra repaint here (see
+        ``_commit_rendered_adjustment``/``_on_processing_complete``, and the
+        "pending final render does not refresh full-res view" test). A
+        caller that needs the view repainted immediately must call
+        :meth:`refresh_view` itself afterward.
+
+        Intended to be called ONLY by ``AdjustmentStateCommand``'s
+        ``execute()``/``undo()`` (src/commands/adjustment_commands.py) --
+        it is not part of the normal live-editing flow, which is why it is
+        not prefixed with an underscore despite being an internal API: a
+        different module needs to call it.
+        """
+        self._image_model.current_image = image
+        self._apply_state_params(state)
+        self.adjustment_state_restored.emit(self.get_adjustment_state())
 
     def can_undo(self) -> bool:
         """Check if undo is available.
@@ -887,6 +966,26 @@ class ImageController(QObject):
         """
         return self._image_view.get_zoom_factor()
 
+    def _capture_pending_history_state(self) -> None:
+        """Snapshot the image + full adjustment state at the start of an
+        edit gesture, once, so undo/redo can restore both atomically later.
+
+        Called from every entry point that begins a new edit gesture
+        (``apply_adjustments``, ``on_adjustments_changed``,
+        ``on_curve_changed``, ``on_hsl_changed``,
+        ``on_color_grading_changed``) -- always BEFORE that method's own
+        param-storing code runs, so ``get_adjustment_state()`` here
+        reflects the state as it was immediately before this gesture.
+        """
+        if self._pending_history_previous_image is None:
+            current = self._image_model.get_current_image()
+            if current is not None:
+                # LinearImage instances are treated as immutable in the
+                # pipeline. Keep the reference instead of copying a full-res
+                # buffer on the UI thread.
+                self._pending_history_previous_image = current
+                self._pending_history_previous_state = self.get_adjustment_state()
+
     def apply_adjustments(
         self,
         exposure_params: Dict[str, float] = None,
@@ -927,13 +1026,7 @@ class ImageController(QObject):
         self._final_render_timer.stop()
         self._pending_final_request_id = -1
 
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                # LinearImage instances are treated as immutable in the
-                # pipeline. Keep the reference instead of copying a full-res
-                # buffer on the UI thread.
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         # Store current params
         if exposure_params:
@@ -1026,7 +1119,15 @@ class ImageController(QObject):
             return
 
         if add_to_history:
-            # Create and execute command for undo/redo
+            # Reuse CombinedAdjustmentCommand's existing pixel-computation
+            # chain to compute the new image, but run it directly (NOT via
+            # history_service.execute_command) so it never itself lands on
+            # the undo/redo stack -- only the state-aware
+            # AdjustmentStateCommand built below does. This avoids
+            # double-computing pixels (the expensive part) while still
+            # getting a state-aware command onto the real stack. See
+            # docs/planning/implementation-notes/
+            # 2026-10-13-state-aware-undo-redo.md.
             command = CombinedAdjustmentCommand(
                 self._image_model,
                 exposure_params=self._exposure_params,
@@ -1048,7 +1149,21 @@ class ImageController(QObject):
                 defringe_params=self._defringe_params,
                 straighten_params=self._straighten_params,
             )
-            self._history_service.execute_command(command)
+            command.execute()
+
+            previous_image = self._pending_history_previous_image
+            previous_state = self._pending_history_previous_state
+            self._pending_history_previous_image = None
+            self._pending_history_previous_state = None
+            if previous_image is not None and previous_state is not None:
+                state_command = AdjustmentStateCommand(
+                    controller=self,
+                    previous_image=previous_image,
+                    previous_state=previous_state,
+                    new_image=self._image_model.current_image,
+                    new_state=self.get_adjustment_state(),
+                )
+                self._history_service.execute_command(state_command)
         else:
             # Apply directly without history (for live preview)
             original = self._image_model.get_original_image()
@@ -1155,10 +1270,7 @@ class ImageController(QObject):
         # to restore. Without this, dragging a slider through the normal
         # UI path and releasing it would compute the final image correctly
         # but silently never add it to history.
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         cancel_start = perf_counter()
         self._final_render_timer.stop()
@@ -1301,10 +1413,7 @@ class ImageController(QObject):
         if not self.has_image():
             return
 
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         self._final_render_timer.stop()
         self._pending_final_request_id = -1
@@ -1364,10 +1473,7 @@ class ImageController(QObject):
         if not self.has_image():
             return
 
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         self._final_render_timer.stop()
         self._pending_final_request_id = -1
@@ -1422,10 +1528,7 @@ class ImageController(QObject):
         if not self.has_image():
             return
 
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         self._final_render_timer.stop()
         self._pending_final_request_id = -1
@@ -1747,6 +1850,7 @@ class ImageController(QObject):
 
         if not self._has_pending_adjustment_changes():
             self._pending_history_previous_image = None
+            self._pending_history_previous_state = None
             return
 
         self._pending_final_request_id = final_worker.submit_final_request(
@@ -1779,19 +1883,27 @@ class ImageController(QObject):
         """Add a completed worker render to history without reprocessing."""
         start = perf_counter()
         previous = self._pending_history_previous_image
+        previous_state = self._pending_history_previous_state
         self._pending_history_previous_image = None
+        self._pending_history_previous_state = None
         self._pending_final_request_id = -1
 
-        if previous is None:
+        if previous is None or previous_state is None:
             return
 
         if not self._has_pending_adjustment_changes():
             return
 
-        command = ImageStateChangeCommand(
-            self._image_model,
+        # By this point self._xxx_params already reflect the committed
+        # edit (set earlier in apply_adjustments/on_adjustments_changed/
+        # on_curve_changed/on_hsl_changed/on_color_grading_changed), so
+        # get_adjustment_state() here is the post-edit "new" state.
+        command = AdjustmentStateCommand(
+            controller=self,
             previous_image=previous,
+            previous_state=previous_state,
             new_image=rendered_image,
+            new_state=self.get_adjustment_state(),
         )
         self._history_service.execute_command(command)
         logger.info(
@@ -1802,14 +1914,32 @@ class ImageController(QObject):
 
     def commit_adjustments(self) -> None:
         """Commit current adjustments to history.
-        
+
         Call this when user finishes adjusting (e.g., releases slider).
+
+        This is a third history-push site beyond the two the original
+        state-aware undo/redo design called out (the threaded
+        ``_commit_rendered_adjustment`` path and the synchronous fallback
+        inside ``apply_adjustments``) -- it is ``on_slider_released``'s own
+        synchronous fallback for non-threaded callers/tests. It is
+        converted to push a state-aware ``AdjustmentStateCommand`` the same
+        way, for the same reason: without this, undo through this path
+        would still only swap the pixel buffer. See
+        docs/planning/implementation-notes/
+        2026-10-13-state-aware-undo-redo.md.
         """
         if not self.has_image():
             return
 
         # Only commit if there are actual changes
         if self._has_pending_adjustment_changes():
+            # Idempotent: a no-op if on_adjustments_changed/on_curve_changed/
+            # on_hsl_changed/on_color_grading_changed already captured the
+            # pre-gesture snapshot (the normal case); captures it here
+            # otherwise, so a direct call to commit_adjustments() still
+            # gets a correct "previous" pair.
+            self._capture_pending_history_state()
+
             command = CombinedAdjustmentCommand(
                 self._image_model,
                 exposure_params=self._exposure_params.copy(),
@@ -1831,7 +1961,21 @@ class ImageController(QObject):
                 defringe_params=self._defringe_params.copy(),
                 straighten_params=self._straighten_params.copy(),
             )
-            self._history_service.execute_command(command)
+            command.execute()
+
+            previous_image = self._pending_history_previous_image
+            previous_state = self._pending_history_previous_state
+            self._pending_history_previous_image = None
+            self._pending_history_previous_state = None
+            if previous_image is not None and previous_state is not None:
+                state_command = AdjustmentStateCommand(
+                    controller=self,
+                    previous_image=previous_image,
+                    previous_state=previous_state,
+                    new_image=self._image_model.current_image,
+                    new_state=self.get_adjustment_state(),
+                )
+                self._history_service.execute_command(state_command)
 
     def _normalize_adjustment_state(
         self,

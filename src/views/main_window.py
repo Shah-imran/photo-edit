@@ -484,6 +484,9 @@ class MainWindow(QMainWindow):
         self._image_controller.image_load_started.connect(self._on_image_load_started)
         self._image_controller.image_preview_ready.connect(self._on_image_preview_ready)
         self._image_controller.image_load_finished.connect(self._on_image_load_finished)
+        self._image_controller.adjustment_state_restored.connect(
+            self._on_adjustment_state_restored
+        )
 
     def _on_library_entries_rebuilt(self, library_id: str, entries: list[dict]) -> None:
         self._library_view.set_entries(entries)
@@ -857,6 +860,17 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage("Redo", 1000)
         else:
             self._status_bar.showMessage("Nothing to redo", 1000)
+
+    def _on_adjustment_state_restored(self, state: dict) -> None:
+        """Resync the ToolsPanel UI and persist to the catalog after an
+        undo/redo (or any other) call to ImageController.apply_history_state.
+
+        Mirrors ``_reset_adjustments``/``_paste_edit_settings``/
+        ``_apply_profile``'s exact "replace the current image's entire
+        adjustment state" UI-sync pattern.
+        """
+        self._tools_panel.set_adjustments(state, emit_signal=False)
+        self._adjustment_persist_timer.start()
 
     def _reset_adjustments(self):
         """Handle reset adjustments action."""

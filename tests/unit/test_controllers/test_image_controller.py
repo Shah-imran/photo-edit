@@ -623,6 +623,12 @@ class TestImageController:
         rendered = np.full_like(original, 0.75)
         previous = original.copy()
         controller._pending_history_previous_image = previous
+        # The real capture flow (_capture_pending_history_state) snapshots
+        # get_adjustment_state() at the same moment it snapshots the image
+        # -- replicate that here since this test sets
+        # _pending_history_previous_image directly rather than going
+        # through apply_adjustments().
+        controller._pending_history_previous_state = controller.get_adjustment_state()
         controller._pending_final_request_id = 7
         controller._exposure_params = {"exposure": 1.0}
         controller._color_params = {"saturation": 0.0}
@@ -954,6 +960,9 @@ class TestImageController:
 
         rendered = np.full_like(original, 0.8)
         controller._pending_history_previous_image = original
+        # See the matching comment in
+        # test_threaded_final_render_commits_history_without_reprocessing.
+        controller._pending_history_previous_state = controller.get_adjustment_state()
         controller._pending_final_request_id = 42
         controller._exposure_params = {"exposure": 1.0}
         controller._color_params = {"saturation": 0.0}
@@ -1425,3 +1434,239 @@ class TestImageControllerStraighten:
         )
         assert controller.can_undo() is True
         assert controller.undo() is True
+
+
+class TestImageControllerStateAwareUndoRedo:
+    """State-aware undo/redo (docs/planning/implementation-notes/
+    2026-10-13-state-aware-undo-redo.md): undo/redo must restore not just
+    the pixel buffer but the full internal adjustment-param state, and
+    must notify listeners via ``adjustment_state_restored`` so the UI and
+    persisted catalog state resync.
+    """
+
+    def test_undo_restores_adjustment_state_not_just_image(self, qapp, sample_image):
+        """The core regression test for this slice.
+
+        Before this fix, ImageController's undo only swapped the pixel
+        buffer -- the internal _exposure_params dict stayed at whatever
+        the most recent edit set it to. Applying exposure=1.0 then
+        exposure=2.0, then undoing, must leave get_adjustment_state()
+        reporting 1.0 (matching the now-displayed image), not 2.0 (the
+        stale, pre-undo param value).
+        """
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+        assert controller.get_adjustment_state()["exposure"] == 2.0
+
+        assert controller.undo() is True
+
+        assert controller.get_adjustment_state()["exposure"] == 1.0
+
+    def test_live_pipeline_builds_on_undone_state_not_stale_params(
+        self, qapp, sample_image
+    ):
+        """After undo, a further edit must build on the *restored* state,
+        not on the stale pre-undo params -- otherwise the live pipeline
+        would silently recompute from the wrong baseline.
+        """
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+        controller.undo()
+
+        # Apply a third, distinct adjustment through the normal flow.
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0, "contrast": 5.0, "brightness": 0.0},
+            add_to_history=True,
+        )
+
+        state = controller.get_adjustment_state()
+        assert state["exposure"] == 1.0
+        assert state["contrast"] == 5.0
+
+        # Independently compute the expected image: exposure=1.0 baseline
+        # (the undone-to state) + contrast=5.0, not exposure=2.0 + contrast=5.0.
+        original = controller.image_model.get_original_image()
+        expected = controller._exposure_processor.process(
+            original.copy(), exposure=1.0, contrast=5.0, brightness=0.0
+        )
+        assert np.allclose(controller.image_model.current_image, expected)
+
+    def test_redo_restores_image_and_state_to_pre_undo_values(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+        image_after_second_edit = controller.image_model.current_image
+
+        controller.undo()
+        assert controller.get_adjustment_state()["exposure"] == 1.0
+
+        assert controller.redo() is True
+
+        assert controller.get_adjustment_state()["exposure"] == 2.0
+        assert np.allclose(
+            controller.image_model.current_image, image_after_second_edit
+        )
+
+    def test_adjustment_state_restored_emitted_on_undo(
+        self, qapp, qtbot, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+
+        with qtbot.waitSignal(
+            controller.adjustment_state_restored, timeout=2000
+        ) as blocker:
+            controller.undo()
+
+        assert blocker.args[0]["exposure"] == 1.0
+
+    def test_adjustment_state_restored_emitted_on_redo(
+        self, qapp, qtbot, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+        controller.undo()
+
+        with qtbot.waitSignal(
+            controller.adjustment_state_restored, timeout=2000
+        ) as blocker:
+            controller.redo()
+
+        assert blocker.args[0]["exposure"] == 2.0
+
+    def test_curve_undo_restores_full_curve_state(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        first_points = [[0.0, 0.0], [0.25, 0.35], [1.0, 1.0]]
+        second_points = [[0.0, 0.0], [0.25, 0.12], [1.0, 1.0]]
+        controller.on_curve_changed(first_points)
+        controller.commit_adjustments()
+        controller.on_curve_changed(second_points)
+        controller.commit_adjustments()
+
+        assert controller.get_adjustment_state()["tone_curve"] != first_points
+
+        assert controller.undo() is True
+
+        restored_curve = controller.get_adjustment_state()["tone_curve"]
+        assert restored_curve == first_points
+
+    def test_hsl_undo_restores_full_hsl_state(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        first_hsl = {**default_hsl_params(), "red_sat": 20.0}
+        second_hsl = {**default_hsl_params(), "red_sat": 40.0}
+        controller.on_hsl_changed(first_hsl)
+        controller.commit_adjustments()
+        controller.on_hsl_changed(second_hsl)
+        controller.commit_adjustments()
+
+        assert controller.get_adjustment_state()["hsl"]["red_sat"] == 40.0
+
+        assert controller.undo() is True
+
+        assert controller.get_adjustment_state()["hsl"]["red_sat"] == 20.0
+
+    def test_color_grading_undo_restores_full_color_grading_state(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        first_cg = {**default_color_grading_params(), "midtones_hue": 90.0}
+        second_cg = {**default_color_grading_params(), "midtones_hue": 180.0}
+        controller.on_color_grading_changed(first_cg)
+        controller.commit_adjustments()
+        controller.on_color_grading_changed(second_cg)
+        controller.commit_adjustments()
+
+        assert (
+            controller.get_adjustment_state()["color_grading"]["midtones_hue"] == 180.0
+        )
+
+        assert controller.undo() is True
+
+        assert (
+            controller.get_adjustment_state()["color_grading"]["midtones_hue"] == 90.0
+        )
+
+    def test_restore_adjustment_state_clears_pending_history_state(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._pending_history_previous_image = (
+            controller.image_model.get_current_image()
+        )
+        controller._pending_history_previous_state = controller.get_adjustment_state()
+
+        controller.restore_adjustment_state({"exposure": 1.0})
+
+        assert controller._pending_history_previous_image is None
+        assert controller._pending_history_previous_state is None
+
+    def test_reset_to_original_clears_pending_history_state(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._pending_history_previous_image = (
+            controller.image_model.get_current_image()
+        )
+        controller._pending_history_previous_state = controller.get_adjustment_state()
+
+        controller.reset_to_original()
+
+        assert controller._pending_history_previous_image is None
+        assert controller._pending_history_previous_state is None
+
+    def test_loading_a_different_image_clears_pending_history_state(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._pending_history_previous_image = (
+            controller.image_model.get_current_image()
+        )
+        controller._pending_history_previous_state = controller.get_adjustment_state()
+
+        controller._apply_loaded_image("sample2.jpg", pil_to_linear(sample_image))
+
+        assert controller._pending_history_previous_image is None
+        assert controller._pending_history_previous_state is None

@@ -279,6 +279,46 @@ class TestTonalSliderWorkflow:
         reverted = main_window._image_controller.get_current_image()
         assert np.array_equal(reverted[100, 100], original_pixel)
 
+    def test_undo_resyncs_slider_widgets_not_just_image(
+        self, main_window, gray_image_file, qtbot
+    ):
+        """State-aware undo/redo must resync the ToolsPanel's own slider
+        widgets, not just the displayed image/controller-internal state.
+
+        Drives two real edit gestures through the actual slider widgets
+        (set_value + on_slider_released, matching
+        test_undo_reverts_tonal_adjustment's pattern) and asserts that,
+        after undo, the HIGHLIGHTS SLIDER WIDGET ITSELF shows the
+        pre-second-edit value -- the half of the state-aware undo/redo bug
+        that a controller-only test can't catch, since ImageController's
+        ``adjustment_state_restored`` signal is what MainWindow uses to
+        call ``ToolsPanel.set_adjustments`` and resync the widgets. See
+        docs/planning/implementation-notes/
+        2026-10-13-state-aware-undo-redo.md.
+        """
+        main_window._image_controller.load_image(gray_image_file)
+        qtbot.wait(100)
+
+        slider = main_window._tools_panel._highlights_slider
+
+        slider.set_value(70.0)
+        qtbot.wait(150)
+        main_window._image_controller.on_slider_released()
+        qtbot.wait(2500)
+        assert main_window._image_controller.can_undo() is True
+
+        slider.set_value(-40.0)
+        qtbot.wait(150)
+        main_window._image_controller.on_slider_released()
+        qtbot.wait(2500)
+        assert slider.get_value() == -40.0
+
+        main_window._image_controller.undo()
+        qtbot.wait(50)
+
+        assert slider.get_value() == 70.0
+        assert main_window._tools_panel.get_adjustments()["highlights"] == 70.0
+
 
 class TestPanelInteraction:
     """Tests for panel interactions."""
