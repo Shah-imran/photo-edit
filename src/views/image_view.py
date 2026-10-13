@@ -195,6 +195,16 @@ class ImageView(QWidget):
         if emit_loaded:
             self.image_loaded.emit()
 
+    def clear(self) -> None:
+        """Reset to the "No image loaded" placeholder state -- the same
+        empty state ``_ImageCanvas`` starts in before ``set_image``/
+        ``set_display_frame`` has ever been called (see
+        ``ImageController.clear_image``, used after the currently-open
+        image's library entry is removed or deleted from disk)."""
+        self._pixmap = None
+        self._display_frame = None
+        self._image_canvas.clear()
+
     def set_display_frame(
         self,
         frame: DisplayFrame,

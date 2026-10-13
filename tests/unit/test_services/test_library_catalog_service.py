@@ -80,6 +80,44 @@ class TestLibraryCatalogService:
         assert Path(sample_image_path).exists()
         assert library_catalog_service.get_current_library_id() == first_id
 
+    def test_remove_entry_removes_from_catalog_but_not_disk(
+        self,
+        library_catalog_service,
+        sample_image_path,
+    ):
+        library_id = library_catalog_service.get_current_library_id()
+        library_catalog_service.add_entries(library_id, [sample_image_path])
+
+        removed = library_catalog_service.remove_entry(library_id, sample_image_path)
+
+        assert removed is True
+        assert library_catalog_service.list_entries(library_id) == []
+        # Purely a catalog operation -- the file itself is untouched.
+        assert Path(sample_image_path).exists()
+
+    def test_remove_entry_round_trips_after_reload(
+        self,
+        library_catalog_path,
+        sample_image_path,
+    ):
+        first = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = first.get_current_library_id()
+        first.add_entries(library_id, [sample_image_path])
+
+        first.remove_entry(library_id, sample_image_path)
+
+        reloaded = LibraryCatalogService(catalog_path=library_catalog_path)
+        assert reloaded.list_entries(library_id) == []
+
+    def test_remove_entry_is_noop_on_unknown_library(self, library_catalog_service):
+        assert library_catalog_service.remove_entry("no-such-library", "/x.jpg") is False
+
+    def test_remove_entry_is_noop_on_unknown_path(
+        self, library_catalog_service
+    ):
+        library_id = library_catalog_service.get_current_library_id()
+        assert library_catalog_service.remove_entry(library_id, "/no/such/path.jpg") is False
+
     def test_missing_file_status_survives_reload(self, library_catalog_path, tmp_path):
         image_path = Path(_make_image(tmp_path / "missing_soon.jpg"))
         first = LibraryCatalogService(catalog_path=library_catalog_path)

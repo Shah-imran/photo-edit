@@ -538,6 +538,20 @@ class MainWindow(QMainWindow):
         self._filmstrip_view.collection_batch_added.connect(
             self._library_controller.add_entries_to_collection
         )
+        # Remove Photo / Delete from Disk (PDF Edit/Photo menu, "Duplicate/
+        # Delete/Remove photo" -- Duplicate is a deliberately deferred
+        # architectural gap, see docs/planning/implementation-notes/
+        # 2026-10-13-remove-delete-photo.md). The confirmation dialog
+        # itself already lives in FilmstripView (mirrors how "Edit Date &
+        # Time..." prompts there too) -- these signals only ever fire
+        # AFTER the user has confirmed, carrying the chosen
+        # delete_from_disk value.
+        self._filmstrip_view.remove_requested.connect(
+            self._on_remove_entry_requested
+        )
+        self._filmstrip_view.remove_batch_requested.connect(
+            self._on_remove_entries_requested
+        )
         self._library_view.create_library_requested.connect(
             self._on_create_library_requested
         )
@@ -788,6 +802,43 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.StandardButton.Yes:
             return
         self._library_controller.remove_library(library_id)
+
+    def _on_remove_entry_requested(self, file_path: str, delete_from_disk: bool) -> None:
+        """Handle a single-image "Remove Photo.../Delete from Disk"
+        request -- already confirmed by ``FilmstripView``'s own 3-way
+        dialog by the time this fires."""
+        self._clear_current_image_if_removed([file_path])
+        self._library_controller.remove_entry(file_path, delete_from_disk)
+
+    def _on_remove_entries_requested(
+        self, file_paths: list, delete_from_disk: bool
+    ) -> None:
+        """Batch counterpart of ``_on_remove_entry_requested``."""
+        self._clear_current_image_if_removed(file_paths)
+        self._library_controller.remove_entries(file_paths, delete_from_disk)
+
+    def _clear_current_image_if_removed(self, removed_paths: list) -> None:
+        """If the image currently open in the editor is one of
+        ``removed_paths``, reset the editor to its own "no image loaded"
+        state BEFORE the library controller removes/deletes it.
+
+        Reuses ``ImageController.clear_image()`` -- the exact state the
+        app is already in right after startup with an empty library,
+        before any image has ever been loaded -- rather than inventing a
+        new empty-state UI. Does not persist the about-to-be-removed
+        image's adjustments first (unlike most other library mutations in
+        this file): that state is being discarded along with the entry
+        itself, so writing it back to the catalog first would be pure
+        waste.
+        """
+        current_path = self._image_controller.image_model.file_path
+        if not current_path or current_path not in removed_paths:
+            return
+        self._image_controller.clear_image()
+        self._tools_panel.set_enabled(False)
+        self._settings_service.set_current_image_path("")
+        self._settings_service.sync()
+        self._status_bar.showMessage("Photo removed", 2000)
 
     # Menu action handlers
     def _open_image(self):

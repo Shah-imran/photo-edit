@@ -594,6 +594,29 @@ class ImageController(QObject):
         if worker in self._load_workers:
             self._load_workers.remove(worker)
 
+    def clear_image(self) -> None:
+        """Reset to the "no image loaded" state.
+
+        Used when the currently-open image's library entry is removed
+        or deleted from disk (see ``MainWindow._on_remove_entry_requested``/
+        ``_on_remove_entries_requested``) -- there is no sensible image
+        left to keep showing once its own catalog entry (and, for
+        "Delete from Disk", the file itself) is gone. Rather than
+        inventing a new empty-state UI, this reuses the exact state the
+        app is already in right after startup with an empty library,
+        before any ``load_image``/``load_image_async`` call has ever
+        been made: ``ImageModel.clear()`` resets ``image_model`` to its
+        pre-load defaults and ``ImageView.clear()`` resets the canvas to
+        its own default "No image loaded" placeholder. Also clears
+        undo/redo history, since there is no image left for it to apply
+        to -- mirrors ``_apply_loaded_image``'s own history-clearing on
+        every image switch. See
+        docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+        """
+        self._image_model.clear()
+        self._image_view.clear()
+        self._history_service.clear_history()
+
     def _apply_loaded_image(self, file_path: str, image) -> None:
         """Apply a decoded image to model/view state on the UI thread."""
         self._image_model.file_path = file_path

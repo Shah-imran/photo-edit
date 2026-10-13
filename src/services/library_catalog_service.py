@@ -424,6 +424,46 @@ class LibraryCatalogService:
             self._save_catalog()
         return list(library.entries)
 
+    def remove_entry(self, library_id: str, path: str) -> bool:
+        """Remove one entry from a library's catalog.
+
+        Purely a catalog-removal primitive -- never touches the
+        filesystem. ``LibraryController.remove_entry``/``remove_entries``
+        are the ones that (optionally) delete the underlying file from
+        disk, AFTER this method has removed the catalog entry; this
+        service stays a pure JSON-catalog abstraction, the same way
+        ``import_images``/``_refresh_entry`` only ever READ a file's
+        ``stat()`` here, never delete anything. See
+        docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+
+        A removed entry's ``collection_ids`` live on the entry itself
+        (not on a separate per-collection membership list), so deleting
+        the entry already drops every collection reference to it --
+        unlike ``delete_collection`` (which deletes the shared
+        ``CollectionRecord`` out from under potentially many entries and
+        so must loop every entry to strip the dangling id), there is no
+        separate cleanup pass needed here.
+
+        No-op (returns ``False``) on an unknown library or path, never
+        raises -- mirrors ``add_entry_to_collection``'s defensive style,
+        the most recent precedent for a method whose one real caller
+        (``LibraryController``) wants a plain boolean rather than a
+        ``KeyError`` to catch.
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return False
+        normalized = _normalize_path(path)
+        remaining = [
+            entry for entry in library.entries if entry.normalized_path != normalized
+        ]
+        if len(remaining) == len(library.entries):
+            return False
+        library.entries = remaining
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return True
+
     def clear_library_entries(self, library_id: str) -> None:
         library = self._require_library(library_id)
         if not library.entries:

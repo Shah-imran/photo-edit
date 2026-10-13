@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
@@ -188,6 +189,85 @@ class LibraryController(QObject):
         self._emit_libraries()
         self._emit_collections()
         self._rebuild_entries_for_current_library()
+
+    def remove_entry(self, file_path: str, delete_from_disk: bool = False) -> bool:
+        """Remove one entry from the current library's catalog, and,
+        when ``delete_from_disk`` is True, also delete the underlying
+        file from disk.
+
+        Mirrors Lightroom's own "Remove Photo" dialog's two destructive
+        choices ("Remove from Library" vs "Delete from Disk" --
+        confirmed by the caller, usually ``MainWindow``, BEFORE this is
+        ever invoked; this method does no confirming of its own). The
+        catalog removal itself (``LibraryCatalogService.remove_entry``)
+        is a pure JSON-catalog operation that never touches the
+        filesystem -- the actual file deletion happens HERE, at the
+        controller layer, right after, so filesystem-touching
+        responsibility stays out of the catalog service entirely. A
+        disk-deletion failure (permission error, locked file, file
+        already gone) is logged and swallowed rather than raised: the
+        catalog entry has already been removed by the time disk
+        deletion is attempted, and the user's primary request (take
+        this photo out of my library) has already been satisfied, so a
+        secondary filesystem problem should not undo that or crash the
+        app -- it is surfaced only via the log, not blocked on.
+
+        Returns ``True`` if the catalog entry was actually removed
+        (whatever happened to the file), ``False`` on an unknown path
+        or no current library (never raises).
+        """
+        if not self._current_library_id or not file_path:
+            return False
+        removed = self._catalog_service.remove_entry(self._current_library_id, file_path)
+        if not removed:
+            return False
+        if delete_from_disk:
+            self._delete_file_from_disk(file_path)
+        self._emit_libraries()
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+        return True
+
+    def remove_entries(self, file_paths: list[str], delete_from_disk: bool = False) -> None:
+        """Batch counterpart of ``remove_entry`` -- removes every given
+        path from the current library (optionally deleting each file
+        from disk too), refreshing views only ONCE at the end instead of
+        once per path, matching ``set_entries_rating``/
+        ``set_entries_favorite``'s established batch pattern."""
+        if not self._current_library_id or not file_paths:
+            return
+        any_removed = False
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            removed = self._catalog_service.remove_entry(
+                self._current_library_id, file_path
+            )
+            if removed and delete_from_disk:
+                self._delete_file_from_disk(file_path)
+            any_removed = any_removed or removed
+        if not any_removed:
+            return
+        self._emit_libraries()
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
+    def _delete_file_from_disk(self, file_path: str) -> None:
+        """Permanently delete one file from disk (plain ``unlink`` --
+        no OS trash/recycle-bin integration; see
+        docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md
+        for why that's a deliberate, simpler v1 choice, not an
+        oversight). ``missing_ok=True`` makes an already-gone file a
+        silent no-op rather than an error. Any other ``OSError``
+        (permission denied, file locked by another process, etc.) is
+        logged and swallowed -- never raised -- since by the time this
+        runs the catalog entry removal this is paired with has already
+        succeeded and should not be undone by a secondary disk failure.
+        """
+        try:
+            Path(file_path).unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to delete file from disk: %s", file_path)
 
     def import_images(self, file_paths: list[str]) -> None:
         if not self._current_library_id or not file_paths:
@@ -649,12 +729,30 @@ class LibraryController(QObject):
         thumbnail,
         cache_key: str,
     ) -> None:
-        self._catalog_service.set_entry_thumbnail_cache_key(
-            library_id,
-            file_path,
-            cache_key,
-        )
-        entry = self._catalog_service.refresh_entry_status(library_id, file_path)
+        # The entry this background-generated thumbnail belongs to may
+        # have been removed from the catalog (Remove Photo/Delete from
+        # Disk, or a whole-library clear/remove) while the thumbnail
+        # batch worker was still mid-flight for it -- cancel_thumbnail_
+        # batch() stops the worker from STARTING further tasks, but
+        # can't unqueue a cross-thread signal for a task that already
+        # finished. Treat "entry no longer exists" as a no-op rather
+        # than letting the KeyError from set_entry_thumbnail_cache_key/
+        # refresh_entry_status propagate into the Qt event loop. See
+        # docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+        try:
+            self._catalog_service.set_entry_thumbnail_cache_key(
+                library_id,
+                file_path,
+                cache_key,
+            )
+            entry = self._catalog_service.refresh_entry_status(library_id, file_path)
+        except KeyError:
+            logger.debug(
+                "Skipping stale thumbnail result for removed entry %s in %s",
+                file_path,
+                library_id,
+            )
+            return
         payload = {
             "path": entry.path,
             "filename": entry.filename,

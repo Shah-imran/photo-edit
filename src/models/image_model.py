@@ -58,6 +58,17 @@ class ImageModel:
             self.current_image = self.original_image
             self._is_modified = False
 
+    def clear(self) -> None:
+        """Reset to the "no image loaded" state -- the same state the
+        model starts in before any ``set_original_image`` call has ever
+        been made (see ``ImageController.clear_image``, which uses this
+        after the currently-open image's library entry is removed or
+        deleted from disk)."""
+        self.file_path = None
+        self.original_image = None
+        self.current_image = None
+        self._is_modified = False
+
     def is_modified(self) -> bool:
         """Whether the current image differs from the original."""
         if not self.has_image():

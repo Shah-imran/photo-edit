@@ -112,6 +112,59 @@ class TestMainWindowUI:
         assert tools_panel._exposure_slider.isEnabled() is False
         assert tools_panel._contrast_slider.isEnabled() is False
 
+    def test_remove_entry_requested_clears_editor_when_removing_open_image(
+        self, main_window, sample_image_file
+    ):
+        """Removing/deleting the currently-open image's library entry
+        (Remove Photo.../Delete from Disk, see docs/planning/
+        implementation-notes/2026-10-13-remove-delete-photo.md) must
+        reset the editor to its own "no image loaded" state -- the exact
+        state ``test_tools_panel_disabled_initially`` above checks for a
+        fresh window that has never loaded anything."""
+        main_window._library_controller.import_images([sample_image_file])
+        main_window._image_controller.load_image(sample_image_file)
+        assert main_window._image_controller.image_model.file_path == sample_image_file
+        assert main_window._tools_panel._exposure_slider.isEnabled() is True
+
+        main_window._on_remove_entry_requested(sample_image_file, False)
+
+        assert main_window._image_controller.image_model.file_path is None
+        assert main_window._tools_panel._exposure_slider.isEnabled() is False
+        assert main_window._settings_service.get_current_image_path() is None
+        # "Remove from Library" (delete_from_disk=False) -- the file
+        # itself must survive.
+        assert Path(sample_image_file).exists()
+
+    def test_remove_entry_requested_leaves_editor_alone_for_other_image(
+        self, main_window, sample_image_file, tmp_path
+    ):
+        """Removing an entry that is NOT the currently-open image must
+        not touch the editor at all."""
+        main_window._image_controller.load_image(sample_image_file)
+        other_path = str(tmp_path / "other.jpg")
+        Image.new("RGB", (10, 10), color="green").save(other_path)
+
+        main_window._on_remove_entry_requested(other_path, False)
+
+        assert main_window._image_controller.image_model.file_path == sample_image_file
+        assert main_window._tools_panel._exposure_slider.isEnabled() is True
+
+    def test_remove_entries_requested_batch_clears_editor_when_included(
+        self, main_window, sample_image_file
+    ):
+        main_window._library_controller.import_images([sample_image_file])
+        main_window._image_controller.load_image(sample_image_file)
+
+        main_window._on_remove_entries_requested(
+            [sample_image_file, "/other/not-open.jpg"], True
+        )
+
+        assert main_window._image_controller.image_model.file_path is None
+        assert main_window._tools_panel._exposure_slider.isEnabled() is False
+        # "Delete from Disk" (delete_from_disk=True) -- the open image's
+        # own file must actually be gone too.
+        assert not Path(sample_image_file).exists()
+
     def test_workspace_tabs_switch_panel_focus(self, main_window):
         main_window._workspace_header._library_tab.click()
         assert main_window.library_dock.isVisible() is True

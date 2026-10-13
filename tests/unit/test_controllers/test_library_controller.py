@@ -378,6 +378,109 @@ class TestLibraryController:
         controller.set_entries_favorite([], True)
         assert received == []
 
+    # -- Remove Photo / Delete from Disk -------------------------------
+    # See docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+
+    def test_remove_entry_removes_from_catalog_leaves_file_by_default(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            result = controller.remove_entry(sample_image_path, delete_from_disk=False)
+
+        assert result is True
+        _, entries = rebuilt.args
+        assert entries == []
+        assert Path(sample_image_path).exists()
+
+    def test_remove_entry_delete_from_disk_deletes_real_file(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        assert Path(sample_image_path).exists()
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000):
+            result = controller.remove_entry(sample_image_path, delete_from_disk=True)
+
+        assert result is True
+        assert not Path(sample_image_path).exists()
+
+    def test_remove_entry_delete_from_disk_survives_oserror(
+        self, controller, sample_image_path, qtbot, monkeypatch
+    ):
+        """A failed disk deletion (permission error, locked file, etc.)
+        must not crash the app and must not block the catalog removal
+        that already succeeded."""
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        def _raise_oserror(self, *args, **kwargs):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(Path, "unlink", _raise_oserror)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            result = controller.remove_entry(sample_image_path, delete_from_disk=True)
+
+        assert result is True
+        _, entries = rebuilt.args
+        assert entries == []
+        # The catalog entry is gone even though the OSError prevented the
+        # file itself from being deleted (monkeypatched to always raise).
+        assert controller.get_entry(controller.current_library_id, sample_image_path) is None
+
+    def test_remove_entry_no_op_on_unknown_path(self, controller, qtbot):
+        controller.initialize()
+        assert controller.remove_entry("/no/such/path.jpg") is False
+
+    def test_remove_entries_batch_removes_all_and_refreshes_once(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        rebuild_count = 0
+
+        def _count(*_args):
+            nonlocal rebuild_count
+            rebuild_count += 1
+
+        controller.entries_rebuilt.connect(_count)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.remove_entries(paths, delete_from_disk=False)
+
+        _, entries = rebuilt.args
+        assert entries == []
+        assert rebuild_count == 1
+        for path in paths:
+            assert Path(path).exists()
+
+    def test_remove_entries_batch_delete_from_disk_deletes_every_file(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000):
+            controller.remove_entries(paths, delete_from_disk=True)
+
+        for path in paths:
+            assert not Path(path).exists()
+
+    def test_remove_entries_no_op_on_empty_paths_or_no_current_library(
+        self, controller, qtbot
+    ):
+        controller.remove_entries(["/nope.jpg"], delete_from_disk=False)
+        controller.initialize()
+        received = []
+        controller.entries_rebuilt.connect(lambda *args: received.append(args))
+        controller.remove_entries([], delete_from_disk=False)
+        assert received == []
+
     def test_entry_payload_and_thumbnail_ready_payload_have_identical_keys(
         self, controller, sample_image_path, qtbot
     ):

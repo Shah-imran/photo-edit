@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from PyQt6.QtCore import QDateTime, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -68,6 +70,13 @@ class FilmstripView(QWidget):
     captured_at_changed = pyqtSignal(str, str)
     collection_membership_toggled = pyqtSignal(str, str, bool)
     new_collection_for_entry_requested = pyqtSignal(str, str)
+    #: Emitted only after the user has confirmed removal through the
+    #: 3-way "Remove Photo" dialog (``_prompt_remove_confirmation``) --
+    #: never emitted on Cancel. ``bool`` is ``True`` for "Delete from
+    #: Disk" (catalog entry AND the file itself), ``False`` for "Remove
+    #: from Library" (catalog entry only, file untouched). See
+    #: docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+    remove_requested = pyqtSignal(str, bool)
     # Batch (multi-select) counterparts of the five signals above -- only
     # ever emitted from the context menu's MULTI-selection branch (see
     # ``_show_batch_context_menu``), never from the single-item branch,
@@ -81,6 +90,9 @@ class FilmstripView(QWidget):
     keywords_batch_added = pyqtSignal(list, list)
     captured_at_batch_changed = pyqtSignal(list, str)
     collection_batch_added = pyqtSignal(list, str)
+    #: Batch counterpart of ``remove_requested`` -- same confirmed-only
+    #: contract, ``bool`` meaning the same "delete from disk too".
+    remove_batch_requested = pyqtSignal(list, bool)
     THUMBNAIL_SIZE = QSize(88, 62)
     CELL_SIZE = QSize(104, 78)
 
@@ -461,6 +473,59 @@ class FilmstripView(QWidget):
             return None, False
         return editor.dateTime().toPyDateTime().isoformat(), True
 
+    def _prompt_remove_confirmation(self, subject: str) -> Optional[bool]:
+        """Show the 3-way "Remove Photo" confirmation (Lightroom's own
+        exact choice set): "Remove from Library" / "Delete from Disk" /
+        "Cancel".
+
+        ``subject`` is a short noun phrase describing what's being
+        removed ("this photo" for the single-item menu, "N photos" for
+        the batch one) spliced into the dialog's main text.
+
+        "Delete from Disk" is the single most destructive, hardest-to-
+        undo action this app has -- every other context-menu action
+        only ever adds/removes METADATA. Its own description is
+        therefore deliberately explicit and distinct from "Remove from
+        Library"'s, rather than leaving the difference to be inferred
+        from the button labels alone. See
+        docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+
+        Returns ``True`` for "Delete from Disk", ``False`` for "Remove
+        from Library", or ``None`` for "Cancel"/closing the dialog
+        (treated identically -- no removal signal is ever emitted for
+        either).
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Remove Photo")
+        box.setText(f"Remove {subject} from this library?")
+        box.setInformativeText(
+            "Remove from Library: removes the photo from this library's "
+            "catalog. The file itself will not be deleted and stays "
+            "exactly where it is on disk.\n\n"
+            "Delete from Disk: removes the photo from this library AND "
+            "permanently deletes the file from your computer. This "
+            "cannot be undone by this app."
+        )
+        remove_button = box.addButton(
+            "Remove from Library", QMessageBox.ButtonRole.AcceptRole
+        )
+        delete_button = box.addButton(
+            "Delete from Disk", QMessageBox.ButtonRole.DestructiveRole
+        )
+        cancel_button = box.addButton(
+            "Cancel", QMessageBox.ButtonRole.RejectRole
+        )
+        box.setDefaultButton(remove_button)
+        box.setEscapeButton(cancel_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is delete_button:
+            return True
+        if clicked is remove_button:
+            return False
+        return None
+
     def _show_context_menu(self, position) -> None:
         item = self._list.itemAt(position)
         if item is None:
@@ -534,6 +599,8 @@ class FilmstripView(QWidget):
         if collection_actions:
             collection_menu.addSeparator()
         new_collection_action = collection_menu.addAction("New Collection...")
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove Photo...")
         selected = menu.exec(self._list.viewport().mapToGlobal(position))
         if selected is None or not path:
             return
@@ -575,6 +642,11 @@ class FilmstripView(QWidget):
             if not clean_name:
                 return
             self.new_collection_for_entry_requested.emit(str(path), clean_name)
+        elif selected is remove_action:
+            choice = self._prompt_remove_confirmation("this photo")
+            if choice is None:
+                return
+            self.remove_requested.emit(str(path), choice)
 
     def _show_batch_context_menu(self, position, items: list[QListWidgetItem]) -> None:
         """The multi-selection counterpart of ``_show_context_menu``.
@@ -631,6 +703,8 @@ class FilmstripView(QWidget):
                 continue
             action = collection_menu.addAction(str(collection.get("name", "Collection")))
             collection_actions[action] = collection_id
+        menu.addSeparator()
+        remove_action = menu.addAction(f"Remove {count} Photos...")
         selected = menu.exec(self._list.viewport().mapToGlobal(position))
         if selected is None:
             return
@@ -663,6 +737,11 @@ class FilmstripView(QWidget):
             self.captured_at_batch_changed.emit(paths, new_captured_at)
         elif selected in collection_actions:
             self.collection_batch_added.emit(paths, collection_actions[selected])
+        elif selected is remove_action:
+            choice = self._prompt_remove_confirmation(f"{count} photos")
+            if choice is None:
+                return
+            self.remove_batch_requested.emit(paths, choice)
 
     def _placeholder_pixmap(self, missing: bool) -> QPixmap:
         pixmap = QPixmap(self.THUMBNAIL_SIZE)
