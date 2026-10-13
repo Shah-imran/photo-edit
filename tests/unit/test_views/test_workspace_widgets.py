@@ -95,6 +95,97 @@ def test_filmstrip_filters_favorites_and_sorts_by_name(qapp, qtbot):
     assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("zebra.jpg")
 
 
+def test_filmstrip_search_filters_by_filename_substring(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/sunset.jpg"), _entry("C:/photos/alpha.jpg")])
+
+    strip.set_search_text("sun")
+    assert strip.count() == 1
+    assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("sunset.jpg")
+
+
+def test_filmstrip_search_cleared_restores_all_entries(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/sunset.jpg"), _entry("C:/photos/alpha.jpg")])
+
+    strip.set_search_text("sun")
+    assert strip.count() == 1
+    strip.set_search_text("")
+    assert strip.count() == 2
+
+
+def test_filmstrip_search_composes_with_favorites_filter(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    favorite_match = _entry("C:/photos/sunset.jpg")
+    favorite_match["favorite"] = True
+    favorite_no_match = _entry("C:/photos/mountain.jpg")
+    favorite_no_match["favorite"] = True
+    plain_match = _entry("C:/photos/sunrise.jpg")
+    strip.set_entries([favorite_match, favorite_no_match, plain_match])
+
+    strip.set_filter("favorites")
+    strip.set_search_text("sun")
+
+    assert strip.count() == 1
+    assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("sunset.jpg")
+
+
+def test_filmstrip_search_composes_with_name_sort(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries(
+        [
+            _entry("C:/photos/sun_zebra.jpg"),
+            _entry("C:/photos/sun_alpha.jpg"),
+            _entry("C:/photos/other.jpg"),
+        ]
+    )
+
+    strip.set_sort("name")
+    strip.set_search_text("sun")
+
+    assert strip.count() == 2
+    assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("sun_alpha.jpg")
+    assert strip._list.item(1).data(Qt.ItemDataRole.UserRole).endswith("sun_zebra.jpg")
+
+
+def test_filmstrip_search_with_no_matches_is_empty_not_crash(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/alpha.jpg"), _entry("C:/photos/beta.jpg")])
+
+    strip.set_search_text("nonexistent")
+    assert strip.count() == 0
+    assert strip._count_label.text() == "0 photos"
+
+
+def test_filmstrip_search_is_case_insensitive(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/sunset.jpg"), _entry("C:/photos/alpha.jpg")])
+
+    strip.set_search_text("SUNSET")
+    assert strip.count() == 1
+    assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("sunset.jpg")
+
+    strip.set_search_text("sunset")
+    assert strip.count() == 1
+    assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("sunset.jpg")
+
+
+def test_filmstrip_search_whitespace_is_stripped(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/sunset.jpg"), _entry("C:/photos/alpha.jpg")])
+
+    strip.set_search_text("  sunset  ")
+    assert strip.count() == 1
+    assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("sunset.jpg")
+
+
 def test_filmstrip_favorite_only_tooltip_and_text_are_unchanged(qapp, qtbot):
     """Regression guard: adding ratings must not alter the existing
     favorite-only item text/tooltip behavior in any way."""

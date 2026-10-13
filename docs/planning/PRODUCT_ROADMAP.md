@@ -89,7 +89,7 @@ Ground truth is implemented code, not the Part 2 checklists below.
 | 4 | Partial | Ratings (0-5 stars, see docs/planning/implementation-notes/2026-10-13-ratings.md) and pick/reject flags (see docs/planning/implementation-notes/2026-10-13-pick-reject-flags.md) now exist. Still a Gap: keywords, album actions, date/time, Photo Merge, Enhance, Versions, Copy/Paste **edit settings** (only partial overlap with undo stack). |
 | 5-6 | Gap / unknown | View/Help menus minimal today (PDF Sections 5-6). |
 | 7 | Partial | [`export_dialog.py`](../../src/views/export_dialog.py) exists; sidebar richness vs PDF Sec.7 unknown. |
-| 8 | Gap | No dedicated search panel (PDF Sec.8). |
+| 8 | Partial | Filmstrip-level filename search box now exists (see docs/planning/implementation-notes/2026-10-13-filmstrip-search.md). Still a Gap: a dedicated top-level search panel with a results/suggestions panel on the right (PDF Sec.8). |
 | 9 | Partial | Right adjustments dock + central viewer exist; bottom **filmstrip** and full **tool icon rail** not matching PDF Sec.9. |
 | 10 | Partial | Built-in profile selector ([`builtin_profiles.py`](../../src/models/builtin_profiles.py)) + single-file JSON preset export/import (File menu); no browsable on-disk preset library, no LUT-based presets. |
 | 11 | Partial | Exposure, Contrast exist; **Brightness** (non-LR) instead of full LR Basic; missing Highlights, Shadows, Whites, Blacks. |
@@ -135,7 +135,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 
 - Sort/filter; optional simple **collections** or folders (subset of Albums/Album folders).
 - **Ratings** and **pick/reject** (or flags); **keywords** on disk or sidecar (design choice: XMP vs JSON) -- **Partial**: Ratings (0-5 stars, mirroring the existing Favorite flag) are **Done** (see docs/planning/implementation-notes/2026-10-13-ratings.md), and pick/reject flags (a tri-state "none"/"pick"/"reject" marker, mirroring the same pattern) are now also **Done** (see docs/planning/implementation-notes/2026-10-13-pick-reject-flags.md); keywords remain **Gap**.
-- **Search** box filtering library.
+- **Search** box filtering library -- **Done** (see docs/planning/implementation-notes/2026-10-13-filmstrip-search.md).
 - **Filmstrip** or bottom strip + **next/previous photo** (keyboard + UI).
 - Keeps scope smaller than full Lightroom Cloud sharing/stacks.
 

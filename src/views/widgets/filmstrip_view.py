@@ -9,6 +9,7 @@ from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -59,6 +60,7 @@ class FilmstripView(QWidget):
         self._entries: list[dict] = []
         self._filter_mode = "all"
         self._sort_mode = "added"
+        self._search_text = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 5, 8, 6)
@@ -76,6 +78,18 @@ class FilmstripView(QWidget):
         header.addWidget(self._source_label)
         header.addWidget(self._count_label)
         header.addStretch(1)
+        self._search_edit = QLineEdit()
+        self._search_edit.setObjectName("filmstripSearchEdit")
+        self._search_edit.setPlaceholderText("Search photos...")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setFixedWidth(160)
+        self._search_edit.setStyleSheet(
+            "QLineEdit#filmstripSearchEdit {"
+            " background: #2a2a2a; color: #e7e9ec; border: 1px solid #3a3a3a;"
+            " border-radius: 4px; padding: 2px 6px; }"
+        )
+        self._search_edit.textChanged.connect(self.set_search_text)
+        header.addWidget(self._search_edit)
         self._filter_button = QToolButton()
         self._filter_button.setText("Filter")
         self._filter_button.setIcon(line_icon("filter", "#c1cad4", 16))
@@ -163,6 +177,24 @@ class FilmstripView(QWidget):
         )
         self._render_entries()
 
+    def set_search_text(self, text: str) -> None:
+        """Filter the strip by a case-insensitive filename substring.
+
+        Normalizes via ``strip().lower()`` so leading/trailing whitespace
+        typed mid-edit doesn't change matching (" sunset" behaves the same
+        as "sunset"). Skips re-rendering when the normalized value is
+        unchanged from the current ``_search_text``, mirroring the
+        no-op-if-unchanged style used by the recent Favorite/Rating/Flag
+        setters -- this guards against redundant renders when, e.g., a
+        caller sets the same text twice, even though ``QLineEdit.textChanged``
+        itself already only fires on an actual change to the widget's text.
+        """
+        normalized = text.strip().lower()
+        if normalized == self._search_text:
+            return
+        self._search_text = normalized
+        self._render_entries()
+
     def _render_entries(self) -> None:
         current_path = self.current_path()
         entries = list(self._entries)
@@ -170,6 +202,12 @@ class FilmstripView(QWidget):
             entries = [entry for entry in entries if entry.get("favorite", False)]
         elif self._filter_mode == "recent":
             entries.sort(key=lambda entry: str(entry.get("added_at", "")), reverse=True)
+        if self._search_text:
+            entries = [
+                entry
+                for entry in entries
+                if self._search_text in str(entry.get("filename") or entry.get("path", "")).lower()
+            ]
         if self._sort_mode == "name":
             entries.sort(key=lambda entry: str(entry.get("filename") or entry.get("path", "")).casefold())
         self._suppress_selection = True
