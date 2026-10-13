@@ -42,6 +42,7 @@ from src.views.export_dialog import ExportDialog, confirm_overwrite_if_needed
 from src.views.preferences_dialog import PreferencesDialog
 from src.views.library_view import LibraryView
 from src.views.theme import apply_theme
+from src.views.widgets.crop_toolbar import CropToolbar
 from src.views.widgets.filmstrip_view import FilmstripView
 from src.views.widgets.image_toolbar import ImageToolBar
 from src.views.widgets.workspace_header import WorkspaceHeader
@@ -125,6 +126,9 @@ class MainWindow(QMainWindow):
         self._tools_panel = ToolsPanel()
         self._library_view = LibraryView(show_thumbnail_grid=False)
         self._image_toolbar = ImageToolBar()
+        self._crop_toolbar = CropToolbar()
+        self._crop_toolbar.hide()
+        self._pre_crop_mode_adjustment_state: Optional[dict] = None
         self._filmstrip_view = FilmstripView()
         self._workspace_header = WorkspaceHeader()
         self._library_controller = LibraryController(
@@ -207,6 +211,7 @@ class MainWindow(QMainWindow):
         # Editing workspace: canvas, local controls, then the active-library strip.
         layout.addWidget(self._image_view, 1)
         layout.addWidget(self._image_toolbar)
+        layout.addWidget(self._crop_toolbar)
         layout.addWidget(self._filmstrip_view)
         
         # Left panel - Library
@@ -440,6 +445,10 @@ class MainWindow(QMainWindow):
         self._tools_panel.color_grading_changed.connect(self._on_color_grading_changed)
         self._tools_panel.slider_released.connect(self._on_slider_released)
         self._tools_panel.profile_apply_requested.connect(self._apply_profile)
+        self._tools_panel.crop_tool_requested.connect(self._enter_crop_mode)
+        self._crop_toolbar.apply_requested.connect(self._apply_crop)
+        self._crop_toolbar.cancel_requested.connect(self._cancel_crop)
+        self._crop_toolbar.aspect_ratio_changed.connect(self._on_crop_aspect_ratio_changed)
         self._library_view.image_selected.connect(self._on_library_image_selected)
         self._filmstrip_view.image_selected.connect(self._on_library_image_selected)
         self._library_view.import_requested.connect(self._import_images)
@@ -868,9 +877,81 @@ class MainWindow(QMainWindow):
         Mirrors ``_reset_adjustments``/``_paste_edit_settings``/
         ``_apply_profile``'s exact "replace the current image's entire
         adjustment state" UI-sync pattern.
+
+        Also refreshes the status-bar dimensions label from the now-current
+        image's actual shape. This fixes the gap flagged in slice 1 (see
+        docs/planning/implementation-notes/2026-10-13-crop-processor.md
+        section 2/6): the label was previously set once, at image load, and
+        never refreshed on a later shape-changing edit -- which, before
+        this slice, only Crop could cause, and Crop was unreachable from
+        the UI. ``apply_history_state`` (the only emitter of
+        ``adjustment_state_restored``) already assigns the new image to
+        ``current_image`` before emitting, so reading it here is current.
         """
         self._tools_panel.set_adjustments(state, emit_signal=False)
         self._adjustment_persist_timer.start()
+        current_image = self._image_controller.image_model.get_current_image()
+        if current_image is not None:
+            height, width = current_image.shape[0], current_image.shape[1]
+            self._dimensions_label.setText(f"{width} × {height}")
+            self._megapixels_label.setText(f"{(width * height) / 1_000_000:.1f} MP")
+
+    def _enter_crop_mode(self) -> None:
+        """Show the interactive crop overlay over the full, uncropped image.
+
+        Uses ``get_export_image(apply_crop=False)`` so a previously
+        committed crop does not hide the rest of the frame while the user
+        is re-adjusting it. This is a v1 simplification worth noting: it
+        fetches a full-resolution image on every crop-mode entry, which
+        could be slow for a very large source image -- see
+        docs/planning/implementation-notes/2026-10-13-crop-tool-ui.md.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to crop", 2000)
+            return
+        state = self._image_controller.get_adjustment_state()
+        self._pre_crop_mode_adjustment_state = state
+        crop = state.get("crop") or {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+        uncropped = self._image_controller.get_export_image(apply_crop=False)
+        if uncropped is None:
+            return
+        self._image_view.set_image(uncropped, emit_loaded=False, preserve_view_scale=True)
+        self._image_view.enter_crop_mode(crop)
+        overlay = self._image_view.get_crop_overlay()
+        height, width = uncropped.shape[0], uncropped.shape[1]
+        self._crop_toolbar.set_original_ratio(width / height if height else None)
+        self._crop_toolbar.reset_to_free()
+        if overlay is not None:
+            overlay.set_locked_aspect(None)
+        self._crop_toolbar.show()
+        self._image_toolbar.hide()
+
+    def _apply_crop(self) -> None:
+        """Commit the overlay's current rectangle via on_crop_changed."""
+        overlay = self._image_view.get_crop_overlay()
+        if overlay is not None:
+            rect = overlay.get_rect()
+            self._image_controller.on_crop_changed(rect)
+        self._image_view.exit_crop_mode()
+        self._crop_toolbar.hide()
+        self._image_toolbar.show()
+        self._pre_crop_mode_adjustment_state = None
+        self._status_bar.showMessage("Crop applied", 2000)
+
+    def _cancel_crop(self) -> None:
+        """Exit crop mode without changing the committed crop state."""
+        self._image_view.exit_crop_mode()
+        self._crop_toolbar.hide()
+        self._image_toolbar.show()
+        self._pre_crop_mode_adjustment_state = None
+        image = self._image_controller.get_export_image()
+        if image is not None:
+            self._image_view.set_image(image, emit_loaded=False, preserve_view_scale=True)
+
+    def _on_crop_aspect_ratio_changed(self, ratio) -> None:
+        overlay = self._image_view.get_crop_overlay()
+        if overlay is not None:
+            overlay.set_locked_aspect(ratio)
 
     def _reset_adjustments(self):
         """Handle reset adjustments action."""

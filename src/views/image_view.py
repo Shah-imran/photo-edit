@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 
 from src.utils.color_pipeline import LinearImage, to_linear
 from src.processing.display_frame import DisplayFrame, linear_to_display_rgb
+from src.views.widgets.crop_overlay import CropOverlay
 
 
 logger = logging.getLogger(__name__)
@@ -149,7 +150,8 @@ class ImageView(QWidget):
         self._is_panning: bool = False
         self._pan_button: Optional[Qt.MouseButton] = None
         self._loading_overlay: Optional[_LoadingOverlay] = None
-        
+        self._crop_overlay: Optional[CropOverlay] = None
+
         self._setup_ui()
 
     def _setup_ui(self):
@@ -397,6 +399,43 @@ class ImageView(QWidget):
         if not self.has_image():
             return
         self._image_canvas.set_pixmap(self._pixmap, self._zoom_factor)
+        if self._crop_overlay is not None and self._crop_overlay.isVisible():
+            self._crop_overlay.resize(self._image_canvas.size())
+
+    # -- Crop mode --------------------------------------------------------
+
+    def enter_crop_mode(self, initial_rect: dict) -> None:
+        """Show the interactive crop overlay over the canvas.
+
+        The caller (``MainWindow``) is responsible for having already
+        displayed the full, uncropped image (via
+        ``ImageController.get_export_image(apply_crop=False)``) before
+        calling this -- ``ImageView`` itself has no opinion about
+        adjustment state.
+        """
+        if self._crop_overlay is None:
+            self._crop_overlay = CropOverlay(self._image_canvas)
+        self._crop_overlay.resize(self._image_canvas.size())
+        self._crop_overlay.move(0, 0)
+        self._crop_overlay.set_rect(
+            initial_rect.get("x0", 0.0),
+            initial_rect.get("y0", 0.0),
+            initial_rect.get("x1", 1.0),
+            initial_rect.get("y1", 1.0),
+        )
+        self._crop_overlay.show()
+        self._crop_overlay.raise_()
+
+    def exit_crop_mode(self) -> None:
+        """Hide the crop overlay (kept alive, not destroyed, for reuse)."""
+        if self._crop_overlay is not None:
+            self._crop_overlay.hide()
+
+    def is_in_crop_mode(self) -> bool:
+        return self._crop_overlay is not None and self._crop_overlay.isVisible()
+
+    def get_crop_overlay(self) -> Optional[CropOverlay]:
+        return self._crop_overlay
 
     def _preserve_scale_after_pixmap_swap(
         self,

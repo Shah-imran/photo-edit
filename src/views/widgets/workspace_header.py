@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
@@ -99,7 +101,18 @@ class WorkspaceHeader(QFrame):
 
 
 class EditingToolStrip(QFrame):
-    """Visible home for future local-editing tools."""
+    """Visible home for local-editing tools.
+
+    Signals:
+        crop_tool_requested: Emitted when the Crop button is clicked, the
+            UI entry point into the interactive crop overlay (see
+            ``ImageView.enter_crop_mode``/``MainWindow._enter_crop_mode``).
+
+    Heal/Mask/Transform remain disabled placeholders, exactly as before --
+    only Crop is wired up in this slice.
+    """
+
+    crop_tool_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -117,6 +130,7 @@ class EditingToolStrip(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
+        self._crop_button: Optional[QToolButton] = None
         for label, icon_name in (
             ("Crop", "crop"),
             ("Heal", "heal"),
@@ -127,7 +141,13 @@ class EditingToolStrip(QFrame):
             button.setText(label)
             button.setIcon(line_icon(icon_name, "#b8c2cc", 20))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            button.setEnabled(False)
-            button.setToolTip(f"{label} is planned but not implemented yet")
             button.setAccessibleName(label)
+            if label == "Crop":
+                button.setEnabled(True)
+                button.setToolTip("Crop the image")
+                button.clicked.connect(self.crop_tool_requested)
+                self._crop_button = button
+            else:
+                button.setEnabled(False)
+                button.setToolTip(f"{label} is planned but not implemented yet")
             layout.addWidget(button, 1)

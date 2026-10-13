@@ -574,7 +574,7 @@ class ImageController(QObject):
         """
         return self._image_model.get_current_image()
 
-    def get_export_image(self):
+    def get_export_image(self, apply_crop: bool = True):
         """Get the full-resolution image for export.
 
         Recomputes directly from the original image and the currently
@@ -586,6 +586,15 @@ class ImageController(QObject):
         triggered before it settles back to a full-resolution render.
         This always reprocesses the true original at full size, so it is
         correct regardless of that timing.
+
+        Args:
+            apply_crop: When False, skips the final ``CropProcessor`` call,
+                returning the full, uncropped-but-otherwise-fully-adjusted
+                image. Used by the interactive crop overlay (slice 2 of the
+                Crop tool), which needs to display the full frame under the
+                drag handles even when a crop was previously committed, so
+                the user can see and adjust the whole image while editing.
+                Defaults to True, matching every existing call site.
 
         Returns:
             Full-resolution ``LinearImage`` with current adjustments
@@ -653,7 +662,7 @@ class ImageController(QObject):
         # (including Straighten) -- see CropProcessor's module
         # docstring and docs/planning/implementation-notes/
         # 2026-10-13-crop-processor.md section 1 for why.
-        if self._crop_params:
+        if apply_crop and self._crop_params:
             result = self._crop_processor.process(result, **self._crop_params)
         return result
 

@@ -68,6 +68,7 @@ class ToolsPanel(QWidget):
     color_grading_changed = pyqtSignal(dict)
     slider_released = pyqtSignal()
     profile_apply_requested = pyqtSignal(str)
+    crop_tool_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         """Initialize the tools panel.
@@ -131,7 +132,8 @@ class ToolsPanel(QWidget):
         histogram_layout.addWidget(self._histogram_readout)
         histogram_section.set_content_widget(histogram_content)
         main_layout.addWidget(histogram_section)
-        main_layout.addWidget(EditingToolStrip())
+        self._editing_tool_strip = EditingToolStrip()
+        main_layout.addWidget(self._editing_tool_strip)
         
         # Scroll area for controls
         scroll_area = QScrollArea()
@@ -633,6 +635,7 @@ class ToolsPanel(QWidget):
         self._color_grading_panel.slider_released.connect(self.slider_released)
 
         self._reset_button.clicked.connect(self.reset_all)
+        self._editing_tool_strip.crop_tool_requested.connect(self.crop_tool_requested)
     
     def _on_slider_released(self, value: float):
         """Handle any slider being released."""
