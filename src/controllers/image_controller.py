@@ -51,6 +51,11 @@ from src.utils.debouncer import ThrottledDebouncer
 from src.utils.image_extensions import open_image_file_dialog_filter
 logger = logging.getLogger(__name__)
 
+# Private "no override passed" sentinel for get_export_image's mask_override
+# parameter -- distinct from both None and {} ("no mask"), which are both
+# legitimate override VALUES a caller may want to pass explicitly.
+_UNSET = object()
+
 
 def _elapsed_ms(start: float) -> float:
     return (perf_counter() - start) * 1000.0
@@ -615,7 +620,7 @@ class ImageController(QObject):
         """
         return self._image_model.get_current_image()
 
-    def get_export_image(self, apply_crop: bool = True):
+    def get_export_image(self, apply_crop: bool = True, mask_override: Any = _UNSET):
         """Get the full-resolution image for export.
 
         Recomputes directly from the original image and the currently
@@ -636,6 +641,16 @@ class ImageController(QObject):
                 drag handles even when a crop was previously committed, so
                 the user can see and adjust the whole image while editing.
                 Defaults to True, matching every existing call site.
+            mask_override: When passed (including explicitly ``{}``/``None``
+                for "no mask"), used IN PLACE OF ``self._mask_params`` for
+                this one recompute only -- ``self._mask_params`` itself is
+                left completely untouched. This is what lets
+                :meth:`preview_mask` show an in-progress, uncommitted mask
+                candidate (geometry mid-drag, a slider mid-tick) without
+                mutating any committed engine state or touching history.
+                Left at the private ``_UNSET`` sentinel by every other call
+                site, which keeps today's "use whatever mask is actually
+                committed" behavior.
 
         Returns:
             Full-resolution ``LinearImage`` with current adjustments
@@ -704,8 +719,9 @@ class ImageController(QObject):
         # only, never changes shape, so its geometry is always expressed
         # in the full, pre-crop frame's own normalized coordinates. See
         # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
-        if self._mask_params:
-            result = self._mask_processor.process(result, mask=self._mask_params)
+        mask_params = self._mask_params if mask_override is _UNSET else mask_override
+        if mask_params:
+            result = self._mask_processor.process(result, mask=mask_params)
         # Crop is applied strictly LAST, after every other processor
         # (including Straighten and Mask) -- see CropProcessor's module
         # docstring and docs/planning/implementation-notes/
@@ -1798,6 +1814,48 @@ class ImageController(QObject):
         normalized = self._normalize_mask_state(mask)
 
         self.apply_adjustments(mask_params=normalized, add_to_history=True)
+
+    def preview_mask(self, mask: Optional[Dict[str, Any]]) -> None:
+        """Display an in-progress, UNCOMMITTED mask candidate, live.
+
+        This is the mask-tool-UI slice's live-preview mechanism, used
+        while a mask's geometry is being dragged or its 4 local-adjustment
+        sliders are being moved, BEFORE the user clicks Apply. See
+        docs/planning/implementation-notes/2026-10-13-mask-tool-ui.md
+        section 3.5 for the full design rationale (reusing
+        ``get_export_image``'s own ``mask_override`` parameter rather than
+        ``on_mask_changed``/``apply_adjustments``) -- in short:
+
+        - It recomputes a FULL preview image, correctly, via
+          ``get_export_image(mask_override=normalized)``, the same
+          always-synchronous-and-correct recompute path export already
+          uses (unaffected by ``self._use_threading`` or the documented
+          gap where the non-threaded ``apply_adjustments`` live-preview
+          fallback branch skips the mask processor entirely).
+        - It does NOT touch ``self._mask_params`` (the committed mask),
+          ``self._image_model.current_image``, or the history stack in
+          any way -- a call here can never be mistaken for, or leave a
+          stray trace in, a real edit. Calling this any number of times
+          (every drag frame, every slider tick) is always safe.
+        - It displays the result via ``ImageView.set_image`` directly
+          (mirroring ``_enter_crop_mode``'s own use of that call for a
+          non-"current adjustment state" preview image).
+
+        Args:
+            mask: ``None``, or a (possibly still-rough/mid-drag) mask dict
+                shaped per the module-level state contract. Defensively
+                normalized/clamped exactly like ``on_mask_changed`` does,
+                so a mid-drag geometry value briefly outside ``[0, 1]``
+                can never reach the processor un-clamped.
+        """
+        if not self.has_image():
+            return
+        normalized = self._normalize_mask_state(mask)
+        preview = self.get_export_image(mask_override=normalized)
+        if preview is not None:
+            self._image_view.set_image(
+                preview, emit_loaded=False, preserve_view_scale=True
+            )
 
     def _on_throttled_adjustment(self, params: dict) -> None:
         """Handle throttled live preview updates during slider drags."""

@@ -43,6 +43,7 @@ from src.views.preferences_dialog import PreferencesDialog
 from src.views.library_view import LibraryView
 from src.views.theme import apply_theme
 from src.views.widgets.crop_toolbar import CropToolbar
+from src.views.widgets.mask_toolbar import MaskToolbar
 from src.views.widgets.filmstrip_view import FilmstripView
 from src.views.widgets.image_toolbar import ImageToolBar
 from src.views.widgets.workspace_header import WorkspaceHeader
@@ -129,6 +130,9 @@ class MainWindow(QMainWindow):
         self._crop_toolbar = CropToolbar()
         self._crop_toolbar.hide()
         self._pre_crop_mode_adjustment_state: Optional[dict] = None
+        self._mask_toolbar = MaskToolbar()
+        self._mask_toolbar.hide()
+        self._mask_overlay_signal_connected = False
         self._filmstrip_view = FilmstripView()
         self._workspace_header = WorkspaceHeader()
         self._library_controller = LibraryController(
@@ -212,6 +216,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._image_view, 1)
         layout.addWidget(self._image_toolbar)
         layout.addWidget(self._crop_toolbar)
+        layout.addWidget(self._mask_toolbar)
         layout.addWidget(self._filmstrip_view)
         
         # Left panel - Library
@@ -449,6 +454,13 @@ class MainWindow(QMainWindow):
         self._crop_toolbar.apply_requested.connect(self._apply_crop)
         self._crop_toolbar.cancel_requested.connect(self._cancel_crop)
         self._crop_toolbar.aspect_ratio_changed.connect(self._on_crop_aspect_ratio_changed)
+        self._tools_panel.mask_tool_requested.connect(self._enter_mask_mode)
+        self._mask_toolbar.apply_requested.connect(self._apply_mask)
+        self._mask_toolbar.cancel_requested.connect(self._cancel_mask)
+        self._mask_toolbar.remove_requested.connect(self._remove_mask)
+        self._mask_toolbar.mask_type_changed.connect(self._on_mask_type_changed)
+        self._mask_toolbar.invert_changed.connect(self._on_mask_invert_changed)
+        self._mask_toolbar.adjustments_changed.connect(self._on_mask_adjustments_changed)
         self._library_view.image_selected.connect(self._on_library_image_selected)
         self._filmstrip_view.image_selected.connect(self._on_library_image_selected)
         self._library_view.import_requested.connect(self._import_images)
@@ -909,6 +921,13 @@ class MainWindow(QMainWindow):
         if not self._image_controller.has_image():
             self._status_bar.showMessage("No image to crop", 2000)
             return
+        # The two interactive modes can never be simultaneously active --
+        # entering Crop while Mask mode happens to be active cancels Mask
+        # first (without committing it), mirroring _enter_mask_mode's own
+        # symmetric check below. See docs/planning/implementation-notes/
+        # 2026-10-13-mask-tool-ui.md section 5.
+        if self._image_view.is_in_mask_mode():
+            self._cancel_mask()
         state = self._image_controller.get_adjustment_state()
         self._pre_crop_mode_adjustment_state = state
         crop = state.get("crop") or {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
@@ -952,6 +971,115 @@ class MainWindow(QMainWindow):
         overlay = self._image_view.get_crop_overlay()
         if overlay is not None:
             overlay.set_locked_aspect(ratio)
+
+    # -- Mask mode ----------------------------------------------------------
+
+    def _enter_mask_mode(self) -> None:
+        """Show the interactive mask overlay+toolbar over the current image.
+
+        Unlike crop mode, the canvas keeps showing whatever it is already
+        showing (the normal, fully-adjusted image, including any prior
+        committed mask) -- no uncropped-style image swap is needed; see
+        docs/planning/implementation-notes/2026-10-13-mask-tool-ui.md
+        section 3.5.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to mask", 2000)
+            return
+        # Mutual exclusivity with Crop mode -- see _enter_crop_mode's own
+        # symmetric check.
+        if self._image_view.is_in_crop_mode():
+            self._cancel_crop()
+
+        state = self._image_controller.get_adjustment_state()
+        mask = state.get("mask") or {}
+        mask_type = mask.get("type", "linear")
+        invert = bool(mask.get("invert", False))
+        exposure = mask.get("exposure", 0.0)
+        contrast = mask.get("contrast", 0.0)
+        saturation = mask.get("saturation", 0.0)
+        clarity = mask.get("clarity", 0.0)
+
+        self._image_view.enter_mask_mode(mask_type, mask)
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is not None and not self._mask_overlay_signal_connected:
+            overlay.geometry_changed.connect(self._on_mask_editing_changed)
+            self._mask_overlay_signal_connected = True
+
+        self._mask_toolbar.set_values(
+            mask_type, invert, exposure, contrast, saturation, clarity
+        )
+        self._mask_toolbar.show()
+        self._image_toolbar.hide()
+
+    def _apply_mask(self) -> None:
+        """Commit the overlay's geometry + toolbar's adjustments via
+        ``on_mask_changed`` -- the ONE real, committed, undoable edit."""
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is not None:
+            mask = overlay.get_geometry()
+            mask.update(self._mask_toolbar.get_adjustments())
+            self._image_controller.on_mask_changed(mask)
+        self._image_view.exit_mask_mode()
+        self._mask_toolbar.hide()
+        self._image_toolbar.show()
+        self._status_bar.showMessage("Mask applied", 2000)
+
+    def _cancel_mask(self) -> None:
+        """Exit mask mode without committing.
+
+        Nothing was ever mutated on the committed engine state while
+        editing (see ``_on_mask_editing_changed``/
+        ``ImageController.preview_mask``), so cancelling only needs to
+        hide the overlay/toolbar and ask the controller to re-display
+        whatever image is still actually current -- there is no stray
+        preview-mode state to roll back.
+        """
+        self._image_view.exit_mask_mode()
+        self._mask_toolbar.hide()
+        self._image_toolbar.show()
+        self._image_controller.refresh_view()
+
+    def _remove_mask(self) -> None:
+        """Commit clearing the mask (``on_mask_changed(None)``) and exit."""
+        self._image_controller.on_mask_changed(None)
+        self._image_view.exit_mask_mode()
+        self._mask_toolbar.hide()
+        self._image_toolbar.show()
+        self._status_bar.showMessage("Mask removed", 2000)
+
+    def _on_mask_type_changed(self, mask_type: str) -> None:
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is not None:
+            overlay.set_mask_type(mask_type)
+        self._on_mask_editing_changed()
+
+    def _on_mask_invert_changed(self, invert: bool) -> None:
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is not None:
+            overlay.set_invert(invert)
+        self._on_mask_editing_changed()
+
+    def _on_mask_adjustments_changed(self, _adjustments: dict) -> None:
+        self._on_mask_editing_changed()
+
+    def _on_mask_editing_changed(self, *_args) -> None:
+        """Live-preview the CURRENT in-progress mask candidate.
+
+        Assembles geometry (from the overlay) + adjustments (from the
+        toolbar) and hands the result to
+        ``ImageController.preview_mask`` -- a display-only call that never
+        touches history or the committed mask state. See
+        docs/planning/implementation-notes/2026-10-13-mask-tool-ui.md
+        section 3.5 for why this, and not ``on_mask_changed``, is used
+        here.
+        """
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is None:
+            return
+        candidate = overlay.get_geometry()
+        candidate.update(self._mask_toolbar.get_adjustments())
+        self._image_controller.preview_mask(candidate)
 
     def _reset_adjustments(self):
         """Handle reset adjustments action."""

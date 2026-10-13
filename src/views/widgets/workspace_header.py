@@ -107,12 +107,16 @@ class EditingToolStrip(QFrame):
         crop_tool_requested: Emitted when the Crop button is clicked, the
             UI entry point into the interactive crop overlay (see
             ``ImageView.enter_crop_mode``/``MainWindow._enter_crop_mode``).
+        mask_tool_requested: Emitted when the Mask button is clicked, the
+            UI entry point into the interactive mask overlay (see
+            ``ImageView.enter_mask_mode``/``MainWindow._enter_mask_mode``).
 
-    Heal/Mask/Transform remain disabled placeholders, exactly as before --
-    only Crop is wired up in this slice.
+    Heal/Transform remain disabled placeholders -- only Crop and Mask are
+    wired up (Crop in the prior slice, Mask in this one).
     """
 
     crop_tool_requested = pyqtSignal()
+    mask_tool_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -131,6 +135,7 @@ class EditingToolStrip(QFrame):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
         self._crop_button: Optional[QToolButton] = None
+        self._mask_button: Optional[QToolButton] = None
         for label, icon_name in (
             ("Crop", "crop"),
             ("Heal", "heal"),
@@ -147,6 +152,13 @@ class EditingToolStrip(QFrame):
                 button.setToolTip("Crop the image")
                 button.clicked.connect(self.crop_tool_requested)
                 self._crop_button = button
+            elif label == "Mask":
+                button.setEnabled(True)
+                button.setToolTip(
+                    "Add a linear or radial local-adjustment mask"
+                )
+                button.clicked.connect(self.mask_tool_requested)
+                self._mask_button = button
             else:
                 button.setEnabled(False)
                 button.setToolTip(f"{label} is planned but not implemented yet")

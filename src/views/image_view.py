@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 from src.utils.color_pipeline import LinearImage, to_linear
 from src.processing.display_frame import DisplayFrame, linear_to_display_rgb
 from src.views.widgets.crop_overlay import CropOverlay
+from src.views.widgets.mask_overlay import MaskOverlay
 
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,7 @@ class ImageView(QWidget):
         self._pan_button: Optional[Qt.MouseButton] = None
         self._loading_overlay: Optional[_LoadingOverlay] = None
         self._crop_overlay: Optional[CropOverlay] = None
+        self._mask_overlay: Optional[MaskOverlay] = None
 
         self._setup_ui()
 
@@ -401,6 +403,8 @@ class ImageView(QWidget):
         self._image_canvas.set_pixmap(self._pixmap, self._zoom_factor)
         if self._crop_overlay is not None and self._crop_overlay.isVisible():
             self._crop_overlay.resize(self._image_canvas.size())
+        if self._mask_overlay is not None and self._mask_overlay.isVisible():
+            self._mask_overlay.resize(self._image_canvas.size())
 
     # -- Crop mode --------------------------------------------------------
 
@@ -436,6 +440,53 @@ class ImageView(QWidget):
 
     def get_crop_overlay(self) -> Optional[CropOverlay]:
         return self._crop_overlay
+
+    # -- Mask mode --------------------------------------------------------
+
+    def enter_mask_mode(self, initial_type: str, initial_geometry: dict) -> None:
+        """Show the interactive mask overlay over the canvas.
+
+        Mirrors ``enter_crop_mode`` exactly. Unlike crop mode, the caller
+        does NOT need to have swapped in an "unmasked" display image
+        first -- the canvas keeps showing whatever it was already
+        showing (the normal, fully-adjusted image); only the overlay
+        itself is new. See docs/planning/implementation-notes/
+        2026-10-13-mask-tool-ui.md section 3.5 for why.
+        """
+        if self._mask_overlay is None:
+            self._mask_overlay = MaskOverlay(self._image_canvas)
+        self._mask_overlay.resize(self._image_canvas.size())
+        self._mask_overlay.move(0, 0)
+        self._mask_overlay.set_mask_type(initial_type)
+        self._mask_overlay.set_invert(bool(initial_geometry.get("invert", False)))
+        if initial_type == "radial":
+            self._mask_overlay.set_radial_geometry(
+                initial_geometry.get("cx", 0.5),
+                initial_geometry.get("cy", 0.5),
+                initial_geometry.get("rx", 0.25),
+                initial_geometry.get("ry", 0.25),
+                initial_geometry.get("feather", 0.5),
+            )
+        else:
+            self._mask_overlay.set_linear_geometry(
+                initial_geometry.get("x0", 0.3),
+                initial_geometry.get("y0", 0.5),
+                initial_geometry.get("x1", 0.7),
+                initial_geometry.get("y1", 0.5),
+            )
+        self._mask_overlay.show()
+        self._mask_overlay.raise_()
+
+    def exit_mask_mode(self) -> None:
+        """Hide the mask overlay (kept alive, not destroyed, for reuse)."""
+        if self._mask_overlay is not None:
+            self._mask_overlay.hide()
+
+    def is_in_mask_mode(self) -> bool:
+        return self._mask_overlay is not None and self._mask_overlay.isVisible()
+
+    def get_mask_overlay(self) -> Optional[MaskOverlay]:
+        return self._mask_overlay
 
     def _preserve_scale_after_pixmap_swap(
         self,

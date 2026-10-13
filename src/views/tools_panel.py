@@ -69,6 +69,7 @@ class ToolsPanel(QWidget):
     slider_released = pyqtSignal()
     profile_apply_requested = pyqtSignal(str)
     crop_tool_requested = pyqtSignal()
+    mask_tool_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         """Initialize the tools panel.
@@ -636,6 +637,7 @@ class ToolsPanel(QWidget):
 
         self._reset_button.clicked.connect(self.reset_all)
         self._editing_tool_strip.crop_tool_requested.connect(self.crop_tool_requested)
+        self._editing_tool_strip.mask_tool_requested.connect(self.mask_tool_requested)
     
     def _on_slider_released(self, value: float):
         """Handle any slider being released."""
