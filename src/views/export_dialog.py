@@ -19,7 +19,6 @@ from PyQt6.QtWidgets import (
     QMessageBox
 )
 from PyQt6.QtCore import Qt
-from PIL import Image
 
 from src.services.export_service import ExportService
 from src.services.settings_service import SettingsService
@@ -81,15 +80,19 @@ class ExportDialog(QDialog):
 
     def __init__(
         self,
-        image: Image.Image,
+        image,
         default_path: str = "",
         parent=None,
         settings_service: Optional[SettingsService] = None,
     ):
         """Initialize the export dialog.
-        
+
         Args:
-            image: PIL Image to export
+            image: ``LinearImage`` (float32 numpy array, shape ``(H, W, 3)``)
+                to export -- the same type ``ExportService.export_image``
+                and ``ImageController.get_export_image`` already use. This
+                dialog never holds a PIL Image; it only reads pixel
+                dimensions from ``image.shape``.
             default_path: Default file path. When empty and a
                 ``settings_service`` is provided, the last-used export
                 directory is used as the dialog's starting location.
@@ -99,6 +102,11 @@ class ExportDialog(QDialog):
         """
         super().__init__(parent)
         self._image = image
+        # Pixel dimensions read once from the array's shape (H, W, C) --
+        # NOT PIL's .width/.height, which this array does not have. See
+        # docs/planning/implementation-notes/2026-10-13-export-dialog-dimension-crash-fix.md.
+        self._image_width = int(image.shape[1])
+        self._image_height = int(image.shape[0])
         self._default_path = default_path
         self._export_service = ExportService()
         self._settings_service = settings_service
@@ -169,14 +177,14 @@ class ExportDialog(QDialog):
         custom_layout = QHBoxLayout()
         self._width_spin = QSpinBox()
         self._width_spin.setRange(1, 20000)
-        self._width_spin.setValue(self._image.width)
+        self._width_spin.setValue(self._image_width)
         custom_layout.addWidget(self._width_spin)
         
         custom_layout.addWidget(QLabel("x"))
         
         self._height_spin = QSpinBox()
         self._height_spin.setRange(1, 20000)
-        self._height_spin.setValue(self._image.height)
+        self._height_spin.setValue(self._image_height)
         custom_layout.addWidget(self._height_spin)
         
         custom_layout.addWidget(QLabel("px"))
@@ -191,7 +199,7 @@ class ExportDialog(QDialog):
         
         # Image info
         info_label = QLabel(
-            f"Original size: {self._image.width} x {self._image.height} px"
+            f"Original size: {self._image_width} x {self._image_height} px"
         )
         info_label.setStyleSheet("color: #808080;")
         layout.addWidget(info_label)
@@ -300,8 +308,8 @@ class ExportDialog(QDialog):
             self._height_spin.setValue(size[1])
         else:
             # Original size
-            self._width_spin.setValue(self._image.width)
-            self._height_spin.setValue(self._image.height)
+            self._width_spin.setValue(self._image_width)
+            self._height_spin.setValue(self._image_height)
 
     def _do_export(self):
         """Execute the export."""
@@ -319,7 +327,7 @@ class ExportDialog(QDialog):
         width = self._width_spin.value()
         height = self._height_spin.value()
         resize = None
-        if width != self._image.width or height != self._image.height:
+        if width != self._image_width or height != self._image_height:
             resize = (width, height)
         
         preserve_aspect = self._preserve_aspect.isChecked()

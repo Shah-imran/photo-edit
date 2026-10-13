@@ -2,8 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
-from PIL import Image
 from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
@@ -37,7 +37,15 @@ def settings_service(isolated_settings):
 
 @pytest.fixture
 def sample_image():
-    return Image.new('RGB', (10, 10), color='red')
+    """A real LinearImage (float32 ndarray), matching what every real
+    caller (ImageController.get_export_image, MainWindow._export_image/
+    _export_with_previous) actually passes to ExportDialog -- not a PIL
+    Image, which ExportDialog never receives in production. A PIL fixture
+    here previously masked a real crash (self._image.width/.height on a
+    numpy array); see
+    docs/planning/implementation-notes/2026-10-13-export-dialog-dimension-crash-fix.md.
+    """
+    return np.full((10, 10, 3), 0.5, dtype=np.float32)
 
 
 def _make_dialog(qapp, image, path, settings_service=None):
@@ -301,8 +309,8 @@ class TestExportDialogPrePopulatesFromLastExportOptions:
 
         assert dialog._format_combo.currentData()['name'] == "JPEG"
         assert dialog._quality_slider.value() == 95
-        assert dialog._width_spin.value() == sample_image.width
-        assert dialog._height_spin.value() == sample_image.height
+        assert dialog._width_spin.value() == sample_image.shape[1]
+        assert dialog._height_spin.value() == sample_image.shape[0]
         assert dialog._preserve_aspect.isChecked() is True
 
     def test_leaves_defaults_when_settings_service_is_none(self, qapp, sample_image):

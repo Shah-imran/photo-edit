@@ -2,8 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
-from PIL import Image
 from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication
 
@@ -54,7 +54,7 @@ def main_window(qapp, qtbot, tmp_path, settings_service):
 
 @pytest.fixture
 def sample_image():
-    return Image.new('RGB', (10, 10), color='red')
+    return np.full((10, 10, 3), 0.5, dtype=np.float32)
 
 
 def _make_has_image(main_window, sample_image):
