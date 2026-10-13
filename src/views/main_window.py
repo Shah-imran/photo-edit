@@ -30,6 +30,7 @@ from src.views.image_view import ImageView
 from src.views.tools_panel import ToolsPanel
 from src.services.export_service import ExportService
 from src.views.export_dialog import ExportDialog, confirm_overwrite_if_needed
+from src.views.preferences_dialog import PreferencesDialog
 from src.views.library_view import LibraryView
 from src.views.theme import apply_theme
 from src.views.widgets.filmstrip_view import FilmstripView
@@ -233,7 +234,13 @@ class MainWindow(QMainWindow):
                 "&Paste Edit Settings", self._paste_edit_settings, "Ctrl+Alt+V"
             )
         )
-        
+        edit_menu.addSeparator()
+        edit_menu.addAction(
+            self._create_action(
+                "&Preferences...", self._show_preferences, "Ctrl+,"
+            )
+        )
+
         # View menu
         view_menu = menubar.addMenu("&View")
         view_menu.addAction(self._create_action("&Fit to Window", self._fit_to_window, "0"))
@@ -817,6 +824,17 @@ class MainWindow(QMainWindow):
         self._image_controller.restore_adjustment_state(state_for_controller)
         self._adjustment_persist_timer.start()
         self._status_bar.showMessage("Pasted edit settings", 2000)
+
+    def _show_preferences(self) -> None:
+        """Open the Preferences dialog."""
+        dialog = PreferencesDialog(
+            settings_service=self._settings_service, parent=self
+        )
+        if dialog.exec():
+            self._status_bar.showMessage(
+                "Preferences saved (preview size changes apply after restart)",
+                3000,
+            )
 
     def _fit_to_window(self):
         """Handle fit to window action."""

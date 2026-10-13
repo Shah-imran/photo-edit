@@ -77,16 +77,35 @@ class ProcessingWorker(QObject):
     processing_complete = pyqtSignal(int, object)  # request_id, LinearImage
     error_occurred = pyqtSignal(int, str)
     
-    def __init__(self, parent: Optional[QObject] = None):
+    def __init__(
+        self,
+        parent: Optional[QObject] = None,
+        proxy_max_size: Optional[int] = None,
+        interactive_proxy_max_size: Optional[int] = None,
+    ):
         """Initialize the processing worker.
-        
+
         Args:
             parent: Optional parent QObject
+            proxy_max_size: Optional override for the quality-preview
+                proxy's maximum dimension (px). ``None`` (the default)
+                uses ``ProxyManager.DEFAULT_PROXY_SIZE``, preserving
+                today's behavior exactly.
+            interactive_proxy_max_size: Optional override for the
+                interactive/drag-preview proxy's maximum dimension (px).
+                ``None`` (the default) uses
+                ``ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE``.
         """
         super().__init__(parent)
-        
+
         self._queue = ProcessingQueue()
-        self._proxy_manager = ProxyManager()
+        self._proxy_manager = ProxyManager(
+            max_size=proxy_max_size or ProxyManager.DEFAULT_PROXY_SIZE,
+            interactive_max_size=(
+                interactive_proxy_max_size
+                or ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE
+            ),
+        )
         self._result_cache: OrderedDict[Tuple, _CachedPreview] = OrderedDict()
         self._max_cache_entries = 16
         

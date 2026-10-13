@@ -206,6 +206,43 @@ class TestSettingsServiceLastExportOptions:
         assert service.get_last_export_options() is None
 
 
+class TestSettingsServiceProxyMaxSize:
+    """Round-trip and default behavior for the quality-preview proxy size."""
+
+    def test_default_is_none(self, service):
+        assert service.get_proxy_max_size() is None
+
+    def test_set_and_get_int(self, service):
+        service.set_proxy_max_size(2000)
+        result = service.get_proxy_max_size()
+        assert result == 2000
+        assert isinstance(result, int)
+
+    def test_set_overwrites_previous_value(self, service):
+        service.set_proxy_max_size(2000)
+        service.set_proxy_max_size(800)
+        assert service.get_proxy_max_size() == 800
+
+
+class TestSettingsServiceInteractiveProxyMaxSize:
+    """Round-trip and default behavior for the interactive proxy size."""
+
+    def test_default_is_none(self, service):
+        assert service.get_interactive_proxy_max_size() is None
+
+    def test_set_and_get_int(self, service):
+        service.set_interactive_proxy_max_size(500)
+        result = service.get_interactive_proxy_max_size()
+        assert result == 500
+        assert isinstance(result, int)
+
+    def test_proxy_and_interactive_keys_are_independent(self, service):
+        service.set_proxy_max_size(2000)
+        service.set_interactive_proxy_max_size(500)
+        assert service.get_proxy_max_size() == 2000
+        assert service.get_interactive_proxy_max_size() == 500
+
+
 class TestSettingsServiceSync:
     """Sanity check for the explicit flush helper."""
 

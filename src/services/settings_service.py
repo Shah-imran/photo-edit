@@ -33,6 +33,8 @@ _KEY_WINDOW_STATE = "window/state"
 _KEY_CURRENT_IMAGE_PATH = "session/current_image_path"
 _KEY_CONFIRM_EXPORT_OVERWRITE = "export/confirm_overwrite"
 _KEY_LAST_EXPORT_OPTIONS = "export/last_options"
+_KEY_PROXY_MAX_SIZE = "performance/proxy_max_size"
+_KEY_INTERACTIVE_PROXY_MAX_SIZE = "performance/interactive_proxy_max_size"
 
 
 class SettingsService:
@@ -203,6 +205,40 @@ class SettingsService:
         See :meth:`get_last_export_options` for the expected shape.
         """
         self._settings.setValue(_KEY_LAST_EXPORT_OPTIONS, json.dumps(options))
+
+    def get_proxy_max_size(self) -> Optional[int]:
+        """Return the preferred quality-preview proxy max dimension (px).
+
+        Returns ``None`` when the preference has never been explicitly
+        set. There is deliberately no hardcoded fallback here -- the
+        default lives on ``ProxyManager.DEFAULT_PROXY_SIZE`` so there is a
+        single source of truth for it; callers that need an effective
+        value should fall back to that constant themselves.
+        """
+        if not self._settings.contains(_KEY_PROXY_MAX_SIZE):
+            return None
+        return int(self._settings.value(_KEY_PROXY_MAX_SIZE, 0, type=int))
+
+    def set_proxy_max_size(self, size: int) -> None:
+        """Persist the preferred quality-preview proxy max dimension (px)."""
+        self._settings.setValue(_KEY_PROXY_MAX_SIZE, int(size))
+
+    def get_interactive_proxy_max_size(self) -> Optional[int]:
+        """Return the preferred interactive/drag proxy max dimension (px).
+
+        Returns ``None`` when unset. See :meth:`get_proxy_max_size` for
+        why there is no hardcoded default here -- it lives on
+        ``ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE`` instead.
+        """
+        if not self._settings.contains(_KEY_INTERACTIVE_PROXY_MAX_SIZE):
+            return None
+        return int(
+            self._settings.value(_KEY_INTERACTIVE_PROXY_MAX_SIZE, 0, type=int)
+        )
+
+    def set_interactive_proxy_max_size(self, size: int) -> None:
+        """Persist the preferred interactive/drag proxy max dimension (px)."""
+        self._settings.setValue(_KEY_INTERACTIVE_PROXY_MAX_SIZE, int(size))
 
     def sync(self) -> None:
         """Flush pending changes to the underlying store."""

@@ -242,12 +242,36 @@ class ImageController(QObject):
         self._connect_signals()
 
     def _setup_async_processing(self) -> None:
-        """Set up asynchronous processing components."""
+        """Set up asynchronous processing components.
+
+        When a ``SettingsService`` is present and has stored proxy-size
+        preferences (see Preferences > Performance), they are passed to
+        both proxy-generating workers here, at construction time. This is
+        NOT live-reloaded: changing the preference while PhotoEdit is
+        running has no effect on the already-running workers (invalidating
+        in-flight caches/proxy state is out of scope for this slice) --
+        the new size takes effect on the next app launch. See
+        docs/planning/implementation-notes/2026-10-13-preferences-ui.md.
+        """
+        proxy_max_size = None
+        interactive_proxy_max_size = None
+        if self._settings_service is not None:
+            proxy_max_size = self._settings_service.get_proxy_max_size()
+            interactive_proxy_max_size = (
+                self._settings_service.get_interactive_proxy_max_size()
+            )
+
         # Create and start processing worker
-        self._processing_worker = ProcessingWorker()
+        self._processing_worker = ProcessingWorker(
+            proxy_max_size=proxy_max_size,
+            interactive_proxy_max_size=interactive_proxy_max_size,
+        )
         self._processing_worker.preview_ready.connect(self._on_preview_ready)
         self._processing_worker.error_occurred.connect(self._on_processing_error)
-        self._final_processing_worker = ProcessingWorker()
+        self._final_processing_worker = ProcessingWorker(
+            proxy_max_size=proxy_max_size,
+            interactive_proxy_max_size=interactive_proxy_max_size,
+        )
         self._final_processing_worker.processing_complete.connect(
             self._on_processing_complete
         )

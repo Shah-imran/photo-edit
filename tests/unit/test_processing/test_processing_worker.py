@@ -5,10 +5,40 @@ import numpy as np
 from src.processing.display_frame import DisplayFrame
 from src.processing.processing_queue import ProcessingRequest
 from src.processing.processing_worker import ProcessingWorker
+from src.processing.proxy_manager import ProxyManager
 
 
 def _linear_image(width: int = 1200, height: int = 800) -> np.ndarray:
     return np.full((height, width, 3), 0.25, dtype=np.float32)
+
+
+class TestProcessingWorkerProxySizePreferences:
+    """Constructor wiring for the two optional proxy-size overrides."""
+
+    def test_default_construction_uses_proxy_manager_defaults(self):
+        worker = ProcessingWorker()
+        assert worker.proxy_manager.max_size == ProxyManager.DEFAULT_PROXY_SIZE
+        assert (
+            worker.proxy_manager.interactive_max_size
+            == ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE
+        )
+
+    def test_explicit_sizes_are_passed_to_proxy_manager(self):
+        worker = ProcessingWorker(
+            proxy_max_size=2000, interactive_proxy_max_size=900
+        )
+        assert worker.proxy_manager.max_size == 2000
+        assert worker.proxy_manager.interactive_max_size == 900
+
+    def test_none_sizes_fall_back_to_proxy_manager_defaults(self):
+        worker = ProcessingWorker(
+            proxy_max_size=None, interactive_proxy_max_size=None
+        )
+        assert worker.proxy_manager.max_size == ProxyManager.DEFAULT_PROXY_SIZE
+        assert (
+            worker.proxy_manager.interactive_max_size
+            == ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE
+        )
 
 
 class TestProcessingWorkerCache:

@@ -28,6 +28,89 @@ def qapp():
     yield app
 
 
+@pytest.fixture
+def isolated_settings(tmp_path):
+    """Create a QSettings instance backed by a per-test INI file."""
+    ini_path = tmp_path / "photoedit-test.ini"
+    settings = QSettings(str(ini_path), QSettings.Format.IniFormat)
+    yield settings
+    settings.sync()
+
+
+@pytest.fixture
+def settings_service(isolated_settings):
+    """Provide a SettingsService bound to the isolated QSettings."""
+    return SettingsService(isolated_settings)
+
+
+class TestImageControllerProxySizePreferences:
+    """ImageController wires proxy-size preferences into its two workers."""
+
+    def test_stored_preferences_reach_both_processing_workers(
+        self, qapp, settings_service
+    ):
+        settings_service.set_proxy_max_size(2000)
+        settings_service.set_interactive_proxy_max_size(900)
+        view = ImageView()
+        controller = ImageController(
+            view, settings_service=settings_service, use_threading=True
+        )
+        try:
+            assert controller._processing_worker.proxy_manager.max_size == 2000
+            assert (
+                controller._processing_worker.proxy_manager.interactive_max_size
+                == 900
+            )
+            assert (
+                controller._final_processing_worker.proxy_manager.max_size == 2000
+            )
+            assert (
+                controller._final_processing_worker.proxy_manager
+                .interactive_max_size
+                == 900
+            )
+        finally:
+            controller.cleanup()
+
+    def test_no_settings_service_behaves_unchanged(self, qapp):
+        from src.processing.proxy_manager import ProxyManager
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=True)
+        try:
+            assert (
+                controller._processing_worker.proxy_manager.max_size
+                == ProxyManager.DEFAULT_PROXY_SIZE
+            )
+            assert (
+                controller._processing_worker.proxy_manager.interactive_max_size
+                == ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE
+            )
+        finally:
+            controller.cleanup()
+
+    def test_settings_service_without_stored_prefs_behaves_unchanged(
+        self, qapp, settings_service
+    ):
+        from src.processing.proxy_manager import ProxyManager
+
+        view = ImageView()
+        controller = ImageController(
+            view, settings_service=settings_service, use_threading=True
+        )
+        try:
+            assert (
+                controller._processing_worker.proxy_manager.max_size
+                == ProxyManager.DEFAULT_PROXY_SIZE
+            )
+            assert (
+                controller._processing_worker.proxy_manager.interactive_max_size
+                == ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE
+            )
+        finally:
+            controller.cleanup()
+
+
 class TestImageController:
     """Test cases for ImageController class."""
 
