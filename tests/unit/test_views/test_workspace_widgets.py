@@ -105,6 +105,19 @@ def test_filmstrip_search_filters_by_filename_substring(qapp, qtbot):
     assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("sunset.jpg")
 
 
+def test_filmstrip_search_matches_keywords_as_well_as_filename(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    beach_entry = {**_entry("C:/photos/alpha.jpg"), "keywords": ["beach", "vacation"]}
+    other_entry = {**_entry("C:/photos/beta.jpg"), "keywords": ["city"]}
+    strip.set_entries([beach_entry, other_entry])
+
+    strip.set_search_text("beach")
+
+    assert strip.count() == 1
+    assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("alpha.jpg")
+
+
 def test_filmstrip_search_cleared_restores_all_entries(qapp, qtbot):
     strip = FilmstripView()
     qtbot.addWidget(strip)

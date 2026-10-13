@@ -305,10 +305,23 @@ class FilmstripView(QWidget):
                 if collection_id in (entry.get("collection_ids") or [])
             ]
         if self._search_text:
+            # Matches filename/path OR any one keyword -- extends the
+            # original filename-only search (PDF Sec.8's "Search My
+            # Photos") now that per-entry keywords exist (see
+            # docs/planning/implementation-notes/2026-10-13-keywords.md).
+            # A dedicated top-level search panel with its own results/
+            # suggestions UI remains a separate, deliberately deferred
+            # gap -- this only widens what the EXISTING filmstrip search
+            # box matches against, not where search lives in the app.
             entries = [
                 entry
                 for entry in entries
-                if self._search_text in str(entry.get("filename") or entry.get("path", "")).lower()
+                if self._search_text
+                in str(entry.get("filename") or entry.get("path", "")).lower()
+                or any(
+                    self._search_text in str(keyword).lower()
+                    for keyword in (entry.get("keywords") or [])
+                )
             ]
         if self._sort_mode == "name":
             entries.sort(key=lambda entry: str(entry.get("filename") or entry.get("path", "")).casefold())
