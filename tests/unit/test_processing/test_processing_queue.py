@@ -195,6 +195,17 @@ class TestProcessingQueue:
         request = ProcessingQueue().create_request()
         assert request.mask_params == {}
 
+    def test_create_request_threads_healing_params(self):
+        healing = {"heal_spots": [{"mode": "clone", "dst_x": 0.5, "dst_y": 0.5,
+                                    "src_x": 0.1, "src_y": 0.1, "radius": 0.1,
+                                    "feather": 0.2, "opacity": 1.0}]}
+        request = ProcessingQueue().create_request(healing_params=healing)
+        assert request.healing_params == healing
+
+    def test_create_request_defaults_healing_params_to_empty_dict(self):
+        request = ProcessingQueue().create_request()
+        assert request.healing_params == {}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

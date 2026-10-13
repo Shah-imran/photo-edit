@@ -41,6 +41,7 @@ from src.processors.defringe_processor import DefringeProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.processors.crop_processor import CropProcessor
 from src.processors.mask_processor import MaskProcessor
+from src.processors.healing_processor import HealingProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils.color_pipeline import LinearImage
 
@@ -132,6 +133,7 @@ class ProcessingWorker(QObject):
         self._straighten_processor = StraightenProcessor()
         self._crop_processor = CropProcessor()
         self._mask_processor = MaskProcessor()
+        self._healing_processor = HealingProcessor()
 
         # Thread control
         self._running = False
@@ -213,6 +215,7 @@ class ProcessingWorker(QObject):
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
         mask_params: Optional[Dict[str, Any]] = None,
+        healing_params: Optional[Dict[str, Any]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -253,6 +256,7 @@ class ProcessingWorker(QObject):
             straighten_params=straighten_params,
             crop_params=crop_params,
             mask_params=mask_params,
+            healing_params=healing_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -285,6 +289,7 @@ class ProcessingWorker(QObject):
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
         mask_params: Optional[Dict[str, Any]] = None,
+        healing_params: Optional[Dict[str, Any]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -325,6 +330,7 @@ class ProcessingWorker(QObject):
             straighten_params,
             crop_params,
             mask_params,
+            healing_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -351,6 +357,7 @@ class ProcessingWorker(QObject):
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
         mask_params: Optional[Dict[str, Any]] = None,
+        healing_params: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -389,6 +396,7 @@ class ProcessingWorker(QObject):
             straighten_params,
             crop_params,
             mask_params,
+            healing_params,
             use_proxy=False,
         )
 
@@ -508,6 +516,7 @@ class ProcessingWorker(QObject):
                 request.straighten_params,
                 request.crop_params,
                 request.mask_params,
+                request.healing_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -592,6 +601,25 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.straighten_params.items())),
             tuple(sorted(request.crop_params.items())),
             tuple(sorted(request.mask_params.items())),
+            self._hashable_heal_spots(request.healing_params),
+        )
+
+    @staticmethod
+    def _hashable_heal_spots(healing_params: Dict[str, Any]) -> Tuple:
+        """Return a hashable form of ``healing_params``'s ``heal_spots``
+        list, for use inside a cache-key/signature tuple.
+
+        ``heal_spots`` is a list of dicts (unlike every other
+        ``_xxx_params`` field, which is flat and already hashable via
+        ``tuple(sorted(items()))``), so it needs its own conversion: a
+        tuple of per-spot ``tuple(sorted(spot.items()))`` tuples, which
+        is hashable as long as every spot value is itself hashable (true
+        for this schema -- floats and the ``mode`` string only).
+        """
+        return tuple(
+            tuple(sorted(spot.items()))
+            for spot in healing_params.get("heal_spots", [])
+            if isinstance(spot, dict)
         )
 
     @staticmethod
@@ -618,6 +646,7 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.straighten_params.items())),
             tuple(sorted(request.crop_params.items())),
             tuple(sorted(request.mask_params.items())),
+            ProcessingWorker._hashable_heal_spots(request.healing_params),
         )
 
     def _apply_adjustments(
@@ -643,6 +672,7 @@ class ProcessingWorker(QObject):
         straighten_params: Optional[Dict[str, float]] = None,
         crop_params: Optional[Dict[str, float]] = None,
         mask_params: Optional[Dict[str, Any]] = None,
+        healing_params: Optional[Dict[str, Any]] = None,
     ) -> LinearImage:
         """Apply exposure, tonal, white balance, curve, color, HSL mixer,
         and Color Grading adjustments to a ``LinearImage``."""
@@ -650,6 +680,18 @@ class ProcessingWorker(QObject):
         copy_start = perf_counter()
         result = image.copy()
         copy_ms = _elapsed_ms(copy_start)
+
+        # Healing runs FIRST, before every other adjustment (including
+        # Exposure, which used to be first) -- it is a repair operation on
+        # the as-shot pixels, not a creative adjustment, so every later
+        # tonal/color/effects step should see an already-healed image. See
+        # docs/planning/implementation-notes/2026-10-13-healing-processor.md.
+        healing_ms = 0.0
+        if healing_params and healing_params.get("heal_spots"):
+            healing_start = perf_counter()
+            result = self._healing_processor.process(result, **healing_params)
+            healing_ms = _elapsed_ms(healing_start)
+
         exposure_ms = 0.0
         tonal_ms = 0.0
         wb_ms = 0.0
@@ -788,7 +830,8 @@ class ProcessingWorker(QObject):
             crop_ms = _elapsed_ms(crop_start)
 
         logger.info(
-            "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
+            "PERF worker.apply shape=%s copy_ms=%.2f healing_ms=%.2f "
+            "exposure_ms=%.2f "
             "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f hsl_ms=%.2f "
             "color_grading_ms=%.2f texture_ms=%.2f clarity_ms=%.2f dehaze_ms=%.2f "
             "vignette_ms=%.2f grain_ms=%.2f sharpening_ms=%.2f "
@@ -797,6 +840,7 @@ class ProcessingWorker(QObject):
             "total_ms=%.2f",
             image.shape,
             copy_ms,
+            healing_ms,
             exposure_ms,
             tonal_ms,
             wb_ms,

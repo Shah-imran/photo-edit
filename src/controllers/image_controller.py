@@ -40,6 +40,7 @@ from src.processors.defringe_processor import DefringeProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.processors.crop_processor import CropProcessor
 from src.processors.mask_processor import MaskProcessor
+from src.processors.healing_processor import HealingProcessor
 from src.commands.adjustment_commands import (
     AdjustmentStateCommand,
     CombinedAdjustmentCommand,
@@ -191,6 +192,23 @@ class ImageController(QObject):
         "clarity": (-100.0, 100.0),
     }
     _MASK_TYPES = ("linear", "radial")
+    # Healing's spots are a LIST (state key "heal_spots"), not a dict --
+    # unlike every other key so far, multi-spot healing is naturally a
+    # list of independent spots rather than a single slot. "[]" is the
+    # meaningful, falsy "no spots" default, following the same
+    # falsy-skip convention every other processor in this codebase
+    # already uses. See docs/planning/implementation-notes/
+    # 2026-10-13-healing-processor.md.
+    _HEALING_MODES = ("heal", "clone")
+    _HEALING_SPOT_DEFAULTS = {
+        "dst_x": 0.5,
+        "dst_y": 0.5,
+        "src_x": 0.5,
+        "src_y": 0.5,
+        "radius": 0.05,
+        "feather": 0.3,
+        "opacity": 1.0,
+    }
 
     def __init__(
         self,
@@ -243,6 +261,7 @@ class ImageController(QObject):
         self._straighten_processor = StraightenProcessor()
         self._crop_processor = CropProcessor()
         self._mask_processor = MaskProcessor()
+        self._healing_processor = HealingProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
@@ -283,6 +302,16 @@ class ImageController(QObject):
         # there is no other "neutral" mask geometry to collapse from. See
         # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
         self._mask_params: Dict[str, Any] = {}
+        # Healing follows the exact same internal falsy/{} "not yet
+        # touched" sentinel convention as _mask_params above, but wraps
+        # its list value in a single-key dict ({"heal_spots": [...]}),
+        # mirroring tone curve's own {"points": [...]} wrapping
+        # convention (both are the one non-scalar-float VALUE kept
+        # inside an otherwise-scalar _xxx_params dict) rather than
+        # storing the bare list directly -- this is also exactly the
+        # shape HealingProcessor.process's own ``heal_spots`` kwarg
+        # expects when the dict is spread with **self._healing_params.
+        self._healing_params: Dict[str, Any] = {}
 
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
@@ -553,6 +582,7 @@ class ImageController(QObject):
         self._straighten_params = {}
         self._crop_params = {}
         self._mask_params = {}
+        self._healing_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._pending_history_previous_state = None
@@ -664,6 +694,12 @@ class ImageController(QObject):
             return None
 
         result = original.copy()
+        # Healing runs FIRST, before every other adjustment (including
+        # Exposure) -- it is a repair operation on the as-shot pixels, not
+        # a creative adjustment. See docs/planning/implementation-notes/
+        # 2026-10-13-healing-processor.md.
+        if self._healing_params:
+            result = self._healing_processor.process(result, **self._healing_params)
         if self._exposure_params:
             result = self._exposure_processor.process(result, **self._exposure_params)
         if self._tonal_params:
@@ -760,7 +796,11 @@ class ImageController(QObject):
         docs/planning/implementation-notes/2026-10-13-mask-processor.md
         section 4; unlike every other non-flat key, its "no mask"
         default is ``None``, not an empty/identity dict, since there is
-        no neutral mask geometry).
+        no neutral mask geometry), and ``"heal_spots"`` (a list of
+        independent clone/heal spot dicts, ``[]`` by default -- see
+        docs/planning/implementation-notes/2026-10-13-healing-processor.md
+        section 4; always a list, never ``None``, following the same
+        falsy-skip convention every other processor uses).
         """
         state: Dict[str, Any] = self._ADJUSTMENT_DEFAULTS.copy()
         state.update(self._exposure_params)
@@ -787,6 +827,9 @@ class ImageController(QObject):
         state.update(self._straighten_params)
         state["crop"] = {**self._CROP_DEFAULTS, **self._crop_params}
         state["mask"] = self._mask_params.copy() if self._mask_params else None
+        state["heal_spots"] = [
+            dict(spot) for spot in self._healing_params.get("heal_spots", [])
+        ]
         return state
 
     def _apply_state_params(
@@ -824,6 +867,9 @@ class ImageController(QObject):
         )
         mask_values = self._normalize_mask_state(
             adjustments.get("mask") if adjustments else None
+        )
+        heal_spots_values = self._normalize_heal_spots_state(
+            adjustments.get("heal_spots") if adjustments else None
         )
 
         self._exposure_params = {
@@ -865,6 +911,9 @@ class ImageController(QObject):
             {} if self._is_identity_crop(crop_values) else crop_values
         )
         self._mask_params = mask_values
+        self._healing_params = (
+            {"heal_spots": heal_spots_values} if heal_spots_values else {}
+        )
 
         return {
             "normalized": normalized,
@@ -873,6 +922,7 @@ class ImageController(QObject):
             "color_grading_values": color_grading_values,
             "crop_values": crop_values,
             "mask_values": mask_values,
+            "heal_spots_values": heal_spots_values,
         }
 
     def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
@@ -900,6 +950,7 @@ class ImageController(QObject):
         color_grading_values = applied["color_grading_values"]
         crop_values = applied["crop_values"]
         mask_values = applied["mask_values"]
+        heal_spots_values = applied["heal_spots_values"]
 
         if not self.has_image():
             return
@@ -914,6 +965,7 @@ class ImageController(QObject):
             )
             or not self._is_identity_crop(crop_values)
             or bool(mask_values)
+            or bool(heal_spots_values)
         )
         if not has_changes:
             self._image_model.reset_to_original()
@@ -925,6 +977,8 @@ class ImageController(QObject):
             return
 
         result = original.copy()
+        if self._healing_params:
+            result = self._healing_processor.process(result, **self._healing_params)
         result = self._exposure_processor.process(result, **self._exposure_params)
         result = self._tonal_processor.process(result, **self._tonal_params)
         result = self._wb_processor.process(result, **self._wb_params)
@@ -989,6 +1043,7 @@ class ImageController(QObject):
         self._straighten_params = {}
         self._crop_params = {}
         self._mask_params = {}
+        self._healing_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
         self._pending_history_previous_state = None
@@ -1140,6 +1195,7 @@ class ImageController(QObject):
         straighten_params: Dict[str, float] = None,
         crop_params: Dict[str, float] = None,
         mask_params: Dict[str, Any] = None,
+        healing_params: Dict[str, Any] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -1213,6 +1269,13 @@ class ImageController(QObject):
             # checks "is not None", not truthiness, to allow a caller
             # (including on_mask_changed) to explicitly clear it.
             self._mask_params = mask_params
+        if healing_params is not None:
+            # Like crop_params/mask_params, {} is a legitimate, meaningful
+            # value here -- it is healing's own internal "no spots"
+            # sentinel -- so the guard checks "is not None", not
+            # truthiness, to allow a caller (including
+            # on_heal_spots_changed) to explicitly clear it.
+            self._healing_params = healing_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -1239,6 +1302,7 @@ class ImageController(QObject):
                         straighten_params=self._straighten_params,
                         crop_params=self._crop_params,
                         mask_params=self._mask_params,
+                        healing_params=self._healing_params,
                     )
                 )
             else:
@@ -1265,6 +1329,7 @@ class ImageController(QObject):
                         straighten_params=self._straighten_params,
                         crop_params=self._crop_params,
                         mask_params=self._mask_params,
+                        healing_params=self._healing_params,
                         interactive_preview=True,
                     )
                 )
@@ -1302,6 +1367,7 @@ class ImageController(QObject):
                 straighten_params=self._straighten_params,
                 crop_params=self._crop_params,
                 mask_params=self._mask_params,
+                healing_params=self._healing_params,
             )
             command.execute()
 
@@ -1325,6 +1391,14 @@ class ImageController(QObject):
                 return
 
             result = original.copy()
+
+            # Healing runs FIRST, before every other adjustment -- see
+            # docs/planning/implementation-notes/
+            # 2026-10-13-healing-processor.md.
+            if self._healing_params:
+                result = self._healing_processor.process(
+                    result, **self._healing_params
+                )
 
             # Apply exposure adjustments
             if self._exposure_params:
@@ -1530,6 +1604,7 @@ class ImageController(QObject):
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
                 'mask': self._mask_params,
+                'healing': self._healing_params,
             })
             mode = "debounced-threaded"
         else:
@@ -1617,6 +1692,7 @@ class ImageController(QObject):
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
                 'mask': self._mask_params,
+                'healing': self._healing_params,
             })
         else:
             self.apply_adjustments(
@@ -1674,6 +1750,7 @@ class ImageController(QObject):
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
                 'mask': self._mask_params,
+                'healing': self._healing_params,
             })
         else:
             self.apply_adjustments(
@@ -1731,6 +1808,7 @@ class ImageController(QObject):
                 'straighten': self._straighten_params,
                 'crop': self._crop_params,
                 'mask': self._mask_params,
+                'healing': self._healing_params,
             })
         else:
             self.apply_adjustments(
@@ -1815,6 +1893,49 @@ class ImageController(QObject):
 
         self.apply_adjustments(mask_params=normalized, add_to_history=True)
 
+    def on_heal_spots_changed(self, heal_spots: list) -> None:
+        """Set the complete list of heal spots (replaces, not appends).
+
+        Set programmatically for now -- a later, separate slice wires
+        this to the interactive click-to-heal UI (placing spots with the
+        mouse, dragging a second point to pick the source). Mirrors
+        :meth:`on_crop_changed`/:meth:`on_mask_changed`'s pattern exactly:
+        captures the pre-gesture state via
+        :meth:`_capture_pending_history_state`, normalizes/validates
+        every spot in the incoming list defensively (never trusting the
+        caller -- the list may come from an old catalog entry, a
+        malformed imported preset, or interactive UI input in the later
+        slice), and commits via ``apply_adjustments(...,
+        add_to_history=True)`` as a single discrete step, participating
+        fully in the state-aware undo/redo system (see
+        docs/planning/implementation-notes/
+        2026-10-13-state-aware-undo-redo.md).
+
+        The caller (the later UI slice) is responsible for assembling
+        the full list -- e.g. appending a newly-placed spot to the
+        existing list (read via ``get_adjustment_state()["heal_spots"]``),
+        or removing one -- before calling this. This method always
+        REPLACES the whole list; it does not provide add/remove
+        primitives of its own.
+
+        Args:
+            heal_spots: The complete list of heal-spot dicts (see
+                docs/planning/implementation-notes/
+                2026-10-13-healing-processor.md section 4 for the shape).
+                ``[]`` clears every spot. Malformed entries (a non-dict,
+                or an unrecognized/missing ``"mode"``) are skipped rather
+                than crashing; every other field is defensively clamped.
+        """
+        if not self.has_image():
+            return
+
+        self._capture_pending_history_state()
+
+        normalized = self._normalize_heal_spots_state(heal_spots)
+        healing_params = {"heal_spots": normalized} if normalized else {}
+
+        self.apply_adjustments(healing_params=healing_params, add_to_history=True)
+
     def preview_mask(self, mask: Optional[Dict[str, Any]]) -> None:
         """Display an in-progress, UNCOMMITTED mask candidate, live.
 
@@ -1885,6 +2006,7 @@ class ImageController(QObject):
         straighten_params = params.get('straighten', {})
         crop_params = params.get('crop', {})
         mask_params = params.get('mask', {})
+        healing_params = params.get('healing', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
@@ -1906,6 +2028,7 @@ class ImageController(QObject):
             straighten_params=straighten_params,
             crop_params=crop_params,
             mask_params=mask_params,
+            healing_params=healing_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1947,6 +2070,7 @@ class ImageController(QObject):
         straighten_params = params.get('straighten', {})
         crop_params = params.get('crop', {})
         mask_params = params.get('mask', {})
+        healing_params = params.get('healing', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -1971,6 +2095,7 @@ class ImageController(QObject):
             straighten_params=straighten_params,
             crop_params=crop_params,
             mask_params=mask_params,
+            healing_params=healing_params,
             interactive_preview=True,
         )
         logger.info(
@@ -2091,6 +2216,7 @@ class ImageController(QObject):
                 straighten_params=self._straighten_params,
                 crop_params=self._crop_params,
                 mask_params=self._mask_params,
+                healing_params=self._healing_params,
                 interactive_preview=False,
             )
 
@@ -2135,7 +2261,8 @@ class ImageController(QObject):
             any(v != 0 for v in self._straighten_params.values()) or
             not is_identity_curve(self._curve_params.get("points")) or
             bool(self._crop_params) or
-            bool(self._mask_params)
+            bool(self._mask_params) or
+            bool(self._healing_params)
         )
 
     def _submit_delayed_final_render(self) -> None:
@@ -2171,6 +2298,7 @@ class ImageController(QObject):
             straighten_params=self._straighten_params,
             crop_params=self._crop_params,
             mask_params=self._mask_params,
+            healing_params=self._healing_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -2261,6 +2389,7 @@ class ImageController(QObject):
                 straighten_params=self._straighten_params.copy(),
                 crop_params=self._crop_params.copy(),
                 mask_params=self._mask_params.copy(),
+                healing_params=self._healing_params.copy(),
             )
             command.execute()
 
@@ -2392,6 +2521,69 @@ class ImageController(QObject):
             result[key] = max(low, min(high, value))
 
         return result
+
+    def _normalize_heal_spots_state(
+        self,
+        raw_heal_spots: Optional[list],
+    ) -> list:
+        """Return a fully-clamped list of heal-spot dicts, skipping any
+        malformed entry.
+
+        Unlike :meth:`_normalize_mask_state` (a single dict, or ``{}``
+        for "no mask"), healing's state is naturally a LIST of
+        independent spots -- ``[]``/``None``/non-list input all return
+        ``[]`` directly (the meaningful "no spots" default). Each
+        remaining entry is validated the same "never trust the caller"
+        way every other normalizer in this class already is: a non-dict
+        entry or one with an unrecognized/missing ``"mode"`` is skipped
+        entirely (there is no sensible default mode to substitute),
+        while every other field is defensively clamped rather than
+        rejected. Mirrors
+        :meth:`~src.processors.healing_processor.HealingProcessor._normalize_spot`'s
+        own clamping exactly, since both layers apply the same
+        "never trust the caller" discipline independently (the same
+        established precedent as crop/mask's own processor+controller
+        double-validation). See docs/planning/implementation-notes/
+        2026-10-13-healing-processor.md section 4.
+        """
+        if not raw_heal_spots or not isinstance(raw_heal_spots, list):
+            return []
+
+        normalized: list = []
+        for raw_spot in raw_heal_spots:
+            if not isinstance(raw_spot, dict):
+                continue
+            mode = raw_spot.get("mode")
+            if mode not in self._HEALING_MODES:
+                continue
+
+            spot: Dict[str, Any] = {"mode": mode}
+            for key in ("dst_x", "dst_y", "src_x", "src_y"):
+                default = self._HEALING_SPOT_DEFAULTS[key]
+                value = self._safe_float(raw_spot.get(key, default), default)
+                spot[key] = max(0.0, min(1.0, value))
+
+            radius_default = self._HEALING_SPOT_DEFAULTS["radius"]
+            radius = self._safe_float(
+                raw_spot.get("radius", radius_default), radius_default
+            )
+            spot["radius"] = max(1e-4, min(1.0, radius))
+
+            feather_default = self._HEALING_SPOT_DEFAULTS["feather"]
+            feather = self._safe_float(
+                raw_spot.get("feather", feather_default), feather_default
+            )
+            spot["feather"] = max(0.0, min(1.0, feather))
+
+            opacity_default = self._HEALING_SPOT_DEFAULTS["opacity"]
+            opacity = self._safe_float(
+                raw_spot.get("opacity", opacity_default), opacity_default
+            )
+            spot["opacity"] = max(0.0, min(1.0, opacity))
+
+            normalized.append(spot)
+
+        return normalized
 
     @staticmethod
     def _safe_float(value: Any, default: float) -> float:

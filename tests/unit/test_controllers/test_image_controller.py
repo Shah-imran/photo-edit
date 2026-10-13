@@ -263,6 +263,7 @@ class TestImageController:
             "color_grading": default_color_grading_params(),
             "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
             "mask": None,
+            "heal_spots": [],
         }
         controller.cleanup()
 
@@ -309,6 +310,7 @@ class TestImageController:
             "color_grading": default_color_grading_params(),
             "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
             "mask": None,
+            "heal_spots": [],
         }
         assert controller.image_model.get_current_image() is not None
         assert controller.can_undo() is False
@@ -1852,6 +1854,254 @@ class TestImageControllerMask:
         assert export is not None
         assert export.shape[0] < original_shape[0]
         assert export.shape[1] < original_shape[1]
+        assert np.all(np.isfinite(export))
+
+
+class TestImageControllerHealing:
+    """Phase J (Healing), slice 1 -- the data/processing layer for a
+    multi-spot clone/heal list. See
+    docs/planning/implementation-notes/2026-10-13-healing-processor.md."""
+
+    _SPOT_A = {
+        "mode": "clone",
+        "dst_x": 0.75,
+        "dst_y": 0.75,
+        "src_x": 0.1,
+        "src_y": 0.1,
+        "radius": 0.1,
+        "feather": 0.1,
+        "opacity": 1.0,
+    }
+    _SPOT_B = {
+        "mode": "heal",
+        "dst_x": 0.6,
+        "dst_y": 0.2,
+        "src_x": 0.2,
+        "src_y": 0.6,
+        "radius": 0.15,
+        "feather": 0.3,
+        "opacity": 0.8,
+    }
+
+    def test_default_heal_spots_is_empty_list(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_restore_adjustment_state_applies_heal_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"heal_spots": [self._SPOT_A, self._SPOT_B]}
+        )
+
+        assert controller.get_adjustment_state()["heal_spots"] == [
+            self._SPOT_A,
+            self._SPOT_B,
+        ]
+
+    def test_missing_heal_spots_key_defaults_to_empty_list(
+        self, qapp, sample_image
+    ):
+        """Backward compatibility: an old catalog/preset payload that
+        pre-dates this slice and omits "heal_spots" entirely must
+        default cleanly to []."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"exposure": 1.0})
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_restore_adjustment_state_tolerates_malformed_heal_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"heal_spots": "not a list"})
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_restore_adjustment_state_skips_spots_with_bad_mode(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"heal_spots": [{"mode": "smudge"}, self._SPOT_A, "garbage"]}
+        )
+
+        assert controller.get_adjustment_state()["heal_spots"] == [self._SPOT_A]
+
+    def test_restore_adjustment_state_clamps_out_of_range_heal_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {
+                "heal_spots": [
+                    {
+                        "mode": "clone",
+                        "dst_x": -5.0,
+                        "dst_y": 5.0,
+                        "src_x": 2.0,
+                        "src_y": -2.0,
+                        "radius": 10.0,
+                        "feather": -1.0,
+                        "opacity": 3.0,
+                    }
+                ]
+            }
+        )
+
+        spot = controller.get_adjustment_state()["heal_spots"][0]
+        assert spot["dst_x"] == 0.0
+        assert spot["dst_y"] == 1.0
+        assert spot["src_x"] == 1.0
+        assert spot["src_y"] == 0.0
+        assert spot["radius"] == 1.0
+        assert spot["feather"] == 0.0
+        assert spot["opacity"] == 1.0
+
+    def test_heal_spots_reach_export_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        distinct = pil_to_linear(sample_image).copy()
+        distinct[5:15, 5:15] = 0.0
+        controller._apply_loaded_image("sample.jpg", distinct)
+
+        unhealed_export = controller.get_export_image()
+        controller.restore_adjustment_state({"heal_spots": [self._SPOT_A]})
+        healed_export = controller.get_export_image()
+
+        assert healed_export is not None
+        assert healed_export.shape == unhealed_export.shape
+        assert not (healed_export == unhealed_export).all()
+
+    def test_on_heal_spots_changed_round_trips_and_adds_to_history(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_heal_spots_changed([self._SPOT_A, self._SPOT_B])
+
+        assert controller.get_adjustment_state()["heal_spots"] == [
+            self._SPOT_A,
+            self._SPOT_B,
+        ]
+        assert controller.can_undo() is True
+
+    def test_on_heal_spots_changed_empty_list_clears_previous_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_heal_spots_changed([self._SPOT_A])
+        assert controller.get_adjustment_state()["heal_spots"] != []
+
+        controller.on_heal_spots_changed([])
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_on_heal_spots_changed_normalizes_defensively(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_heal_spots_changed(
+            [{"mode": "heal", "radius": -5.0, "opacity": 10.0}]
+        )
+
+        state = controller.get_adjustment_state()["heal_spots"]
+        assert len(state) == 1
+        assert state[0]["mode"] == "heal"
+        assert 0.0 < state[0]["radius"] <= 1.0
+        assert 0.0 <= state[0]["opacity"] <= 1.0
+
+    def test_heal_spots_undo_restores_prior_list_not_latest(
+        self, qapp, sample_image
+    ):
+        """Set spots A, then spots B, undo, assert heal_spots equals A,
+        not B -- the core state-aware undo/redo regression pattern."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_heal_spots_changed([self._SPOT_A])
+        controller.on_heal_spots_changed([self._SPOT_B])
+
+        assert controller.get_adjustment_state()["heal_spots"] == [self._SPOT_B]
+
+        assert controller.undo() is True
+
+        assert controller.get_adjustment_state()["heal_spots"] == [self._SPOT_A]
+
+    def test_reset_to_original_clears_heal_spots(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_heal_spots_changed([self._SPOT_A])
+
+        controller.reset_to_original()
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_loading_a_different_image_clears_heal_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_heal_spots_changed([self._SPOT_A])
+
+        controller._apply_loaded_image("other.jpg", pil_to_linear(sample_image))
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_heal_spots_apply_before_crop_not_after(self, qapp, sample_image):
+        """Pipeline-order regression: healing's spot geometry is
+        expressed in the full pre-crop frame's own normalized
+        coordinates, so spots set alongside a crop must still reach a
+        shape that matches the cropped output."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original_shape = pil_to_linear(sample_image).shape
+
+        controller.restore_adjustment_state(
+            {
+                "heal_spots": [self._SPOT_A],
+                "crop": {"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75},
+            }
+        )
+
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape[0] < original_shape[0]
+        assert export.shape[1] < original_shape[1]
+        assert np.all(np.isfinite(export))
+
+    def test_heal_spots_apply_before_exposure(self, qapp, sample_image):
+        """Pipeline-order regression, controller level: healing must run
+        before Exposure in get_export_image()'s recompute chain."""
+        controller = ImageController(ImageView(), use_threading=False)
+        distinct = pil_to_linear(sample_image).copy()
+        distinct[5:15, 5:15] = 0.0
+        controller._apply_loaded_image("sample.jpg", distinct)
+
+        controller.restore_adjustment_state(
+            {
+                "heal_spots": [self._SPOT_A],
+                "exposure": 1.0,
+            }
+        )
+
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape == distinct.shape
         assert np.all(np.isfinite(export))
 
 

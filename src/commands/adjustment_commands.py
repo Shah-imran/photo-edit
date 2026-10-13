@@ -30,6 +30,7 @@ from src.processors.defringe_processor import DefringeProcessor
 from src.processors.straighten_processor import StraightenProcessor
 from src.processors.crop_processor import CropProcessor
 from src.processors.mask_processor import MaskProcessor
+from src.processors.healing_processor import HealingProcessor
 from src.utils.color_pipeline import LinearImage
 
 if TYPE_CHECKING:
@@ -144,6 +145,7 @@ class CombinedAdjustmentCommand(BaseCommand):
         straighten_params: Dict[str, float] = None,
         crop_params: Dict[str, float] = None,
         mask_params: Dict[str, Any] = None,
+        healing_params: Dict[str, Any] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -202,6 +204,8 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._crop_params = crop_params or {}
         self._mask_processor = MaskProcessor()
         self._mask_params = mask_params or {}
+        self._healing_processor = HealingProcessor()
+        self._healing_params = healing_params or {}
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -212,6 +216,11 @@ class CombinedAdjustmentCommand(BaseCommand):
             return
 
         result = original.copy()
+
+        # Healing runs FIRST, before every other adjustment -- see
+        # docs/planning/implementation-notes/2026-10-13-healing-processor.md.
+        if self._healing_params:
+            result = self._healing_processor.process(result, **self._healing_params)
 
         if self._exposure_params:
             result = self._exposure_processor.process(result, **self._exposure_params)
