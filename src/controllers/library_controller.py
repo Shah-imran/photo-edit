@@ -304,6 +304,99 @@ class LibraryController(QObject):
         self._emit_libraries()
         self._rebuild_entries_for_current_library()
 
+    def set_entries_favorite(self, file_paths: list[str], favorite: bool) -> None:
+        """Batch counterpart of ``set_entry_favorite`` -- sets every given
+        path to the SAME favorite value (not a per-path toggle), looping
+        the catalog-service call per path but refreshing views only ONCE
+        at the end, instead of once per path. See docs/planning/
+        implementation-notes/2026-10-13-multi-select-batch-actions.md for
+        why this exists as a dedicated method rather than the caller
+        looping ``set_entry_favorite`` itself."""
+        if not self._current_library_id or not file_paths:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.set_entry_favorite(
+                self._current_library_id, file_path, favorite
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entries_rating(self, file_paths: list[str], rating: int) -> None:
+        """Batch counterpart of ``set_entry_rating`` -- sets every given
+        path to the SAME rating (not a merge/offset of each path's
+        existing rating), refreshing views only once."""
+        if not self._current_library_id or not file_paths:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.set_entry_rating(
+                self._current_library_id, file_path, rating
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entries_flag(self, file_paths: list[str], flag: str) -> None:
+        """Batch counterpart of ``set_entry_flag`` -- sets every given path
+        to the SAME flag, refreshing views only once."""
+        if not self._current_library_id or not file_paths:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.set_entry_flag(
+                self._current_library_id, file_path, flag
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def add_entries_keywords(self, file_paths: list[str], keywords: list[str]) -> None:
+        """Batch, ADD-ONLY counterpart of ``set_entry_keywords``.
+
+        Unlike Favorite/Rating/Flag (scalar, "set" semantics), keywords
+        are additive here: each path's EXISTING keywords are preserved and
+        the new keywords are appended (then normalized/deduped by
+        ``LibraryCatalogService.set_entry_keywords`` exactly as a single-
+        image edit already is), rather than replacing each path's keyword
+        list wholesale -- a destructive batch replace across many images
+        whose individual current keywords the user hasn't seen is a
+        correctness trap. Single-image "Edit Keywords..." is unaffected
+        and remains a full replace, since the user can see that one
+        image's current keywords while editing them."""
+        if not self._current_library_id or not file_paths or not keywords:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            try:
+                entry = self._catalog_service.get_entry(
+                    self._current_library_id, file_path
+                )
+            except KeyError:
+                continue
+            merged = [*entry.keywords, *keywords]
+            self._catalog_service.set_entry_keywords(
+                self._current_library_id, file_path, merged
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def add_entries_to_collection(self, file_paths: list[str], collection_id: str) -> None:
+        """Batch counterpart of ``add_entry_to_collection`` -- adds every
+        given path to one collection, refreshing views only once."""
+        if not self._current_library_id or not file_paths or not collection_id:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.add_entry_to_collection(
+                self._current_library_id, file_path, collection_id
+            )
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
     def create_collection(self, name: str) -> None:
         """Create a new collection in the current library and refresh views."""
         if not self._current_library_id:

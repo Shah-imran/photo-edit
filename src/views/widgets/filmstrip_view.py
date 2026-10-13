@@ -7,6 +7,7 @@ from pathlib import Path
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -63,6 +64,18 @@ class FilmstripView(QWidget):
     keywords_changed = pyqtSignal(str, list)
     collection_membership_toggled = pyqtSignal(str, str, bool)
     new_collection_for_entry_requested = pyqtSignal(str, str)
+    # Batch (multi-select) counterparts of the five signals above -- only
+    # ever emitted from the context menu's MULTI-selection branch (see
+    # ``_show_batch_context_menu``), never from the single-item branch,
+    # which keeps emitting the plain signals above completely unchanged.
+    # See docs/planning/implementation-notes/2026-10-13-multi-select-
+    # batch-actions.md for why these are separate signals/controller
+    # methods rather than the view looping the single-item signals.
+    favorite_batch_toggled = pyqtSignal(list, bool)
+    rating_batch_changed = pyqtSignal(list, int)
+    flag_batch_changed = pyqtSignal(list, str)
+    keywords_batch_added = pyqtSignal(list, list)
+    collection_batch_added = pyqtSignal(list, str)
     THUMBNAIL_SIZE = QSize(88, 62)
     CELL_SIZE = QSize(104, 78)
 
@@ -142,6 +155,17 @@ class FilmstripView(QWidget):
         self._list.setWrapping(False)
         self._list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self._list.setMovement(QListWidget.Movement.Static)
+        # Ctrl/Shift-click multi-select (see docs/planning/implementation-
+        # notes/2026-10-13-multi-select-batch-actions.md). This is ADDITIVE
+        # to, not a replacement for, the single "open in editor" flow below:
+        # ``currentItemChanged`` still fires with whichever item was most
+        # recently clicked/made current, exactly as it did under the
+        # previous default ``SingleSelection`` mode, so a single click
+        # still opens exactly one image in the editor unchanged. Qt's
+        # ExtendedSelection mode gives Ctrl+click toggle, Shift+click
+        # range-select, and Ctrl+A select-all for free -- none of that is
+        # hand-rolled here.
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setIconSize(self.THUMBNAIL_SIZE)
@@ -379,6 +403,18 @@ class FilmstripView(QWidget):
         item = self._list.itemAt(position)
         if item is None:
             return
+        # Multi-select batch branch: only taken when the right-clicked item
+        # is itself part of a selection of MORE than one item -- right-
+        # clicking an item outside the current selection (or with nothing
+        # selected at all, e.g. every pre-existing single-item test in this
+        # suite, which never calls ``setSelected``) falls straight through
+        # to the single-item branch below, completely unchanged. See
+        # docs/planning/implementation-notes/2026-10-13-multi-select-
+        # batch-actions.md.
+        selected_items = [it for it in self._list.selectedItems() if it is not None]
+        if len(selected_items) > 1 and item in selected_items:
+            self._show_batch_context_menu(position, selected_items)
+            return
         path = item.data(Qt.ItemDataRole.UserRole)
         favorite = bool(item.data(Qt.ItemDataRole.UserRole + 2))
         flag = _normalize_flag(item.data(Qt.ItemDataRole.UserRole + 4))
@@ -470,6 +506,88 @@ class FilmstripView(QWidget):
             if not clean_name:
                 return
             self.new_collection_for_entry_requested.emit(str(path), clean_name)
+
+    def _show_batch_context_menu(self, position, items: list[QListWidgetItem]) -> None:
+        """The multi-selection counterpart of ``_show_context_menu``.
+
+        Favorite/Rating/Flag/Collection apply to every selected item with
+        the SAME chosen value (a plain "set" for the scalar fields, not a
+        merge/offset); "Add Keywords..." is deliberately ADD-ONLY (each
+        image's existing distinct keywords are preserved, new ones are
+        appended) rather than a destructive full replace, since a batch
+        replace across many images the user can't individually see the
+        current keywords of is a correctness trap -- see
+        docs/planning/implementation-notes/2026-10-13-multi-select-
+        batch-actions.md.
+        """
+        paths = [str(it.data(Qt.ItemDataRole.UserRole)) for it in items if it.data(Qt.ItemDataRole.UserRole)]
+        if not paths:
+            return
+        count = len(paths)
+        favorites = [bool(it.data(Qt.ItemDataRole.UserRole + 2)) for it in items]
+        all_favorite = bool(favorites) and all(favorites)
+        menu = QMenu(self)
+        # Tri-state favorite label: "standard file-manager" behavior for a
+        # mixed-state batch toggle -- if ANY selected item isn't already a
+        # favorite, offer to favorite ALL of them; only when every selected
+        # item is already a favorite does the action flip to removing it
+        # from all of them.
+        favorite_action = menu.addAction(
+            f"Remove from Favorites ({count})"
+            if all_favorite
+            else f"Add to Favorites ({count})"
+        )
+        rating_menu = menu.addMenu(f"Set Rating ({count})")
+        rating_actions: dict = {}
+        for label, value in (
+            ("No Rating", 0),
+            ("★ (1)", 1),
+            ("★★ (2)", 2),
+            ("★★★ (3)", 3),
+            ("★★★★ (4)", 4),
+            ("★★★★★ (5)", 5),
+        ):
+            rating_action = rating_menu.addAction(label)
+            rating_actions[rating_action] = value
+        pick_action = menu.addAction(f"Flag as Pick ({count})")
+        reject_action = menu.addAction(f"Flag as Reject ({count})")
+        remove_flag_action = menu.addAction(f"Remove Flag ({count})")
+        keywords_action = menu.addAction(f"Add Keywords to {count} Photos...")
+        collection_menu = menu.addMenu(f"Add to Collection ({count})")
+        collection_actions: dict = {}
+        for collection in self._collections:
+            collection_id = str(collection.get("id", ""))
+            if not collection_id:
+                continue
+            action = collection_menu.addAction(str(collection.get("name", "Collection")))
+            collection_actions[action] = collection_id
+        selected = menu.exec(self._list.viewport().mapToGlobal(position))
+        if selected is None:
+            return
+        if selected is favorite_action:
+            self.favorite_batch_toggled.emit(paths, not all_favorite)
+        elif selected in rating_actions:
+            self.rating_batch_changed.emit(paths, rating_actions[selected])
+        elif selected is pick_action:
+            self.flag_batch_changed.emit(paths, "pick")
+        elif selected is reject_action:
+            self.flag_batch_changed.emit(paths, "reject")
+        elif selected is remove_flag_action:
+            self.flag_batch_changed.emit(paths, "none")
+        elif selected is keywords_action:
+            text, ok = QInputDialog.getText(
+                self,
+                "Add Keywords",
+                f"Comma-separated keywords to add to {count} photos:",
+                text="",
+            )
+            if not ok:
+                return
+            new_keywords = [piece.strip() for piece in text.split(",") if piece.strip()]
+            if new_keywords:
+                self.keywords_batch_added.emit(paths, new_keywords)
+        elif selected in collection_actions:
+            self.collection_batch_added.emit(paths, collection_actions[selected])
 
     def _placeholder_pixmap(self, missing: bool) -> QPixmap:
         pixmap = QPixmap(self.THUMBNAIL_SIZE)

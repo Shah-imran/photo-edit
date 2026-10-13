@@ -788,6 +788,311 @@ def test_filmstrip_context_menu_new_collection_cancel_emits_nothing(qapp, qtbot)
     assert received == []
 
 
+def test_filmstrip_list_uses_extended_selection_mode(qapp, qtbot):
+    from PyQt6.QtWidgets import QAbstractItemView
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    assert (
+        strip._list.selectionMode()
+        == QAbstractItemView.SelectionMode.ExtendedSelection
+    )
+
+
+def test_filmstrip_single_click_still_opens_exactly_one_image_unregressed(
+    qapp, qtbot
+):
+    """Critical regression guard (see docs/planning/implementation-notes/
+    2026-10-13-multi-select-batch-actions.md): multi-select is additive,
+    not a replacement for the single "open in editor" flow -- a plain
+    click on one item must still emit ``image_selected`` for that one
+    path only, exactly as it did before ExtendedSelection was enabled."""
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+
+    with qtbot.waitSignal(strip.image_selected) as blocker:
+        strip._list.setCurrentRow(0)
+    assert blocker.args == ["C:/photos/one.jpg"]
+
+    received = []
+    strip.image_selected.connect(received.append)
+    with qtbot.waitSignal(strip.image_selected) as blocker:
+        strip._list.setCurrentRow(1)
+    assert blocker.args == ["C:/photos/two.jpg"]
+    # Exactly one selection, exactly one emission -- no batch fan-out.
+    assert received == ["C:/photos/two.jpg"]
+
+
+def test_filmstrip_batch_context_menu_only_triggers_when_right_clicked_item_is_selected(
+    qapp, qtbot
+):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+    one = strip._item_by_path["C:/photos/one.jpg"]
+    two = strip._item_by_path["C:/photos/two.jpg"]
+    one.setSelected(True)
+    two.setSelected(True)
+
+    seen_action_texts = []
+
+    def fake_exec(self, *_args, **_kwargs):
+        seen_action_texts.extend(action.text() for action in self.actions())
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        strip._show_context_menu(strip._list.visualItemRect(one).center())
+
+    # The batch menu's favorite action carries a "(2)" count -- the
+    # single-item menu's action text ("Add to Favorites") never does.
+    assert any("(2)" in text for text in seen_action_texts)
+
+
+def test_filmstrip_batch_rating_sets_all_selected_to_same_value(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+    one = strip._item_by_path["C:/photos/one.jpg"]
+    two = strip._item_by_path["C:/photos/two.jpg"]
+    one.setSelected(True)
+    two.setSelected(True)
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            submenu = action.menu()
+            if submenu is None:
+                continue
+            for sub_action in submenu.actions():
+                if sub_action.text() == "★★★ (3)":
+                    return sub_action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.rating_batch_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(one).center())
+
+    paths, rating = blocker.args
+    assert set(paths) == {"C:/photos/one.jpg", "C:/photos/two.jpg"}
+    assert rating == 3
+
+
+def test_filmstrip_batch_flag_sets_all_selected_to_same_value(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+    one = strip._item_by_path["C:/photos/one.jpg"]
+    two = strip._item_by_path["C:/photos/two.jpg"]
+    one.setSelected(True)
+    two.setSelected(True)
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text().startswith("Flag as Reject"):
+                return action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.flag_batch_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(one).center())
+
+    paths, flag = blocker.args
+    assert set(paths) == {"C:/photos/one.jpg", "C:/photos/two.jpg"}
+    assert flag == "reject"
+
+
+def test_filmstrip_batch_favorite_shows_add_label_for_mixed_selection_and_targets_all(
+    qapp, qtbot
+):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    favorited = _entry("C:/photos/one.jpg")
+    favorited["favorite"] = True
+    strip.set_entries([favorited, _entry("C:/photos/two.jpg")])
+    one = strip._item_by_path["C:/photos/one.jpg"]
+    two = strip._item_by_path["C:/photos/two.jpg"]
+    one.setSelected(True)
+    two.setSelected(True)
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text().startswith("Add to Favorites"):
+                return action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.favorite_batch_toggled) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(one).center())
+
+    paths, value = blocker.args
+    # Mixed selection (one already favorited, one not) -> "Add to
+    # Favorites" is offered, and clicking it favorites the WHOLE selection.
+    assert set(paths) == {"C:/photos/one.jpg", "C:/photos/two.jpg"}
+    assert value is True
+
+
+def test_filmstrip_batch_favorite_shows_remove_label_when_all_already_favorited(
+    qapp, qtbot
+):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    first = _entry("C:/photos/one.jpg")
+    first["favorite"] = True
+    second = _entry("C:/photos/two.jpg")
+    second["favorite"] = True
+    strip.set_entries([first, second])
+    one = strip._item_by_path["C:/photos/one.jpg"]
+    two = strip._item_by_path["C:/photos/two.jpg"]
+    one.setSelected(True)
+    two.setSelected(True)
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text().startswith("Remove from Favorites"):
+                return action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.favorite_batch_toggled) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(one).center())
+
+    paths, value = blocker.args
+    assert set(paths) == {"C:/photos/one.jpg", "C:/photos/two.jpg"}
+    assert value is False
+
+
+def test_filmstrip_batch_add_keywords_is_additive_only(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QInputDialog, QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    first = _entry("C:/photos/one.jpg")
+    first["keywords"] = ["existing"]
+    strip.set_entries([first, _entry("C:/photos/two.jpg")])
+    one = strip._item_by_path["C:/photos/one.jpg"]
+    two = strip._item_by_path["C:/photos/two.jpg"]
+    one.setSelected(True)
+    two.setSelected(True)
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text().startswith("Add Keywords to"):
+                return action
+        return None
+
+    def fake_get_text(*_args, **_kwargs):
+        return "sunset", True
+
+    with patch.object(QMenu, "exec", fake_exec), patch.object(
+        QInputDialog, "getText", staticmethod(fake_get_text)
+    ):
+        with qtbot.waitSignal(strip.keywords_batch_added) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(one).center())
+
+    paths, keywords = blocker.args
+    assert set(paths) == {"C:/photos/one.jpg", "C:/photos/two.jpg"}
+    # The batch signal carries only the NEW keywords to add -- the view
+    # never reads/merges each item's existing keywords itself; that merge
+    # (preserving "existing") happens controller-side (see
+    # LibraryController.add_entries_keywords).
+    assert keywords == ["sunset"]
+
+
+def test_filmstrip_batch_add_to_collection_adds_every_selected_item(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+    strip.set_collections([{"id": "c1", "name": "Travel", "count": 0}])
+    one = strip._item_by_path["C:/photos/one.jpg"]
+    two = strip._item_by_path["C:/photos/two.jpg"]
+    one.setSelected(True)
+    two.setSelected(True)
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            submenu = action.menu()
+            if submenu is None:
+                continue
+            for sub_action in submenu.actions():
+                if sub_action.text() == "Travel":
+                    return sub_action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.collection_batch_added) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(one).center())
+
+    paths, collection_id = blocker.args
+    assert set(paths) == {"C:/photos/one.jpg", "C:/photos/two.jpg"}
+    assert collection_id == "c1"
+
+
+def test_filmstrip_right_click_outside_selection_falls_back_to_single_item_menu(
+    qapp, qtbot
+):
+    """Right-clicking an item that is NOT part of the current multi-
+    selection must act on that one item only, same as before multi-select
+    existed -- not silently batch-apply to whatever else happens to be
+    selected."""
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries(
+        [
+            _entry("C:/photos/one.jpg"),
+            _entry("C:/photos/two.jpg"),
+            _entry("C:/photos/three.jpg"),
+        ]
+    )
+    one = strip._item_by_path["C:/photos/one.jpg"]
+    two = strip._item_by_path["C:/photos/two.jpg"]
+    three = strip._item_by_path["C:/photos/three.jpg"]
+    one.setSelected(True)
+    two.setSelected(True)
+    # three.jpg is right-clicked but is NOT part of the selection.
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            if action.text() == "Flag as Pick":
+                return action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.flag_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(three).center())
+
+    assert blocker.args == ["C:/photos/three.jpg", "pick"]
+
+
 def test_workspace_header_emits_primary_actions(qapp, qtbot):
     header = WorkspaceHeader()
     qtbot.addWidget(header)

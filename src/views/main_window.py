@@ -501,6 +501,26 @@ class MainWindow(QMainWindow):
         self._filmstrip_view.new_collection_for_entry_requested.connect(
             self._library_controller.create_collection_with_entry
         )
+        # Multi-select batch counterparts (see docs/planning/
+        # implementation-notes/2026-10-13-multi-select-batch-actions.md) --
+        # only ever emitted from the context menu's multi-selection branch,
+        # routed to dedicated controller methods that refresh views once
+        # per batch action instead of once per selected image.
+        self._filmstrip_view.favorite_batch_toggled.connect(
+            self._library_controller.set_entries_favorite
+        )
+        self._filmstrip_view.rating_batch_changed.connect(
+            self._library_controller.set_entries_rating
+        )
+        self._filmstrip_view.flag_batch_changed.connect(
+            self._library_controller.set_entries_flag
+        )
+        self._filmstrip_view.keywords_batch_added.connect(
+            self._library_controller.add_entries_keywords
+        )
+        self._filmstrip_view.collection_batch_added.connect(
+            self._library_controller.add_entries_to_collection
+        )
         self._library_view.create_library_requested.connect(
             self._on_create_library_requested
         )

@@ -252,6 +252,108 @@ class TestLibraryController:
             controller.current_library_id
         ) == []
 
+    # -- Multi-select batch actions ------------------------------------
+    # See docs/planning/implementation-notes/2026-10-13-multi-select-
+    # batch-actions.md.
+
+    def _import_two_images(self, controller, tmp_path):
+        paths = []
+        for i in range(2):
+            path = tmp_path / f"batch_{i}.jpg"
+            Image.new("RGB", (20, 20), color=(i * 50, 0, 0)).save(path)
+            paths.append(str(path))
+        controller.import_images(paths)
+        return paths
+
+    def test_set_entries_favorite_sets_all_to_same_value_and_refreshes_once(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        rebuild_count = 0
+
+        def _count(*_args):
+            nonlocal rebuild_count
+            rebuild_count += 1
+
+        controller.entries_rebuilt.connect(_count)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entries_favorite(paths, True)
+
+        _, entries = rebuilt.args
+        assert {entry["favorite"] for entry in entries} == {True}
+        assert rebuild_count == 1
+
+    def test_set_entries_rating_sets_all_to_same_value(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+        controller.set_entry_rating(paths[0], 1)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entries_rating(paths, 4)
+
+        _, entries = rebuilt.args
+        assert {entry["rating"] for entry in entries} == {4}
+
+    def test_set_entries_flag_sets_all_to_same_value(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entries_flag(paths, "pick")
+
+        _, entries = rebuilt.args
+        assert {entry["flag"] for entry in entries} == {"pick"}
+
+    def test_add_entries_keywords_is_additive_and_preserves_existing(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+        controller.set_entry_keywords(paths[0], ["existing"])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.add_entries_keywords(paths, ["sunset"])
+
+        _, entries = rebuilt.args
+        by_path = {entry["path"]: entry for entry in entries}
+        assert set(by_path[paths[0]]["keywords"]) == {"existing", "sunset"}
+        assert by_path[paths[1]]["keywords"] == ["sunset"]
+
+    def test_add_entries_to_collection_adds_every_path(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.add_entries_to_collection(paths, collection_id)
+
+        _, entries = rebuilt.args
+        assert all(collection_id in entry["collection_ids"] for entry in entries)
+
+    def test_set_entries_favorite_no_op_on_empty_paths_or_no_current_library(
+        self, controller, qtbot
+    ):
+        # No current library yet (initialize() not called) -- must not raise.
+        controller.set_entries_favorite(["/nope.jpg"], True)
+        controller.initialize()
+        # Empty path list -- must not raise or emit a spurious rebuild.
+        received = []
+        controller.entries_rebuilt.connect(lambda *args: received.append(args))
+        controller.set_entries_favorite([], True)
+        assert received == []
+
     def test_entry_payload_and_thumbnail_ready_payload_have_identical_keys(
         self, controller, sample_image_path, qtbot
     ):
