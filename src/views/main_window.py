@@ -264,6 +264,13 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._create_action("Zoom &In", self._zoom_in, "Ctrl+="))
         view_menu.addAction(self._create_action("Zoom &Out", self._zoom_out, "Ctrl+-"))
         view_menu.addSeparator()
+        view_menu.addAction(
+            self._create_action("&Next Photo", self._next_photo, "Right")
+        )
+        view_menu.addAction(
+            self._create_action("&Previous Photo", self._previous_photo, "Left")
+        )
+        view_menu.addSeparator()
         view_menu.addAction(self._create_action("Toggle &Library Panel", self._toggle_library_panel, "F5"))
         view_menu.addAction(self._create_action("Toggle &Tools Panel", self._toggle_tools_panel, "F6"))
 
@@ -1040,6 +1047,24 @@ class MainWindow(QMainWindow):
     def _zoom_out(self):
         """Handle zoom out action."""
         self._image_controller.zoom_out()
+
+    def _next_photo(self) -> None:
+        """Advance to the next photo in the filmstrip's currently displayed
+        (filtered/sorted/searched) order. Routes through
+        ``FilmstripView.select_next()``, which moves the list's current
+        row and relies on the existing ``currentItemChanged`` ->
+        ``image_selected`` -> ``_on_library_image_selected`` path to load
+        the image -- the exact same path a filmstrip click already uses.
+        No wraparound: at the last photo, just show a status message
+        (matching Lightroom's own non-wrapping behavior).
+        """
+        if not self._filmstrip_view.select_next():
+            self._status_bar.showMessage("Already at the last photo", 2000)
+
+    def _previous_photo(self) -> None:
+        """Mirror of ``_next_photo`` -- moves to the previous photo."""
+        if not self._filmstrip_view.select_previous():
+            self._status_bar.showMessage("Already at the first photo", 2000)
 
     def _toggle_library_panel(self):
         """Toggle library panel visibility."""

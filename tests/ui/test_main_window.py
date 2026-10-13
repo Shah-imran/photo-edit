@@ -1123,3 +1123,41 @@ class TestApplyProfile:
         main_window._apply_profile("Vivid")
 
         assert BUILTIN_PROFILES["Vivid"] == original_vivid
+
+
+class TestNextPreviousPhoto:
+    """Unit tests for View > Next/Previous Photo (Right/Left arrow keys)."""
+
+    def test_next_photo_calls_filmstrip_select_next(self, main_window):
+        main_window._filmstrip_view.select_next = MagicMock(return_value=True)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._next_photo()
+
+        main_window._filmstrip_view.select_next.assert_called_once_with()
+        mock_status.assert_not_called()
+
+    def test_previous_photo_calls_filmstrip_select_previous(self, main_window):
+        main_window._filmstrip_view.select_previous = MagicMock(return_value=True)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._previous_photo()
+
+        main_window._filmstrip_view.select_previous.assert_called_once_with()
+        mock_status.assert_not_called()
+
+    def test_next_photo_at_last_entry_shows_status_message(self, main_window):
+        main_window._filmstrip_view.select_next = MagicMock(return_value=False)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._next_photo()
+
+        mock_status.assert_called_once_with("Already at the last photo", 2000)
+
+    def test_previous_photo_at_first_entry_shows_status_message(self, main_window):
+        main_window._filmstrip_view.select_previous = MagicMock(return_value=False)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._previous_photo()
+
+        mock_status.assert_called_once_with("Already at the first photo", 2000)

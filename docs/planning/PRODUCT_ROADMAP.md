@@ -136,7 +136,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 - Sort/filter; optional simple **collections** or folders (subset of Albums/Album folders).
 - **Ratings** and **pick/reject** (or flags); **keywords** on disk or sidecar (design choice: XMP vs JSON) -- **Done**: Ratings (0-5 stars, mirroring the existing Favorite flag) are **Done** (see docs/planning/implementation-notes/2026-10-13-ratings.md), pick/reject flags (a tri-state "none"/"pick"/"reject" marker, mirroring the same pattern) are **Done** (see docs/planning/implementation-notes/2026-10-13-pick-reject-flags.md), and keywords (a free-text `list[str]` per entry, persisted as plain JSON via the existing `LibraryCatalogService` -- not an XMP sidecar) are now also **Done** (see docs/planning/implementation-notes/2026-10-13-keywords.md).
 - **Search** box filtering library -- **Done** (see docs/planning/implementation-notes/2026-10-13-filmstrip-search.md).
-- **Filmstrip** or bottom strip + **next/previous photo** (keyboard + UI).
+- **Filmstrip** or bottom strip + **next/previous photo** (keyboard + UI) -- **Done** (see docs/planning/implementation-notes/2026-10-13-next-previous-photo.md).
 - Keeps scope smaller than full Lightroom Cloud sharing/stacks.
 
 ### Phase B -- Edit/File workflow and preferences MVP (PDF 1--2, 3 subset, 7)

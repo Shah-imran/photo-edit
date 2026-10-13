@@ -271,6 +271,43 @@ class FilmstripView(QWidget):
     def count(self) -> int:
         return self._list.count()
 
+    def select_next(self) -> bool:
+        """Move the current selection to the next photo in the CURRENTLY
+        DISPLAYED (already filtered/sorted/searched) order.
+
+        ``self._list`` is always populated in final, already-filtered-and
+        -sorted order by ``_render_entries()``, so "next row in the list"
+        is exactly "next photo in filmstrip order" -- no extra lookup into
+        ``self._entries`` is needed. ``QListWidget.setCurrentRow`` fires the
+        same ``currentItemChanged`` signal a click does, so
+        ``image_selected`` is emitted naturally by ``_on_current_item_changed``.
+
+        Returns True if the selection moved, False if the list is empty or
+        the current row is already the last one (no wraparound, matching
+        Lightroom's own non-wrapping next/previous behavior).
+        """
+        count = self._list.count()
+        if count == 0:
+            return False
+        row = self._list.currentRow()
+        if row >= count - 1:
+            return False
+        self._list.setCurrentRow(row + 1 if row >= 0 else 0)
+        return True
+
+    def select_previous(self) -> bool:
+        """Mirror of ``select_next`` -- moves to the previous row, clamped
+        at 0 (no wraparound). Returns False on an empty list or when
+        already at the first row."""
+        count = self._list.count()
+        if count == 0:
+            return False
+        row = self._list.currentRow()
+        if row <= 0:
+            return False
+        self._list.setCurrentRow(row - 1)
+        return True
+
     def _apply_entry_payload(self, item: QListWidgetItem, payload: dict) -> None:
         thumbnail = payload.get("thumbnail")
         if thumbnail is not None:

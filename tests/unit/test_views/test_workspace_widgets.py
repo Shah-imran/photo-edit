@@ -116,6 +116,112 @@ def test_filmstrip_search_cleared_restores_all_entries(qapp, qtbot):
     assert strip.count() == 2
 
 
+def test_filmstrip_select_next_and_previous_move_through_entries(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries(
+        [_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg"), _entry("C:/photos/three.jpg")]
+    )
+    strip.set_current_path("C:/photos/one.jpg")
+
+    with qtbot.waitSignal(strip.image_selected) as blocker:
+        assert strip.select_next() is True
+    assert blocker.args == ["C:/photos/two.jpg"]
+    assert strip.current_path() == "C:/photos/two.jpg"
+
+    with qtbot.waitSignal(strip.image_selected) as blocker:
+        assert strip.select_next() is True
+    assert blocker.args == ["C:/photos/three.jpg"]
+    assert strip.current_path() == "C:/photos/three.jpg"
+
+    with qtbot.waitSignal(strip.image_selected) as blocker:
+        assert strip.select_previous() is True
+    assert blocker.args == ["C:/photos/two.jpg"]
+    assert strip.current_path() == "C:/photos/two.jpg"
+
+
+def test_filmstrip_select_next_at_last_entry_does_not_move_or_wrap(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+    strip.set_current_path("C:/photos/two.jpg")
+
+    assert strip.select_next() is False
+    assert strip.current_path() == "C:/photos/two.jpg"
+
+
+def test_filmstrip_select_previous_at_first_entry_does_not_move_or_wrap(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg"), _entry("C:/photos/two.jpg")])
+    strip.set_current_path("C:/photos/one.jpg")
+
+    assert strip.select_previous() is False
+    assert strip.current_path() == "C:/photos/one.jpg"
+
+
+def test_filmstrip_select_next_and_previous_on_empty_filmstrip_return_false(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+
+    assert strip.select_next() is False
+    assert strip.select_previous() is False
+
+
+def test_filmstrip_select_next_and_previous_respect_filtered_sorted_order(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    favorite_match = _entry("C:/photos/sunset.jpg")
+    favorite_match["favorite"] = True
+    favorite_no_match = _entry("C:/photos/mountain.jpg")
+    favorite_no_match["favorite"] = True
+    plain_match = _entry("C:/photos/sunrise.jpg")
+    # Unfiltered/unsorted order is sunset, mountain, sunrise; the active
+    # filter+sort+search below should leave only sunrise and sunset, sorted
+    # by name -- select_next/previous must walk THAT order, not the
+    # original self._entries order.
+    strip.set_entries([favorite_match, favorite_no_match, plain_match])
+    strip.set_filter("favorites")
+    strip.set_search_text("sun")
+    strip.set_sort("name")
+
+    assert [strip._list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(strip.count())] == [
+        "C:/photos/sunset.jpg"
+    ]
+    # Only the favorites+"sun"-matching entry (sunset) survives the filter;
+    # mountain (favorite but no "sun" match) and sunrise (matches "sun" but
+    # not a favorite) are both excluded, so a single-item displayed order is
+    # exactly what this filtered/sorted view should be able to navigate.
+    strip.set_current_path("C:/photos/sunset.jpg")
+    assert strip.select_next() is False
+    assert strip.select_previous() is False
+
+    # Rebuild with a filtered+sorted order containing two entries, confirming
+    # next/previous actually walks the FILTERED/SORTED order, not the
+    # original entries order.
+    strip.set_filter("all")
+    strip.set_search_text("")
+    strip.set_sort("name")
+    strip.set_entries(
+        [
+            _entry("C:/photos/zebra.jpg"),
+            _entry("C:/photos/alpha.jpg"),
+            _entry("C:/photos/mango.jpg"),
+        ]
+    )
+    # Sorted by name: alpha, mango, zebra -- NOT the original zebra/alpha/mango
+    # insertion order.
+    assert [strip._list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(strip.count())] == [
+        "C:/photos/alpha.jpg",
+        "C:/photos/mango.jpg",
+        "C:/photos/zebra.jpg",
+    ]
+    strip.set_current_path("C:/photos/alpha.jpg")
+    with qtbot.waitSignal(strip.image_selected) as blocker:
+        assert strip.select_next() is True
+    assert blocker.args == ["C:/photos/mango.jpg"]
+
+
 def test_filmstrip_search_composes_with_favorites_filter(qapp, qtbot):
     strip = FilmstripView()
     qtbot.addWidget(strip)
