@@ -26,6 +26,7 @@ from PyQt6.QtGui import QKeySequence, QAction
 
 logger = logging.getLogger(__name__)
 
+from src.models.builtin_profiles import BUILTIN_PROFILES
 from src.views.image_view import ImageView
 from src.views.tools_panel import ToolsPanel
 from src.services.export_service import ExportService
@@ -367,6 +368,7 @@ class MainWindow(QMainWindow):
         self._tools_panel.hsl_changed.connect(self._on_hsl_changed)
         self._tools_panel.color_grading_changed.connect(self._on_color_grading_changed)
         self._tools_panel.slider_released.connect(self._on_slider_released)
+        self._tools_panel.profile_apply_requested.connect(self._apply_profile)
         self._library_view.image_selected.connect(self._on_library_image_selected)
         self._filmstrip_view.image_selected.connect(self._on_library_image_selected)
         self._library_view.import_requested.connect(self._import_images)
@@ -824,6 +826,34 @@ class MainWindow(QMainWindow):
         self._image_controller.restore_adjustment_state(state_for_controller)
         self._adjustment_persist_timer.start()
         self._status_bar.showMessage("Pasted edit settings", 2000)
+
+    def _apply_profile(self, profile_name: str):
+        """Apply a built-in profile's preset adjustment values.
+
+        This is a preset-apply action, not a persistent separate pipeline
+        stage -- see docs/planning/implementation-notes/
+        2026-10-13-profile-selector.md section 1 for the honest scope
+        boundary against real Lightroom Profiles. It mirrors
+        ``_paste_edit_settings``'s exact "replace the current image's
+        entire adjustment state" pattern, with ``BUILTIN_PROFILES``
+        treated as a second clipboard-like source deserving the same
+        defensive-copy treatment (two independent ``copy.deepcopy`` calls,
+        never the stored profile dict itself).
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to apply a profile to", 2000)
+            return
+        profile_state = BUILTIN_PROFILES.get(profile_name)
+        if profile_state is None:
+            self._status_bar.showMessage(f"Unknown profile: {profile_name}", 2000)
+            return
+
+        state_for_tools_panel = copy.deepcopy(profile_state)
+        state_for_controller = copy.deepcopy(profile_state)
+        self._tools_panel.set_adjustments(state_for_tools_panel, emit_signal=False)
+        self._image_controller.restore_adjustment_state(state_for_controller)
+        self._adjustment_persist_timer.start()
+        self._status_bar.showMessage(f"Applied profile: {profile_name}", 2000)
 
     def _show_preferences(self) -> None:
         """Open the Preferences dialog."""

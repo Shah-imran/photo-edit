@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtTest import QTest
 
+from src.models.builtin_profiles import BUILTIN_PROFILES
 from src.services.library_catalog_service import LibraryCatalogService
 from src.services.library_image_preview_cache_service import (
     LibraryImagePreviewCacheService,
@@ -1016,3 +1017,109 @@ class TestCopyPasteEditSettings:
         )
         assert restored_state["highlights"] == 42.0
         assert restored_state == image_a_state
+
+
+class TestApplyProfile:
+    """Unit tests for MainWindow._apply_profile (Profile selector slice).
+
+    This is a preset-apply action, not a persistent separate pipeline
+    stage -- see docs/planning/implementation-notes/
+    2026-10-13-profile-selector.md. Mirrors TestCopyPasteEditSettings'
+    style closely, since _apply_profile reuses the exact same
+    set_adjustments/restore_adjustment_state/_adjustment_persist_timer
+    pattern with BUILTIN_PROFILES as the source instead of a clipboard.
+    """
+
+    def test_apply_profile_with_no_image_shows_message_and_does_not_restore(
+        self, main_window
+    ):
+        main_window._image_controller.has_image = MagicMock(return_value=False)
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._apply_profile("Vivid")
+
+        main_window._image_controller.restore_adjustment_state.assert_not_called()
+        mock_status.assert_called_once_with(
+            "No image to apply a profile to", 2000
+        )
+
+    def test_apply_unknown_profile_shows_message_and_does_not_crash(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._apply_profile("Not A Real Profile")
+
+        main_window._image_controller.restore_adjustment_state.assert_not_called()
+        mock_status.assert_called_once_with(
+            "Unknown profile: Not A Real Profile", 2000
+        )
+
+    def test_apply_profile_with_image_calls_set_adjustments_and_restore(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+
+        main_window._tools_panel.set_adjustments = MagicMock(
+            wraps=main_window._tools_panel.set_adjustments
+        )
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._apply_profile("Vivid")
+
+        expected_state = BUILTIN_PROFILES["Vivid"]
+
+        main_window._tools_panel.set_adjustments.assert_called_once()
+        tools_panel_arg, tools_panel_kwargs = (
+            main_window._tools_panel.set_adjustments.call_args
+        )
+        assert tools_panel_arg[0] == expected_state
+        assert tools_panel_arg[0] is not expected_state
+        assert tools_panel_kwargs == {"emit_signal": False}
+
+        main_window._image_controller.restore_adjustment_state.assert_called_once()
+        (controller_arg,), _ = (
+            main_window._image_controller.restore_adjustment_state.call_args
+        )
+        assert controller_arg == expected_state
+        assert controller_arg is not expected_state
+        assert controller_arg is not tools_panel_arg[0]
+
+        mock_status.assert_called_with("Applied profile: Vivid", 2000)
+
+    def test_apply_profile_actually_sets_slider_values(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+
+        main_window._apply_profile("Monochrome")
+        qtbot.wait(100)
+
+        state = main_window._image_controller.get_adjustment_state()
+        assert state["saturation"] == BUILTIN_PROFILES["Monochrome"]["saturation"]
+        assert state["contrast"] == BUILTIN_PROFILES["Monochrome"]["contrast"]
+
+    def test_mutating_applied_profile_dict_does_not_affect_builtin_profiles(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        original_vivid = copy.deepcopy(BUILTIN_PROFILES["Vivid"])
+
+        def _capture_restore(adjustments):
+            adjustments["contrast"] = 999.0
+
+        main_window._image_controller.restore_adjustment_state = MagicMock(
+            side_effect=_capture_restore
+        )
+
+        main_window._apply_profile("Vivid")
+
+        assert BUILTIN_PROFILES["Vivid"] == original_vivid

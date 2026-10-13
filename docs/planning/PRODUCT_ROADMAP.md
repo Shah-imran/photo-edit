@@ -153,7 +153,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 
 ### Phase D -- Profiles and presets (PDF 10)
 
-- Profile selector (start with built-in looks analogous to Adobe Standard / Monochrome / etc.).
+- Profile selector (start with built-in looks analogous to Adobe Standard / Monochrome / etc.) -- **Done** (see docs/planning/implementation-notes/2026-10-13-profile-selector.md).
 - **Import presets** subset (e.g. JSON or LUT-based) -- full "Import Profiles & Presets" parity can grow incrementally.
 
 ### Phase E -- Light, Tone curve, Color (PDF 11-13)

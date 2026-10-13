@@ -4,6 +4,9 @@ Blacks sliders added alongside TonalProcessor."""
 import pytest
 from PyQt6.QtWidgets import QApplication
 
+from unittest.mock import MagicMock
+
+from src.models.builtin_profiles import BUILTIN_PROFILES
 from src.processors.color_grading_processor import default_color_grading_params
 from src.processors.hsl_mixer_processor import default_hsl_params
 from src.views.tools_panel import ToolsPanel
@@ -707,3 +710,43 @@ class TestToolsPanelGeometry:
         geometry_reset_button.click()
         assert panel.get_adjustments()["straighten"] == 0.0
         assert panel.get_adjustments()["clarity"] == 40.0
+
+
+class TestToolsPanelProfileSelector:
+    """Tests for the Profile combo + Apply button (Profile selector slice)."""
+
+    def test_combo_populated_with_builtin_profile_names_in_order(self, qapp):
+        panel = ToolsPanel()
+        combo_items = [
+            panel._profile_combo.itemText(i)
+            for i in range(panel._profile_combo.count())
+        ]
+        assert combo_items == list(BUILTIN_PROFILES.keys())
+        assert combo_items[0] == "Standard"
+
+    def test_selecting_combo_entry_alone_does_not_emit_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.profile_apply_requested.connect(received.append)
+        panel._profile_combo.setCurrentText("Vivid")
+        assert received == []
+
+    def test_clicking_apply_emits_profile_apply_requested_with_selected_name(
+        self, qapp
+    ):
+        panel = ToolsPanel()
+        received = []
+        panel.profile_apply_requested.connect(received.append)
+        panel._profile_combo.setCurrentText("Monochrome")
+        panel._profile_apply_button.click()
+        assert received == ["Monochrome"]
+
+    def test_tools_panel_does_not_itself_apply_profile_values(self, qapp):
+        """ToolsPanel only emits the chosen name; it must never call into
+        ImageController or apply BUILTIN_PROFILES values itself -- that is
+        MainWindow's job."""
+        panel = ToolsPanel()
+        panel.set_adjustments = MagicMock(wraps=panel.set_adjustments)
+        panel._profile_combo.setCurrentText("Landscape")
+        panel._profile_apply_button.click()
+        panel.set_adjustments.assert_not_called()

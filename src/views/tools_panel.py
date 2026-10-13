@@ -4,13 +4,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QLabel,
     QScrollArea,
     QPushButton,
     QToolButton,
+    QComboBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from src.models.builtin_profiles import BUILTIN_PROFILES
 from src.processors.color_grading_processor import default_color_grading_params
 from src.processors.hsl_mixer_processor import default_hsl_params
 from src.utils.curve_math import normalize_points
@@ -36,6 +39,14 @@ class ToolsPanel(QWidget):
             flat dict)
         slider_released: Emitted when any slider, the curve editor, the
             HSL mixer, or Color Grading is released (for final processing)
+        profile_apply_requested: Emitted with the selected profile's name
+            when the Profile section's Apply button is clicked. ToolsPanel
+            only emits the chosen name here -- it does not know
+            ``BUILTIN_PROFILES``'s adjustment values beyond populating the
+            combo box, and never calls into ``ImageController`` itself;
+            applying the profile's values is ``MainWindow``'s job, the
+            same separation of concerns every other ToolsPanel signal
+            already follows.
     """
 
     adjustments_changed = pyqtSignal(dict)
@@ -43,6 +54,7 @@ class ToolsPanel(QWidget):
     hsl_changed = pyqtSignal(dict)
     color_grading_changed = pyqtSignal(dict)
     slider_released = pyqtSignal()
+    profile_apply_requested = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None):
         """Initialize the tools panel.
@@ -126,6 +138,24 @@ class ToolsPanel(QWidget):
         content_layout.setContentsMargins(10, 8, 10, 12)
         content_layout.setSpacing(4)
         
+        # Profile section (above Light, per the roadmap's Profile selector
+        # slice -- see docs/planning/implementation-notes/
+        # 2026-10-13-profile-selector.md). Selecting a combo entry alone
+        # does nothing; the user must click Apply, avoiding a surprising,
+        # silently-destructive UI action from idle browsing.
+        profile_section, profile_content_layout = self._create_section("Profile")
+        profile_row = QWidget()
+        profile_row_layout = QHBoxLayout(profile_row)
+        profile_row_layout.setContentsMargins(0, 0, 0, 0)
+        profile_row_layout.setSpacing(6)
+        self._profile_combo = QComboBox()
+        self._profile_combo.addItems(list(BUILTIN_PROFILES.keys()))
+        profile_row_layout.addWidget(self._profile_combo, 1)
+        self._profile_apply_button = QPushButton("Apply")
+        profile_row_layout.addWidget(self._profile_apply_button)
+        profile_content_layout.addWidget(profile_row)
+        content_layout.addWidget(profile_section)
+
         # Light section
         light_section, light_content_layout = self._create_section("Light")
         
@@ -401,6 +431,7 @@ class ToolsPanel(QWidget):
         expanded = title in {"Light", "Tone Curve", "Color"}
         section = CollapsibleSection(title, expanded=expanded)
         icon_name = {
+            "Profile": "color",
             "Light": "effects",
             "Tone Curve": "curve",
             "Color": "color",
@@ -461,6 +492,9 @@ class ToolsPanel(QWidget):
 
     def _connect_signals(self):
         """Connect slider signals."""
+        self._profile_apply_button.clicked.connect(
+            lambda: self.profile_apply_requested.emit(self._profile_combo.currentText())
+        )
         # Value changed signals (during slider movement)
         self._exposure_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('exposure', v)
