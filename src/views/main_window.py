@@ -1,5 +1,6 @@
 """Main window for PhotoEdit application."""
 
+import copy
 import logging
 from pathlib import Path
 from typing import Optional
@@ -109,6 +110,12 @@ class MainWindow(QMainWindow):
         self._pending_adjustment_payload: Optional[dict] = None
         self._pending_zoom_factor: Optional[float] = None
         self._current_image_library_id: Optional[str] = None
+        # Single-slot, in-memory, session-only clipboard for Copy/Paste Edit
+        # Settings -- matches Lightroom's own single-slot behavior for this
+        # feature (not its separate multi-preset system). Never persisted to
+        # disk; cleared when the app closes. See
+        # docs/planning/implementation-notes/2026-10-13-copy-paste-edit-settings.md.
+        self._copied_adjustment_state: Optional[dict] = None
         self._adjustment_persist_timer = QTimer(self)
         self._adjustment_persist_timer.setSingleShot(True)
         self._adjustment_persist_timer.setInterval(400)
@@ -216,6 +223,16 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._redo_action)
         edit_menu.addSeparator()
         edit_menu.addAction(self._create_action("&Reset Adjustments", self._reset_adjustments, "Ctrl+R"))
+        edit_menu.addAction(
+            self._create_action(
+                "&Copy Edit Settings", self._copy_edit_settings, "Ctrl+Alt+C"
+            )
+        )
+        edit_menu.addAction(
+            self._create_action(
+                "&Paste Edit Settings", self._paste_edit_settings, "Ctrl+Alt+V"
+            )
+        )
         
         # View menu
         view_menu = menubar.addMenu("&View")
@@ -759,6 +776,47 @@ class MainWindow(QMainWindow):
             self._image_controller.restore_adjustment_state({})
             self._adjustment_persist_timer.start()
             self._status_bar.showMessage("Reset to original", 2000)
+
+    def _copy_edit_settings(self):
+        """Handle copy edit settings action.
+
+        Captures the current image's full adjustment-state dict (the same
+        JSON-plain shape ``LibraryCatalogService`` already persists per
+        image) into the single in-memory clipboard slot.
+        """
+        if self._image_controller.has_image():
+            self._copied_adjustment_state = self._image_controller.get_adjustment_state()
+            self._status_bar.showMessage("Copied edit settings", 2000)
+        else:
+            self._status_bar.showMessage("No image to copy edit settings from", 2000)
+
+    def _paste_edit_settings(self):
+        """Handle paste edit settings action.
+
+        Mirrors ``_reset_adjustments``'s exact "replace the current image's
+        entire adjustment state" pattern, but with the copied state instead
+        of ``{}``. A deep copy is passed downstream (rather than the stored
+        clipboard dict itself) so that neither ``ToolsPanel.set_adjustments``
+        nor ``ImageController.restore_adjustment_state`` can leave the
+        clipboard corrupted for a later paste onto a different image --
+        see the implementation note for what was found by inspection about
+        whether either call actually mutates its input.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to paste edit settings to", 2000)
+            return
+        if self._copied_adjustment_state is None:
+            self._status_bar.showMessage(
+                "Nothing to paste; copy edit settings first", 2000
+            )
+            return
+
+        state_for_tools_panel = copy.deepcopy(self._copied_adjustment_state)
+        state_for_controller = copy.deepcopy(self._copied_adjustment_state)
+        self._tools_panel.set_adjustments(state_for_tools_panel, emit_signal=False)
+        self._image_controller.restore_adjustment_state(state_for_controller)
+        self._adjustment_persist_timer.start()
+        self._status_bar.showMessage("Pasted edit settings", 2000)
 
     def _fit_to_window(self):
         """Handle fit to window action."""

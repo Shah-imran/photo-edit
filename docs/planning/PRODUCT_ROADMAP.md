@@ -143,7 +143,7 @@ Each phase is **one reviewable slice** (UI + models + processors + tests for tha
 
 - **Complete state-aware Undo/Redo:** each history entry must retain before/after adjustment payloads as well as rendered results; undo and redo must atomically synchronize controller parameters, all sliders/curve controls, displayed image, export output, and persisted per-image state. The current image-buffer-only history is an acknowledged interim implementation.
 - **App-level persistence (do early; separate from Phase K project files):** `SettingsService` wrapping `QSettings` -- last open/import directory, last export directory, optional recent-files list, window geometry / dock state, theme name. See [INCREMENTAL_WORKFLOW.md](INCREMENTAL_WORKFLOW.md) section 6. Today this is **missing** in `src/` and is required for a professional feel.
-- **Copy/Paste edit settings** between images (requires serializable adjustment dict; feeds Phase K).
+- **Copy/Paste edit settings** between images (requires serializable adjustment dict; feeds Phase K) -- **Done** (see docs/planning/implementation-notes/2026-10-13-copy-paste-edit-settings.md).
 - **Export with Previous** (remember last export options; ties to app-level persistence above) -- **Done** (see docs/planning/implementation-notes/2026-10-13-export-with-previous.md).
 - **Preferences UI:** Local Storage path, General, Import defaults, Interface (e.g. theme from resources/QSS), Performance (preview size / threading) -- **no** cloud/account unless product changes.
 

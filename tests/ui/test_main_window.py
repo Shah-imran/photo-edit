@@ -1,7 +1,9 @@
 """UI tests for MainWindow - simulates real user interactions."""
 
+import copy
 import pytest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 from PIL import Image
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QSettings
@@ -848,3 +850,169 @@ class TestAdjustmentPayloadRoundTrip:
         assert main_window._tools_panel.get_curve_params() == {
             "points": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
         }
+
+
+class TestCopyPasteEditSettings:
+    """Unit tests for Edit > Copy/Paste Edit Settings (Ctrl+Alt+C/V)."""
+
+    def test_copy_with_no_image_shows_message_and_leaves_clipboard_none(
+        self, main_window
+    ):
+        main_window._image_controller.has_image = MagicMock(return_value=False)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._copy_edit_settings()
+
+        assert main_window._copied_adjustment_state is None
+        mock_status.assert_called_once_with(
+            "No image to copy edit settings from", 2000
+        )
+
+    def test_copy_with_image_captures_adjustment_state(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        main_window._tools_panel._exposure_slider.set_value(1.5)
+        qtbot.wait(100)
+
+        expected_state = main_window._image_controller.get_adjustment_state()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._copy_edit_settings()
+
+        assert main_window._copied_adjustment_state == expected_state
+        mock_status.assert_called_once_with("Copied edit settings", 2000)
+
+    def test_paste_with_no_image_shows_message_and_does_not_restore(
+        self, main_window
+    ):
+        main_window._image_controller.has_image = MagicMock(return_value=False)
+        main_window._copied_adjustment_state = {"exposure": 1.0}
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._paste_edit_settings()
+
+        main_window._image_controller.restore_adjustment_state.assert_not_called()
+        mock_status.assert_called_once_with(
+            "No image to paste edit settings to", 2000
+        )
+
+    def test_paste_with_nothing_copied_shows_message_and_does_not_restore(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        assert main_window._copied_adjustment_state is None
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._paste_edit_settings()
+
+        main_window._image_controller.restore_adjustment_state.assert_not_called()
+        mock_status.assert_called_once_with(
+            "Nothing to paste; copy edit settings first", 2000
+        )
+
+    def test_paste_calls_set_adjustments_and_restore_with_copied_values(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        main_window._tools_panel._exposure_slider.set_value(2.0)
+        qtbot.wait(100)
+        main_window._copy_edit_settings()
+        copied_state = main_window._copied_adjustment_state
+
+        main_window._tools_panel.set_adjustments = MagicMock()
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._paste_edit_settings()
+
+        main_window._tools_panel.set_adjustments.assert_called_once()
+        tools_panel_arg, tools_panel_kwargs = (
+            main_window._tools_panel.set_adjustments.call_args
+        )
+        assert tools_panel_arg[0] == copied_state
+        assert tools_panel_arg[0] is not copied_state
+        assert tools_panel_kwargs == {"emit_signal": False}
+
+        main_window._image_controller.restore_adjustment_state.assert_called_once()
+        (controller_arg,), _ = (
+            main_window._image_controller.restore_adjustment_state.call_args
+        )
+        assert controller_arg == copied_state
+        assert controller_arg is not copied_state
+        assert controller_arg is not tools_panel_arg[0]
+
+        mock_status.assert_called_with("Pasted edit settings", 2000)
+
+    def test_mutating_pasted_dict_does_not_affect_clipboard(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        main_window._tools_panel._exposure_slider.set_value(3.0)
+        qtbot.wait(100)
+        main_window._copy_edit_settings()
+        original_copied_state = copy.deepcopy(main_window._copied_adjustment_state)
+
+        captured = {}
+
+        def _capture_restore(adjustments):
+            captured["state"] = adjustments
+            # Simulate a careless downstream caller mutating what it is given.
+            adjustments["exposure"] = 999.0
+            adjustments["tone_curve"] = "mutated"
+
+        main_window._image_controller.restore_adjustment_state = MagicMock(
+            side_effect=_capture_restore
+        )
+
+        main_window._paste_edit_settings()
+
+        assert captured["state"]["exposure"] == 999.0
+        assert main_window._copied_adjustment_state == original_copied_state
+        assert main_window._copied_adjustment_state["exposure"] != 999.0
+
+    def test_copy_from_image_a_paste_onto_image_b_crosses_images(
+        self, main_window, sample_image_file, tmp_path, qtbot
+    ):
+        other = tmp_path / "other.jpg"
+        Image.new("RGB", (80, 60), color="green").save(other)
+
+        main_window._library_controller.import_images(
+            [sample_image_file, str(other)]
+        )
+        library = main_window._library_view
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(sample_image_file)
+        main_window._tools_panel._highlights_slider.set_value(42.0)
+        qtbot.wait(500)
+
+        main_window._copy_edit_settings()
+        image_a_state = main_window._copied_adjustment_state
+        assert image_a_state["highlights"] == 42.0
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(str(other))
+        qtbot.wait(200)
+
+        # Image B starts from a clean slate.
+        assert main_window._image_controller.get_adjustment_state()["highlights"] == 0.0
+
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+        main_window._paste_edit_settings()
+
+        (restored_state,), _ = (
+            main_window._image_controller.restore_adjustment_state.call_args
+        )
+        assert restored_state["highlights"] == 42.0
+        assert restored_state == image_a_state
