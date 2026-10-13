@@ -20,11 +20,21 @@ from PyQt6.QtWidgets import (
 from src.views.icons import line_icon
 
 
+def _clamp_rating(value) -> int:
+    """Coerce an incoming rating (e.g. from an entry payload) to 0..5."""
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(5, rating))
+
+
 class FilmstripView(QWidget):
     """A compact view of the active library's images."""
 
     image_selected = pyqtSignal(str)
     favorite_toggled = pyqtSignal(str, bool)
+    rating_changed = pyqtSignal(str, int)
     THUMBNAIL_SIZE = QSize(88, 62)
     CELL_SIZE = QSize(104, 78)
 
@@ -207,11 +217,20 @@ class FilmstripView(QWidget):
             pixmap = self._placeholder_pixmap(missing)
         item.setIcon(QIcon(pixmap))
         favorite = bool(payload.get("favorite", False))
+        rating = _clamp_rating(payload.get("rating", 0))
+        # Rating is surfaced via the tooltip only -- the item TEXT stays
+        # reserved for the existing favorite "★" marker and must not be
+        # repurposed or overwritten here. See
+        # docs/planning/implementation-notes/2026-10-13-ratings.md.
         item.setText("★" if favorite else "")
         tooltip = str(payload.get("tooltip") or Path(str(payload["path"])).name)
-        item.setToolTip(("Favorite\n" if favorite else "") + tooltip)
+        prefix = ("Favorite\n" if favorite else "")
+        if rating > 0:
+            prefix += f"Rating: {'★' * rating}{'☆' * (5 - rating)}\n"
+        item.setToolTip(prefix + tooltip)
         item.setData(Qt.ItemDataRole.UserRole + 1, payload.get("status"))
         item.setData(Qt.ItemDataRole.UserRole + 2, favorite)
+        item.setData(Qt.ItemDataRole.UserRole + 3, rating)
 
     def _show_context_menu(self, position) -> None:
         item = self._list.itemAt(position)
@@ -220,10 +239,28 @@ class FilmstripView(QWidget):
         path = item.data(Qt.ItemDataRole.UserRole)
         favorite = bool(item.data(Qt.ItemDataRole.UserRole + 2))
         menu = QMenu(self)
-        action = menu.addAction("Remove from Favorites" if favorite else "Add to Favorites")
+        favorite_action = menu.addAction(
+            "Remove from Favorites" if favorite else "Add to Favorites"
+        )
+        rating_menu = menu.addMenu("Set Rating")
+        rating_actions: dict = {}
+        for label, value in (
+            ("No Rating", 0),
+            ("★ (1)", 1),
+            ("★★ (2)", 2),
+            ("★★★ (3)", 3),
+            ("★★★★ (4)", 4),
+            ("★★★★★ (5)", 5),
+        ):
+            rating_action = rating_menu.addAction(label)
+            rating_actions[rating_action] = value
         selected = menu.exec(self._list.viewport().mapToGlobal(position))
-        if selected is action and path:
+        if selected is None or not path:
+            return
+        if selected is favorite_action:
             self.favorite_toggled.emit(str(path), not favorite)
+        elif selected in rating_actions:
+            self.rating_changed.emit(str(path), rating_actions[selected])
 
     def _placeholder_pixmap(self, missing: bool) -> QPixmap:
         pixmap = QPixmap(self.THUMBNAIL_SIZE)

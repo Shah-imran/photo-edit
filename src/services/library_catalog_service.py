@@ -49,6 +49,7 @@ class LibraryEntry:
     thumbnail_cache_key: Optional[str] = None
     adjustment_state: Optional[dict] = None
     favorite: bool = False
+    rating: int = 0
 
     @property
     def normalized_path(self) -> str:
@@ -65,6 +66,7 @@ class LibraryEntry:
             "thumbnail_cache_key": self.thumbnail_cache_key,
             "adjustment_state": self.adjustment_state,
             "favorite": self.favorite,
+            "rating": self.rating,
         }
 
     @classmethod
@@ -79,6 +81,7 @@ class LibraryEntry:
             thumbnail_cache_key=_optional_str(payload.get("thumbnail_cache_key")),
             adjustment_state=_optional_dict(payload.get("adjustment_state")),
             favorite=bool(payload.get("favorite", False)),
+            rating=_clamp_rating(payload.get("rating", 0)),
         )
 
 
@@ -151,6 +154,20 @@ def _optional_dict(value) -> Optional[dict]:
     if not isinstance(value, dict):
         return None
     return dict(value)
+
+
+def _clamp_rating(value) -> int:
+    """Coerce a persisted/incoming rating to an integer in 0..5.
+
+    Defensive against corrupt or out-of-range catalog data (and against
+    older catalog files that predate this field entirely, which already
+    default to 0 via ``payload.get("rating", 0)`` at the call site).
+    """
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(5, rating))
 
 
 class LibraryCatalogService:
@@ -329,6 +346,26 @@ class LibraryCatalogService:
         if entry.favorite == favorite:
             return entry
         entry.favorite = favorite
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def set_entry_rating(
+        self, library_id: str, path: str, rating: int
+    ) -> LibraryEntry:
+        """Persist a 0-5 star rating for an entry.
+
+        Out-of-range values are clamped rather than rejected -- friendlier
+        for a library-metadata setter than raising, and consistent with how
+        a corrupt/out-of-range persisted value is handled on read (see
+        ``_clamp_rating``).
+        """
+        library = self._require_library(library_id)
+        entry = self._require_entry(library, path)
+        rating = _clamp_rating(rating)
+        if entry.rating == rating:
+            return entry
+        entry.rating = rating
         library.updated_at = _utc_now_iso()
         self._save_catalog()
         return entry

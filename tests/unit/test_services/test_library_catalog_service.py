@@ -141,3 +141,87 @@ class TestLibraryCatalogService:
 
         reloaded = LibraryCatalogService(catalog_path=library_catalog_path)
         assert reloaded.get_entry(library_id, sample_image_path).favorite is True
+
+    def test_rating_state_survives_reload(
+        self, library_catalog_path, sample_image_path
+    ):
+        first = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = first.get_current_library_id()
+        first.add_entries(library_id, [sample_image_path])
+        first.set_entry_rating(library_id, sample_image_path, 4)
+
+        reloaded = LibraryCatalogService(catalog_path=library_catalog_path)
+        assert reloaded.get_entry(library_id, sample_image_path).rating == 4
+
+    def test_rating_defaults_to_zero_for_new_entries(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+
+        assert service.get_entry(library_id, sample_image_path).rating == 0
+
+    def test_set_entry_rating_is_a_no_op_when_unchanged(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+        service.set_entry_rating(library_id, sample_image_path, 3)
+        library = service.list_libraries()[0]
+        updated_at_after_first_set = library.updated_at
+
+        service.set_entry_rating(library_id, sample_image_path, 3)
+
+        assert library.updated_at == updated_at_after_first_set
+
+    def test_set_entry_rating_clamps_out_of_range_values(
+        self, library_catalog_path, sample_image_path
+    ):
+        service = LibraryCatalogService(catalog_path=library_catalog_path)
+        library_id = service.get_current_library_id()
+        service.add_entries(library_id, [sample_image_path])
+
+        service.set_entry_rating(library_id, sample_image_path, -3)
+        assert service.get_entry(library_id, sample_image_path).rating == 0
+
+        service.set_entry_rating(library_id, sample_image_path, 99)
+        assert service.get_entry(library_id, sample_image_path).rating == 5
+
+    def test_rating_missing_from_old_catalog_payload_defaults_to_zero(self):
+        """Catalog files written before this slice lack the "rating" key
+        entirely; reading them must default cleanly to 0 rather than error."""
+        from src.services.library_catalog_service import LibraryEntry
+
+        entry = LibraryEntry.from_dict(
+            {
+                "path": "/photos/old.jpg",
+                "filename": "old.jpg",
+                "added_at": "2024-01-01T00:00:00+00:00",
+                "last_seen_mtime_ns": None,
+                "last_seen_size": None,
+                "status": "available",
+                # No "favorite" or "rating" key at all -- pre-dates both.
+            }
+        )
+
+        assert entry.favorite is False
+        assert entry.rating == 0
+
+    def test_rating_from_corrupt_payload_clamps_to_zero(self):
+        from src.services.library_catalog_service import LibraryEntry
+
+        entry = LibraryEntry.from_dict(
+            {
+                "path": "/photos/old.jpg",
+                "filename": "old.jpg",
+                "added_at": "2024-01-01T00:00:00+00:00",
+                "last_seen_mtime_ns": None,
+                "last_seen_size": None,
+                "status": "available",
+                "rating": "not-a-number",
+            }
+        )
+
+        assert entry.rating == 0

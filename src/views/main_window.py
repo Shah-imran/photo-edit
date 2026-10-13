@@ -392,6 +392,9 @@ class MainWindow(QMainWindow):
         self._filmstrip_view.favorite_toggled.connect(
             self._library_controller.set_entry_favorite
         )
+        self._filmstrip_view.rating_changed.connect(
+            self._library_controller.set_entry_rating
+        )
         self._library_view.create_library_requested.connect(
             self._on_create_library_requested
         )

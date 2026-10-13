@@ -269,6 +269,16 @@ class LibraryController(QObject):
         self._emit_libraries()
         self._rebuild_entries_for_current_library()
 
+    def set_entry_rating(self, file_path: str, rating: int) -> None:
+        """Update the 0-5 star rating for the current library and refresh its views."""
+        if not self._current_library_id or not file_path:
+            return
+        self._catalog_service.set_entry_rating(
+            self._current_library_id, file_path, rating
+        )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
     def referenced_adjustment_preview_cache_keys(self) -> set[str]:
         return self._catalog_service.referenced_adjustment_preview_cache_keys()
 
@@ -320,6 +330,7 @@ class LibraryController(QObject):
             "placeholder": "missing" if entry.status != "available" else "loading",
             "added_at": entry.added_at,
             "favorite": entry.favorite,
+            "rating": entry.rating,
         }
 
         if entry.status != "available":
@@ -401,6 +412,7 @@ class LibraryController(QObject):
             "placeholder": None,
             "added_at": entry.added_at,
             "favorite": entry.favorite,
+            "rating": entry.rating,
         }
         if library_id == self._current_library_id:
             self.entry_thumbnail_updated.emit(file_path, payload)

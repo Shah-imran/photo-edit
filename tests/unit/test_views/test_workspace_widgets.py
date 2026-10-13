@@ -95,6 +95,110 @@ def test_filmstrip_filters_favorites_and_sorts_by_name(qapp, qtbot):
     assert strip._list.item(0).data(Qt.ItemDataRole.UserRole).endswith("zebra.jpg")
 
 
+def test_filmstrip_favorite_only_tooltip_and_text_are_unchanged(qapp, qtbot):
+    """Regression guard: adding ratings must not alter the existing
+    favorite-only item text/tooltip behavior in any way."""
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    favorite = _entry("C:/photos/zebra.jpg")
+    favorite["favorite"] = True
+    strip.set_entries([favorite])
+
+    item = strip._item_by_path["C:/photos/zebra.jpg"]
+    assert item.text() == "★"
+    assert item.toolTip() == "Favorite\nC:/photos/zebra.jpg"
+    assert item.data(Qt.ItemDataRole.UserRole + 2) is True
+
+
+def test_filmstrip_rating_appears_in_tooltip_only_and_leaves_text_alone(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    rated = _entry("C:/photos/zebra.jpg")
+    rated["rating"] = 3
+    strip.set_entries([rated, _entry("C:/photos/alpha.jpg")])
+
+    rated_item = strip._item_by_path["C:/photos/zebra.jpg"]
+    unrated_item = strip._item_by_path["C:/photos/alpha.jpg"]
+
+    # Rating never touches the item TEXT -- that's reserved for favorite.
+    assert rated_item.text() == ""
+    assert rated_item.toolTip() == "Rating: ★★★☆☆\nC:/photos/zebra.jpg"
+    assert rated_item.data(Qt.ItemDataRole.UserRole + 3) == 3
+
+    # A rating of 0 adds nothing to the tooltip.
+    assert unrated_item.toolTip() == "C:/photos/alpha.jpg"
+    assert unrated_item.data(Qt.ItemDataRole.UserRole + 3) == 0
+
+
+def test_filmstrip_favorite_and_rating_both_show_in_tooltip_together(qapp, qtbot):
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    entry = _entry("C:/photos/zebra.jpg")
+    entry["favorite"] = True
+    entry["rating"] = 5
+    strip.set_entries([entry])
+
+    item = strip._item_by_path["C:/photos/zebra.jpg"]
+    assert item.text() == "★"
+    assert item.toolTip() == "Favorite\nRating: ★★★★★\nC:/photos/zebra.jpg"
+
+
+def test_filmstrip_context_menu_set_rating_emits_rating_changed(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    strip.set_entries([_entry("C:/photos/one.jpg")])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            submenu = action.menu()
+            if submenu is None:
+                continue
+            for sub_action in submenu.actions():
+                if sub_action.text() == "★★★ (3)":
+                    return sub_action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.rating_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert blocker.args == ["C:/photos/one.jpg", 3]
+
+
+def test_filmstrip_context_menu_no_rating_emits_zero(qapp, qtbot):
+    from unittest.mock import patch
+
+    from PyQt6.QtWidgets import QMenu
+
+    strip = FilmstripView()
+    qtbot.addWidget(strip)
+    entry = _entry("C:/photos/one.jpg")
+    entry["rating"] = 4
+    strip.set_entries([entry])
+    item = strip._item_by_path["C:/photos/one.jpg"]
+
+    def fake_exec(self, *_args, **_kwargs):
+        for action in self.actions():
+            submenu = action.menu()
+            if submenu is None:
+                continue
+            for sub_action in submenu.actions():
+                if sub_action.text() == "No Rating":
+                    return sub_action
+        return None
+
+    with patch.object(QMenu, "exec", fake_exec):
+        with qtbot.waitSignal(strip.rating_changed) as blocker:
+            strip._show_context_menu(strip._list.visualItemRect(item).center())
+
+    assert blocker.args == ["C:/photos/one.jpg", 0]
+
+
 def test_workspace_header_emits_primary_actions(qapp, qtbot):
     header = WorkspaceHeader()
     qtbot.addWidget(header)
