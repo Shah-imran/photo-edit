@@ -137,6 +137,8 @@ class MainWindow(QMainWindow):
         self._healing_toolbar = HealingToolbar()
         self._healing_toolbar.hide()
         self._healing_overlay_signal_connected = False
+        # Background "Export with Previous" jobs, kept referenced until done.
+        self._export_tasks: list = []
         self._filmstrip_view = FilmstripView()
         self._workspace_header = WorkspaceHeader()
         self._library_controller = LibraryController(
@@ -895,14 +897,16 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage("No image to export", 2000)
             return
         
-        # Get the full-resolution image, not whatever preview frame is
-        # currently cached (which may be a lower-resolution proxy if a
-        # slider is still being dragged).
-        image = self._image_controller.get_export_image()
-        if image is None:
+        # Start the full-resolution render in the background now; the
+        # dialog opens immediately and Export waits for it only if the user
+        # is faster than the render. (It used to render synchronously here,
+        # freezing the window before the dialog appeared.)
+        render = self._image_controller.start_export_render()
+        output_size = self._image_controller.get_output_size()
+        if render is None or output_size is None:
             self._status_bar.showMessage("No image to export", 2000)
             return
-        
+
         # Get default path from current file
         default_path = self._image_controller.image_model.file_path or ""
         if default_path:
@@ -919,10 +923,11 @@ class MainWindow(QMainWindow):
 
         # Show export dialog
         dialog = ExportDialog(
-            image,
-            default_path,
+            default_path=default_path,
             settings_service=self._settings_service,
             parent=self,
+            render=render,
+            image_size=output_size,
         )
         if dialog.exec():
             export_path = dialog.get_export_path()
@@ -941,11 +946,6 @@ class MainWindow(QMainWindow):
         intended UX, not a bug.
         """
         if not self._image_controller.has_image():
-            self._status_bar.showMessage("No image to export", 2000)
-            return
-
-        image = self._image_controller.get_export_image()
-        if image is None:
             self._status_bar.showMessage("No image to export", 2000)
             return
 
@@ -977,20 +977,40 @@ class MainWindow(QMainWindow):
         resize = (width, height) if width is not None and height is not None else None
 
         export_service = ExportService()
-        success = export_service.export_image(
-            image,
-            default_path,
-            format=options.get("format"),
-            quality=options.get("quality"),
-            resize=resize,
-            preserve_aspect=options.get("preserve_aspect", True),
-        )
 
-        if success:
-            self._settings_service.set_last_export_dir(default_path)
-            self._status_bar.showMessage(f"Exported to: {default_path}", 3000)
-        else:
-            QMessageBox.critical(self, "Export Failed", "Failed to export image.")
+        def write(image):
+            return export_service.export_image(
+                image,
+                default_path,
+                format=options.get("format"),
+                quality=options.get("quality"),
+                resize=resize,
+                preserve_aspect=options.get("preserve_aspect", True),
+            )
+
+        # Render and write entirely in the background; the user can keep
+        # editing (the edit was snapshotted when the export started).
+        task = self._image_controller.start_export_render(post=write)
+        if task is None:
+            self._status_bar.showMessage("No image to export", 2000)
+            return
+        self._export_tasks.append(task)
+        self._status_bar.showMessage(f"Exporting {Path(default_path).name}…")
+
+        def finished(success):
+            self._export_tasks.remove(task)
+            if success:
+                self._settings_service.set_last_export_dir(default_path)
+                self._status_bar.showMessage(f"Exported to: {default_path}", 3000)
+            else:
+                QMessageBox.critical(self, "Export Failed", "Failed to export image.")
+
+        def failed(message):
+            self._export_tasks.remove(task)
+            QMessageBox.critical(self, "Export Failed", f"Failed to export image: {message}")
+
+        task.finished.connect(finished)
+        task.failed.connect(failed)
 
     def _undo(self):
         """Handle undo action."""

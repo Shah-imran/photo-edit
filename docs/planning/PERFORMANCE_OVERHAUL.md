@@ -168,3 +168,10 @@ Updated as phases land; see git history for detail.
   1.0 s -> 50 ms, tonal 1.5 s -> 37 ms. All stages meet their budgets.
   Also fixed: requests older than 1 s were silently dropped after
   rendering, so any render slower than a second never appeared.
+- **2026-10-17 Phase 4 (export)** - the Export dialog opens immediately
+  (10 ms, was a multi-second freeze) while a snapshot of the edit renders
+  at full resolution on a background thread (`src/processing/export_render.py`);
+  Export waits for it only if clicked first, with the window still
+  responsive. Writing the file also runs in the background, and Export
+  with Previous runs entirely in the background with a status-bar
+  message. Real CR3 with 11 adjustments: 4.3 s end to end, no UI freeze.

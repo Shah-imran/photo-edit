@@ -47,6 +47,7 @@ from src.commands.adjustment_commands import (
     CombinedAdjustmentCommand,
 )
 from src.processing.display_frame import DisplayFrame
+from src.processing.export_render import start_export_render
 from src.processing.processing_worker import ProcessingWorker
 from src.utils.curve_math import DEFAULT_CURVE_POINTS, is_identity_curve, normalize_points
 from src.utils.debouncer import ThrottledDebouncer
@@ -907,6 +908,23 @@ class ImageController(QObject):
         if apply_crop and self._crop_params:
             result = self._crop_processor.process(result, **self._crop_params)
         return result
+
+    def start_export_render(self, post=None, apply_crop: bool = True):
+        """Start a full-resolution render of the current edit on a
+        background thread and return its ``BackgroundTask`` (or None
+        without an image).
+
+        The edit is snapshotted now, so later slider moves don't change
+        what gets exported. Produces the same pixels as
+        :meth:`get_export_image`, without blocking the UI thread.
+        """
+        original = self._image_model.get_original_image()
+        if not self.has_image() or original is None:
+            return None
+        return start_export_render(
+            original, self._render_kwargs(), apply_crop=apply_crop, post=post,
+            parent=self,
+        )
 
     def refresh_view(self) -> None:
         """Show the committed adjustment state.

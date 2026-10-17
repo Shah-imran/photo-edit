@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from src.processing.export_render import BackgroundTask
 from src.services.export_service import ExportService
 from src.services.settings_service import SettingsService
 
@@ -80,10 +81,12 @@ class ExportDialog(QDialog):
 
     def __init__(
         self,
-        image,
+        image=None,
         default_path: str = "",
         parent=None,
         settings_service: Optional[SettingsService] = None,
+        render=None,
+        image_size: Optional[tuple] = None,
     ):
         """Initialize the export dialog.
 
@@ -99,14 +102,26 @@ class ExportDialog(QDialog):
             parent: Parent widget
             settings_service: Optional SettingsService for persisting the
                 last-used export directory.
+            render: Instead of ``image``, a running full-resolution render
+                (``BackgroundTask``, see ``ImageController.start_export_render``).
+                The dialog opens immediately; Export waits for the render
+                if it has not finished yet, without freezing the window.
+            image_size: ``(width, height)`` of the output; required with
+                ``render``.
         """
         super().__init__(parent)
         self._image = image
-        # Pixel dimensions read once from the array's shape (H, W, C) --
-        # NOT PIL's .width/.height, which this array does not have. See
-        # docs/planning/implementation-notes/2026-10-13-export-dialog-dimension-crash-fix.md.
-        self._image_width = int(image.shape[1])
-        self._image_height = int(image.shape[0])
+        self._render = render
+        if image is not None:
+            # Pixel dimensions read once from the array's shape (H, W, C) --
+            # NOT PIL's .width/.height, which this array does not have. See
+            # docs/planning/implementation-notes/2026-10-13-export-dialog-dimension-crash-fix.md.
+            self._image_width = int(image.shape[1])
+            self._image_height = int(image.shape[0])
+        else:
+            if render is None or image_size is None:
+                raise ValueError("ExportDialog needs an image, or a render and image_size")
+            self._image_width, self._image_height = (int(v) for v in image_size)
         self._default_path = default_path
         self._export_service = ExportService()
         self._settings_service = settings_service
@@ -203,6 +218,17 @@ class ExportDialog(QDialog):
         )
         info_label.setStyleSheet("color: #808080;")
         layout.addWidget(info_label)
+
+        # Background render progress (only when rendering asynchronously).
+        self._render_status = QLabel("")
+        self._render_status.setStyleSheet("color: #808080;")
+        layout.addWidget(self._render_status)
+        if self._render is not None:
+            self._render.finished.connect(lambda _image: self._update_render_status())
+            self._render.failed.connect(lambda _msg: self._update_render_status())
+            self._update_render_status()
+        else:
+            self._render_status.hide()
         
         # Buttons
         button_layout = QHBoxLayout()
@@ -221,6 +247,27 @@ class ExportDialog(QDialog):
         
         # Connect preset changes
         self._resize_combo.currentIndexChanged.connect(self._on_resize_preset_changed)
+
+    def _update_render_status(self) -> None:
+        if self._render is None:
+            return
+        if not self._render.is_done():
+            self._render_status.setText("Rendering full resolution in the background…")
+        elif self._render.error is not None:
+            self._render_status.setText(f"Render failed: {self._render.error}")
+        else:
+            self._render_status.setText("Full-resolution render ready")
+
+    def _export_source(self):
+        """The full-resolution image, waiting for the render if needed."""
+        if self._image is not None:
+            return self._image
+        image = self._render.wait(self, "Rendering full resolution…")
+        if image is None and self._render.error is not None:
+            QMessageBox.critical(
+                self, "Export Failed", f"Rendering failed: {self._render.error}"
+            )
+        return image
 
     def _apply_last_export_options(self):
         """Pre-populate widgets from the last-used export options, if any.
@@ -335,15 +382,26 @@ class ExportDialog(QDialog):
         if not confirm_overwrite_if_needed(self, path, self._settings_service):
             return
 
-        # Export
-        success = self._export_service.export_image(
-            self._image,
-            path,
-            format=format_name,
-            quality=quality,
-            resize=resize,
-            preserve_aspect=preserve_aspect
-        )
+        image = self._export_source()
+        if image is None:
+            return  # cancelled while rendering, or render failed (reported)
+
+        # Encode and write on a background thread too: a 24 MP JPEG/TIFF
+        # takes long enough to be felt on the UI thread.
+        export_service = self._export_service
+        save = BackgroundTask(
+            lambda: export_service.export_image(
+                image,
+                path,
+                format=format_name,
+                quality=quality,
+                resize=resize,
+                preserve_aspect=preserve_aspect,
+            ),
+            name="export_save",
+            parent=self,
+        ).start()
+        success = bool(save.wait(self, "Writing file…"))
 
         if success:
             if self._settings_service is not None:

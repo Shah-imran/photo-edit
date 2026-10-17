@@ -1,5 +1,6 @@
 """Unit tests for MainWindow._export_with_previous ("Export with Previous")."""
 
+from src.processing.export_render import BackgroundTask
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -58,10 +59,29 @@ def sample_image():
 
 
 def _make_has_image(main_window, sample_image):
-    """Patch image_controller so an "image" is considered loaded."""
+    """Patch image_controller so an "image" is considered loaded.
+
+    The full-resolution render is a real background task over
+    ``sample_image``, so these tests exercise the asynchronous flow.
+    """
     main_window._image_controller.has_image = MagicMock(return_value=True)
-    main_window._image_controller.get_export_image = MagicMock(return_value=sample_image)
+    main_window._image_controller.get_export_image = MagicMock(
+        side_effect=AssertionError("export must not render on the UI thread")
+    )
+
+    def start_export_render(post=None, apply_crop=True):
+        return BackgroundTask(
+            lambda: post(sample_image) if post is not None else sample_image
+        ).start()
+
+    main_window._image_controller.start_export_render = start_export_render
     main_window._image_controller.image_model.file_path = None
+
+
+def _export_and_wait(main_window, qtbot):
+    """Run Export with Previous and wait for its background job."""
+    main_window._export_with_previous()
+    qtbot.waitUntil(lambda: not main_window._export_tasks, timeout=5000)
 
 
 class TestExportWithPreviousNoPreviousOptions:
@@ -100,7 +120,7 @@ class TestExportWithPreviousWithOptions:
         main_window._settings_service.set_last_export_options(options)
         return options
 
-    def test_exports_without_showing_dialog(self, main_window, sample_image, tmp_path):
+    def test_exports_without_showing_dialog(self, main_window, sample_image, tmp_path, qtbot):
         _make_has_image(main_window, sample_image)
         self._set_options(main_window)
 
@@ -111,14 +131,12 @@ class TestExportWithPreviousWithOptions:
             mock_service_instance.export_image.return_value = True
             mock_service_cls.return_value = mock_service_instance
 
-            main_window._export_with_previous()
+            _export_and_wait(main_window, qtbot)
 
         mock_dialog_cls.assert_not_called()
         mock_service_instance.export_image.assert_called_once()
 
-    def test_passes_stored_options_to_export_service(
-        self, main_window, sample_image, tmp_path
-    ):
+    def test_passes_stored_options_to_export_service(self, main_window, sample_image, tmp_path, qtbot):
         _make_has_image(main_window, sample_image)
         self._set_options(main_window, width=100, height=200, quality=33, preserve_aspect=False)
 
@@ -128,7 +146,7 @@ class TestExportWithPreviousWithOptions:
             mock_service_instance.export_image.return_value = True
             mock_service_cls.return_value = mock_service_instance
 
-            main_window._export_with_previous()
+            _export_and_wait(main_window, qtbot)
 
         _, kwargs = mock_service_instance.export_image.call_args
         assert kwargs['format'] == "JPEG"
@@ -136,9 +154,7 @@ class TestExportWithPreviousWithOptions:
         assert kwargs['resize'] == (100, 200)
         assert kwargs['preserve_aspect'] is False
 
-    def test_overwrite_confirmation_declined_aborts_export(
-        self, main_window, sample_image
-    ):
+    def test_overwrite_confirmation_declined_aborts_export(self, main_window, sample_image, qtbot):
         _make_has_image(main_window, sample_image)
         self._set_options(main_window)
 
@@ -147,13 +163,11 @@ class TestExportWithPreviousWithOptions:
             mock_service_instance = MagicMock()
             mock_service_cls.return_value = mock_service_instance
 
-            main_window._export_with_previous()
+            _export_and_wait(main_window, qtbot)
 
         mock_service_instance.export_image.assert_not_called()
 
-    def test_success_updates_status_bar_and_last_export_dir(
-        self, main_window, sample_image
-    ):
+    def test_success_updates_status_bar_and_last_export_dir(self, main_window, sample_image, qtbot):
         _make_has_image(main_window, sample_image)
         self._set_options(main_window)
 
@@ -165,12 +179,12 @@ class TestExportWithPreviousWithOptions:
             mock_service_instance.export_image.return_value = True
             mock_service_cls.return_value = mock_service_instance
 
-            main_window._export_with_previous()
+            _export_and_wait(main_window, qtbot)
 
         mock_set_dir.assert_called_once()
         assert any("Exported to" in str(call.args[0]) for call in mock_status.call_args_list)
 
-    def test_failure_shows_critical_message_box(self, main_window, sample_image):
+    def test_failure_shows_critical_message_box(self, main_window, sample_image, qtbot):
         _make_has_image(main_window, sample_image)
         self._set_options(main_window)
 
@@ -181,6 +195,6 @@ class TestExportWithPreviousWithOptions:
             mock_service_instance.export_image.return_value = False
             mock_service_cls.return_value = mock_service_instance
 
-            main_window._export_with_previous()
+            _export_and_wait(main_window, qtbot)
 
         mock_msgbox.critical.assert_called_once()
