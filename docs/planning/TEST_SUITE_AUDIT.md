@@ -77,25 +77,31 @@ The suite ran the code but asserted the wrong things.
   debounce behaviour tests into `tests/unit/test_processing/test_debouncer.py`.
 - **Regression tests** for every bug in section 1.
 
-## 4. Next steps (not done yet)
+## 4. Next steps
 
-1. **Retire the synchronous controller path.** Move the 147
-   `use_threading=False` controller tests onto `InlineProcessingWorker`
-   (outcome assertions), then delete the sync branches in
-   `ImageController` (`apply_adjustments` sync pipeline,
-   `CombinedAdjustmentCommand` use, sync `restore_adjustment_state`).
-   One render path means one thing to test.
+Done 2026-10-17 (after the first pass):
+- **Synchronous controller path retired.** `use_threading=False` now runs
+  the production path with `SynchronousProcessingWorker`
+  (`src/processing/synchronous_worker.py`); ~230 lines of duplicate
+  synchronous flows removed from `ImageController`. The 147 non-threaded
+  controller tests now exercise the code the app runs.
+- **One develop pipeline** (`src/processing/pipeline.py`) for every render
+  entry point, pinned by `tests/unit/test_processing/test_pipeline.py`.
+- **Per-stage RAW goldens** + export round trip
+  (`tests/integration/test_raw_stage_goldens.py`).
+- **UI placement checks** as geometry (`tests/ui/test_tool_drawer.py`).
+- **Windows Delete from Disk** fixed.
+
+Still open:
+1. **Remove the unused command classes** `AdjustmentCommand`,
+   `CombinedAdjustmentCommand`, `ImageStateChangeCommand` (nothing in the
+   app uses them now). First move their stage-ordering tests (crop after
+   straighten, mask before crop, healing before exposure) to
+   `test_pipeline.py`, then delete the classes and the rest of their tests.
 2. **Decouple UI tests from private fields**: drive widgets through their
-   public signals and read results through public accessors (as
-   `ImageView.get_display_image()` now allows).
+   public signals and read results through public accessors.
 3. **Decide on dead modules** (`project_model.py`, `adjustment_layer.py`):
    delete with their tests, or wire them in.
-4. **More goldens**: one per develop panel (single-adjustment recipes) so
-   a regression points at the stage that caused it; add an export
-   round-trip golden.
-5. **UI placement checks** once the placement spec exists (Phase 7):
-   assert tool positions/visibility from widget geometry.
-6. Fix the two Windows "Delete from Disk" failures (file still held open).
 
 ## 5. How to run
 

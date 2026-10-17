@@ -18,12 +18,12 @@ from src.processors.crop_processor import CropProcessor
 from src.processors.healing_processor import HealingProcessor
 from src.commands.adjustment_commands import (
     AdjustmentStateCommand,
-    CombinedAdjustmentCommand,
 )
 from src.processing.display_frame import DisplayFrame
 from src.processing.pipeline import shared_pipeline
 from src.processing.export_render import start_export_render
 from src.processing.processing_worker import ProcessingWorker
+from src.processing.synchronous_worker import SynchronousProcessingWorker
 from src.utils.curve_math import DEFAULT_CURVE_POINTS, is_identity_curve, normalize_points
 from src.utils.debouncer import ThrottledDebouncer
 from src.utils.image_extensions import open_image_file_dialog_filter
@@ -272,7 +272,11 @@ class ImageController(QObject):
         self._history_service = history_service or HistoryService()
         self._settings_service = settings_service
         self._use_threading = use_threading
-        self._worker_factory = worker_factory or ProcessingWorker
+        # use_threading=False runs the same render path with a worker that
+        # renders on the calling thread (no separate synchronous code path).
+        if worker_factory is None:
+            worker_factory = ProcessingWorker if use_threading else SynchronousProcessingWorker
+        self._worker_factory = worker_factory
         
         # Synchronous renders (export, non-threaded mode) use the shared
         # develop pipeline; the per-stage attributes alias its processors.
@@ -369,13 +373,12 @@ class ImageController(QObject):
         self._tool_preview_timer.timeout.connect(self._submit_tool_quality_preview)
         self._image_view.zoom_changed.connect(self._on_view_zoom_changed)
 
-        if use_threading:
-            self._setup_async_processing()
+        self._setup_async_processing(debounce=use_threading)
         
         # Connect signals
         self._connect_signals()
 
-    def _setup_async_processing(self) -> None:
+    def _setup_async_processing(self, debounce: bool = True) -> None:
         """Set up asynchronous processing components.
 
         When a ``SettingsService`` is present and has stored proxy-size
@@ -420,10 +423,12 @@ class ImageController(QObject):
         self._final_processing_worker.start()
         
         # Max-performance profile: throttle previews to smooth frame cadence
-        # and debounce to consolidate final pause events.
-        self._debouncer = ThrottledDebouncer(throttle_ms=16, debounce_ms=50)
-        self._debouncer.throttled.connect(self._on_throttled_adjustment)
-        self._debouncer.debounced.connect(self._on_debounced_adjustment)
+        # and debounce to consolidate final pause events. (Without threads
+        # every change renders at once, so there is nothing to throttle.)
+        if debounce:
+            self._debouncer = ThrottledDebouncer(throttle_ms=16, debounce_ms=50)
+            self._debouncer.throttled.connect(self._on_throttled_adjustment)
+            self._debouncer.debounced.connect(self._on_debounced_adjustment)
 
     def _connect_signals(self):
         """Connect view signals to controller methods."""
@@ -1053,46 +1058,8 @@ class ImageController(QObject):
         if not self.has_image():
             return
 
-        if self._renders_async():
-            # Render in the background; the synchronous full-size render
-            # below froze the window for seconds on every photo switch.
-            self._image_model.reset_to_original()
-            self.refresh_view()
-            return
-
-        has_changes = (
-            # Compared against each key's own default (not a bare 0.0)
-            # because "scale" (Geometry) defaults to 100.0, not 0.0 --
-            # see docs/planning/implementation-notes/
-            # 2026-10-13-geometry-processor.md section 2.
-            any(
-                normalized[key] != default
-                for key, default in self._ADJUSTMENT_DEFAULTS.items()
-            )
-            or not is_identity_curve(curve_points)
-            or not is_identity_curve(red_curve_points)
-            or not is_identity_curve(green_curve_points)
-            or not is_identity_curve(blue_curve_points)
-            or any(value != 0.0 for value in hsl_values.values())
-            or any(
-                color_grading_values.get(key, 0.0) != default
-                for key, default in self._COLOR_GRADING_DEFAULTS.items()
-            )
-            or not self._is_identity_crop(crop_values)
-            or bool(mask_values)
-            or bool(heal_spots_values)
-        )
-        if not has_changes:
-            self._image_model.reset_to_original()
-            self.refresh_view()
-            return
-
-        original = self._image_model.get_original_image()
-        if original is None:
-            return
-
-        result = self._pipeline.render(original, **self._render_kwargs())
-        self._image_model.current_image = result
+        # Render through the worker (the background one when threaded).
+        self._image_model.reset_to_original()
         self.refresh_view()
 
     def reset_to_original(self) -> None:
@@ -1362,81 +1329,19 @@ class ImageController(QObject):
             # on_heal_spots_changed) to explicitly clear it.
             self._healing_params = healing_params
 
-        if self._use_threading and self._processing_worker is not None:
-            self._pending_final_request_id = -1
-            if add_to_history:
-                # A discrete edit (crop/mask/heal Apply, a preset): show the
-                # quality preview and record a settings-only undo step now.
-                self._tool_preview_timer.stop()
-                self._pending_tool_overrides = None
-                self._request_render(interactive=False)
-                self._commit_pending_history()
-                self._schedule_detail_render()
-            else:
-                self._request_render(interactive=True)
+        if not self._renders_async():
             return
-
+        self._pending_final_request_id = -1
         if add_to_history:
-            # Reuse CombinedAdjustmentCommand's existing pixel-computation
-            # chain to compute the new image, but run it directly (NOT via
-            # history_service.execute_command) so it never itself lands on
-            # the undo/redo stack -- only the state-aware
-            # AdjustmentStateCommand built below does. This avoids
-            # double-computing pixels (the expensive part) while still
-            # getting a state-aware command onto the real stack. See
-            # docs/planning/implementation-notes/
-            # 2026-10-13-state-aware-undo-redo.md.
-            command = CombinedAdjustmentCommand(
-                self._image_model,
-                exposure_params=self._exposure_params,
-                tonal_params=self._tonal_params,
-                color_params=self._color_params,
-                curve_params=self._curve_params,
-                wb_params=self._wb_params,
-                hsl_params=self._hsl_params,
-                color_grading_params=self._color_grading_params,
-                texture_params=self._texture_params,
-                clarity_params=self._clarity_params,
-                dehaze_params=self._dehaze_params,
-                vignette_params=self._vignette_params,
-                grain_params=self._grain_params,
-                sharpening_params=self._sharpening_params,
-                luminance_nr_params=self._luminance_nr_params,
-                color_nr_params=self._color_nr_params,
-                remove_ca_params=self._remove_ca_params,
-                defringe_params=self._defringe_params,
-                geometry_params=self._geometry_params,
-                straighten_params=self._straighten_params,
-                crop_params=self._crop_params,
-                mask_params=self._mask_params,
-                healing_params=self._healing_params,
-            )
-            command.execute()
-
-            previous_image = self._pending_history_previous_image
-            previous_state = self._pending_history_previous_state
-            self._pending_history_previous_image = None
-            self._pending_history_previous_state = None
-            if previous_image is not None and previous_state is not None:
-                state_command = AdjustmentStateCommand(
-                    controller=self,
-                    previous_image=previous_image,
-                    previous_state=previous_state,
-                    new_image=self._image_model.current_image,
-                    new_state=self.get_adjustment_state(),
-                )
-                self._history_service.execute_command(state_command)
+            # A discrete edit (crop/mask/heal Done, a preset): show the
+            # quality preview and record a settings-only undo step now.
+            self._tool_preview_timer.stop()
+            self._pending_tool_overrides = None
+            self._request_render(interactive=False)
+            self._commit_pending_history()
+            self._schedule_detail_render()
         else:
-            # Apply directly without history (for live preview)
-            original = self._image_model.get_original_image()
-            if original is None:
-                return
-
-            result = self._pipeline.render(original, **self._render_kwargs())
-
-            self._image_model.current_image = result
-
-        self.refresh_view()
+            self._request_render(interactive=True)
 
     def on_adjustments_changed(self, adjustments: Dict[str, float]) -> None:
         """Handle adjustment changes from the tools panel.
@@ -1536,7 +1441,7 @@ class ImageController(QObject):
         self._geometry_params = geometry_params
         self._straighten_params = straighten_params
 
-        if self._use_threading and self._debouncer is not None:
+        if self._debouncer is not None:
             # Use throttled + debounced async processing. The curve and
             # HSL mixer are not part of this signal's payload, so re-send
             # their currently stored params -- ThrottledDebouncer.call()
@@ -1567,27 +1472,8 @@ class ImageController(QObject):
                 'healing': self._healing_params,
             })
             mode = "debounced-threaded"
-        else:
-            # Fallback to synchronous processing
-            self.apply_adjustments(
-                exposure_params,
-                tonal_params,
-                color_params,
-                self._curve_params,
-                wb_params,
-                self._hsl_params,
-                self._color_grading_params,
-                self._texture_params,
-                self._clarity_params,
-                self._dehaze_params,
-                self._vignette_params,
-                self._grain_params,
-                self._sharpening_params,
-                self._luminance_nr_params,
-                self._color_nr_params,
-                self._remove_ca_params,
-                add_to_history=False,
-            )
+        elif self._renders_async():
+            self._request_render(interactive=True)
             mode = "sync-fallback"
 
         logger.info(
@@ -1643,7 +1529,7 @@ class ImageController(QObject):
             updated_curve_params[key] = normalized_points
         self._curve_params = updated_curve_params
 
-        if self._use_threading and self._debouncer is not None:
+        if self._debouncer is not None:
             self._debouncer.call({
                 'exposure': self._exposure_params,
                 'tonal': self._tonal_params,
@@ -1668,17 +1554,8 @@ class ImageController(QObject):
                 'mask': self._mask_params,
                 'healing': self._healing_params,
             })
-        else:
-            self.apply_adjustments(
-                self._exposure_params,
-                self._tonal_params,
-                self._color_params,
-                self._curve_params,
-                self._wb_params,
-                self._hsl_params,
-                self._color_grading_params,
-                add_to_history=False,
-            )
+        elif self._renders_async():
+            self._request_render(interactive=True)
 
     def on_hsl_changed(self, values: Dict[str, float]) -> None:
         """Handle HSL Color Mixer changes from the tools panel.
@@ -1702,7 +1579,7 @@ class ImageController(QObject):
 
         self._hsl_params = self._normalize_hsl_state(values)
 
-        if self._use_threading and self._debouncer is not None:
+        if self._debouncer is not None:
             self._debouncer.call({
                 'exposure': self._exposure_params,
                 'tonal': self._tonal_params,
@@ -1727,17 +1604,8 @@ class ImageController(QObject):
                 'mask': self._mask_params,
                 'healing': self._healing_params,
             })
-        else:
-            self.apply_adjustments(
-                self._exposure_params,
-                self._tonal_params,
-                self._color_params,
-                self._curve_params,
-                self._wb_params,
-                self._hsl_params,
-                self._color_grading_params,
-                add_to_history=False,
-            )
+        elif self._renders_async():
+            self._request_render(interactive=True)
 
     def on_color_grading_changed(self, values: Dict[str, float]) -> None:
         """Handle Color Grading changes from the tools panel.
@@ -1761,7 +1629,7 @@ class ImageController(QObject):
 
         self._color_grading_params = self._normalize_color_grading_state(values)
 
-        if self._use_threading and self._debouncer is not None:
+        if self._debouncer is not None:
             self._debouncer.call({
                 'exposure': self._exposure_params,
                 'tonal': self._tonal_params,
@@ -1786,17 +1654,8 @@ class ImageController(QObject):
                 'mask': self._mask_params,
                 'healing': self._healing_params,
             })
-        else:
-            self.apply_adjustments(
-                self._exposure_params,
-                self._tonal_params,
-                self._color_params,
-                self._curve_params,
-                self._wb_params,
-                self._hsl_params,
-                self._color_grading_params,
-                add_to_history=False,
-            )
+        elif self._renders_async():
+            self._request_render(interactive=True)
 
     def on_crop_changed(self, crop: Dict[str, float]) -> None:
         """Handle a crop-rectangle change.
@@ -1948,16 +1807,9 @@ class ImageController(QObject):
         if not self.has_image():
             return
         normalized = self._normalize_mask_state(mask)
-        if self._renders_async():
-            # Off the UI thread, on the preview proxy: a synchronous 24 MP
-            # render per mouse move made mask dragging unusable.
-            self._preview_tool_candidate(mask_params=normalized)
-            return
-        preview = self.get_export_image(mask_override=normalized)
-        if preview is not None:
-            self._image_view.set_image(
-                preview, emit_loaded=False, preserve_view_scale=True
-            )
+        # Off the UI thread when threaded, on the preview proxy: a
+        # synchronous 24 MP render per mouse move made mask dragging unusable.
+        self._preview_tool_candidate(mask_params=normalized)
 
     def preview_heal_spots(self, heal_spots: list) -> None:
         """Display an in-progress, UNCOMMITTED heal-spot list, live.
@@ -1994,16 +1846,9 @@ class ImageController(QObject):
         if not self.has_image():
             return
         normalized = self._normalize_heal_spots_state(heal_spots)
-        if self._renders_async():
-            self._preview_tool_candidate(
-                healing_params={"heal_spots": normalized} if normalized else {}
-            )
-            return
-        preview = self.get_export_image(heal_spots_override=normalized)
-        if preview is not None:
-            self._image_view.set_image(
-                preview, emit_loaded=False, preserve_view_scale=True
-            )
+        self._preview_tool_candidate(
+            healing_params={"heal_spots": normalized} if normalized else {}
+        )
 
     def preview_uncropped(self) -> Optional[tuple[int, int]]:
         """Show the full frame (every adjustment except crop) for crop
@@ -2015,22 +1860,12 @@ class ImageController(QObject):
         """
         if not self.has_image():
             return None
-        if self._renders_async():
-            original = self._image_model.get_original_image()
-            self._final_render_timer.stop()
-            self._tool_preview_timer.stop()
-            self._pending_tool_overrides = {"crop_params": {}}
-            self._request_render(interactive=False, display_only=True, crop_params={})
-            return original.shape[1], original.shape[0]
-        uncropped = self.get_export_image(apply_crop=False)
-        if uncropped is None:
-            return None
-        self._image_view.set_image(
-            uncropped, emit_loaded=False, preserve_view_scale=True
-        )
-        return uncropped.shape[1], uncropped.shape[0]
-
-    # -- Background render requests ---------------------------------------
+        original = self._image_model.get_original_image()
+        self._final_render_timer.stop()
+        self._tool_preview_timer.stop()
+        self._pending_tool_overrides = {"crop_params": {}}
+        self._request_render(interactive=False, display_only=True, crop_params={})
+        return original.shape[1], original.shape[0]
 
     def _render_kwargs(self, **overrides: Any) -> Dict[str, Any]:
         """Every committed ``_xxx_params`` dict, keyed by the
@@ -2064,11 +1899,10 @@ class ImageController(QObject):
         return kwargs
 
     def _renders_async(self) -> bool:
-        """True when renders go through the background preview worker."""
-        return (
-            self._use_threading
-            and self._processing_worker is not None
-            and hasattr(self._processing_worker, "submit_preview_request")
+        """True when a render worker is available (background when
+        threaded, synchronous otherwise)."""
+        return self._processing_worker is not None and hasattr(
+            self._processing_worker, "submit_preview_request"
         )
 
     def _request_render(
@@ -2313,10 +2147,12 @@ class ImageController(QObject):
             # Coalesce preview presents so conversion/paint cadence is bounded.
             if request_id < self._latest_presented_preview_id:
                 return
-            if frame.tier == "quality" and request_id != self._latest_request_id:
-                return
             self._pending_preview = (request_id, frame)
-            if not self._preview_present_timer.isActive():
+            if not self._use_threading:
+                # Synchronous rendering: no event loop runs between frames,
+                # so present at once (the 60 fps coalescing is for threads).
+                self._present_pending_preview()
+            elif not self._preview_present_timer.isActive():
                 self._present_pending_preview()
                 self._preview_present_timer.start()
             logger.info(
@@ -2396,7 +2232,7 @@ class ImageController(QObject):
         if not self.has_image():
             return
         
-        if self._use_threading and self._processing_worker is not None:
+        if self._renders_async():
             # Cancel any pending throttled/debounced preview events so release
             # goes straight to final processing.
             if self._debouncer is not None:
@@ -2418,8 +2254,7 @@ class ImageController(QObject):
             )
             return
         
-        # Synchronous fallback for tests/non-threaded callers only.
-        self.commit_adjustments()
+        self._commit_pending_history()
 
     def _has_pending_adjustment_changes(self) -> bool:
         """True if any current adjustment (including the tone curve) is non-default."""
@@ -2480,73 +2315,15 @@ class ImageController(QObject):
         )
 
     def commit_adjustments(self) -> None:
-        """Commit current adjustments to history.
-
-        Call this when user finishes adjusting (e.g., releases slider).
-
-        This is a third history-push site beyond the two the original
-        state-aware undo/redo design called out (the threaded
-        ``_commit_rendered_adjustment`` path and the synchronous fallback
-        inside ``apply_adjustments``) -- it is ``on_slider_released``'s own
-        synchronous fallback for non-threaded callers/tests. It is
-        converted to push a state-aware ``AdjustmentStateCommand`` the same
-        way, for the same reason: without this, undo through this path
-        would still only swap the pixel buffer. See
-        docs/planning/implementation-notes/
-        2026-10-13-state-aware-undo-redo.md.
-        """
+        """Commit the current adjustments as one undo step (settings only)
+        and show them at quality-preview size."""
         if not self.has_image():
             return
-
-        # Only commit if there are actual changes
-        if self._has_pending_adjustment_changes():
-            # Idempotent: a no-op if on_adjustments_changed/on_curve_changed/
-            # on_hsl_changed/on_color_grading_changed already captured the
-            # pre-gesture snapshot (the normal case); captures it here
-            # otherwise, so a direct call to commit_adjustments() still
-            # gets a correct "previous" pair.
-            self._capture_pending_history_state()
-
-            command = CombinedAdjustmentCommand(
-                self._image_model,
-                exposure_params=self._exposure_params.copy(),
-                tonal_params=self._tonal_params.copy(),
-                color_params=self._color_params.copy(),
-                curve_params=dict(self._curve_params),
-                wb_params=self._wb_params.copy(),
-                hsl_params=self._hsl_params.copy(),
-                color_grading_params=self._color_grading_params.copy(),
-                texture_params=self._texture_params.copy(),
-                clarity_params=self._clarity_params.copy(),
-                dehaze_params=self._dehaze_params.copy(),
-                vignette_params=self._vignette_params.copy(),
-                grain_params=self._grain_params.copy(),
-                sharpening_params=self._sharpening_params.copy(),
-                luminance_nr_params=self._luminance_nr_params.copy(),
-                color_nr_params=self._color_nr_params.copy(),
-                remove_ca_params=self._remove_ca_params.copy(),
-                defringe_params=self._defringe_params.copy(),
-                geometry_params=self._geometry_params.copy(),
-                straighten_params=self._straighten_params.copy(),
-                crop_params=self._crop_params.copy(),
-                mask_params=self._mask_params.copy(),
-                healing_params=self._healing_params.copy(),
-            )
-            command.execute()
-
-            previous_image = self._pending_history_previous_image
-            previous_state = self._pending_history_previous_state
-            self._pending_history_previous_image = None
-            self._pending_history_previous_state = None
-            if previous_image is not None and previous_state is not None:
-                state_command = AdjustmentStateCommand(
-                    controller=self,
-                    previous_image=previous_image,
-                    previous_state=previous_state,
-                    new_image=self._image_model.current_image,
-                    new_state=self.get_adjustment_state(),
-                )
-                self._history_service.execute_command(state_command)
+        # A no-op when an edit gesture already captured its "before" state.
+        self._capture_pending_history_state()
+        if self._renders_async():
+            self._request_render(interactive=False)
+        self._commit_pending_history()
 
     def _normalize_adjustment_state(
         self,

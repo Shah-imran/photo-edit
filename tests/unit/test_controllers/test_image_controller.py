@@ -670,6 +670,7 @@ class TestImageController:
 
         displayed = []
         controller._processing_worker = FakeWorker()
+        controller._final_processing_worker = None
         monkeypatch.setattr(controller._exposure_processor, "process", fail_if_called)
         monkeypatch.setattr(view, "set_image", fail_if_called)
         monkeypatch.setattr(
@@ -1040,8 +1041,9 @@ class TestImageController:
         )
 
         class FakeWorker:
+            # A newer request (71) has been submitted since frame 70.
             def is_latest_request(self, request_id):
-                return True
+                return request_id == 71
 
             def stop(self):
                 pass
@@ -1231,6 +1233,7 @@ class TestImageController:
 
         refresh_calls = []
         controller._processing_worker = FakeWorker()
+        controller._final_processing_worker = None
         monkeypatch.setattr(
             controller,
             "refresh_view",
