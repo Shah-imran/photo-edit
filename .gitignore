@@ -273,3 +273,7 @@ docs/.doctrees/
 ehthumbs.db
 Icon?
 Thumbs.db
+*.exe
+*.bin
+# Reverse-engineering workspace (installers, dumps, notes with vendor binaries)
+REA/
