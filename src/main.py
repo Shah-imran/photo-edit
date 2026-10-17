@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from src.utils.logging_config import configure_logging
 from src.utils.single_instance import SingleInstanceGuard
+from src.utils.stall_watchdog import UiStallWatchdog
 from src.views.main_window import MainWindow
 from src.views.theme import apply_theme
 
@@ -49,6 +50,10 @@ def main():
 
     window = MainWindow()
     window.show()
+
+    # Log any event-loop freeze over 50 ms as UI-STALL in photoedit.log.
+    watchdog = UiStallWatchdog(app)
+    watchdog.start()
 
     sys.exit(app.exec())
 
