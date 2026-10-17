@@ -15,9 +15,6 @@ def sample_linear_image(sample_image):
 class TestImageService:
     """Test cases for ImageService."""
 
-    def test_image_service_initialization(self):
-        service = ImageService()
-        assert service is not None
 
     def test_load_image_valid_file_returns_linear_array(self, sample_image_path):
         service = ImageService()

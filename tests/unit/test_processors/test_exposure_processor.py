@@ -14,6 +14,14 @@ def sample_linear_image(sample_image):
 
 
 @pytest.fixture
+def grey_ramp():
+    """sRGB-uniform grey ramp from black to white, in linear light."""
+    ramp = np.linspace(0.0, 1.0, 64, dtype=np.float32)
+    srgb = np.broadcast_to(ramp[None, :, None], (4, 64, 3)).copy()
+    return srgb_to_linear(srgb)
+
+
+@pytest.fixture
 def flat_grey_linear():
     """Flat 0.25 linear grey -- handy for checking exposure stop math."""
     return np.full((10, 10, 3), 0.25, dtype=np.float32)
@@ -21,10 +29,6 @@ def flat_grey_linear():
 
 class TestExposureProcessor:
     """Test cases for ExposureProcessor."""
-
-    def test_processor_initialization(self):
-        processor = ExposureProcessor()
-        assert processor is not None
 
     def test_process_no_adjustment_preserves_shape_and_dtype(self, sample_linear_image):
         processor = ExposureProcessor()
@@ -55,15 +59,18 @@ class TestExposureProcessor:
         result = processor.process(sample_linear_image, exposure=-1.0)
         assert float(result.mean()) <= original_mean
 
-    def test_contrast_increase_widens_distribution_in_srgb(self, sample_linear_image):
+    def test_contrast_increase_widens_distribution_in_srgb(self, grey_ramp):
         processor = ExposureProcessor()
-        result = processor.process(sample_linear_image, contrast=50.0)
-        assert result.shape == sample_linear_image.shape
+        result = processor.process(grey_ramp, contrast=50.0)
+        assert linear_to_srgb(result).std() > linear_to_srgb(grey_ramp).std() * 1.2
+        # Mid-grey (sRGB 0.5) is the pivot and stays put.
+        mid = srgb_to_linear(np.full((1, 1, 3), 0.5, dtype=np.float32))
+        np.testing.assert_allclose(processor.process(mid, contrast=50.0), mid, atol=2e-3)
 
-    def test_contrast_decrease_narrows_distribution_in_srgb(self, sample_linear_image):
+    def test_contrast_decrease_narrows_distribution_in_srgb(self, grey_ramp):
         processor = ExposureProcessor()
-        result = processor.process(sample_linear_image, contrast=-50.0)
-        assert result.shape == sample_linear_image.shape
+        result = processor.process(grey_ramp, contrast=-50.0)
+        assert linear_to_srgb(result).std() < linear_to_srgb(grey_ramp).std() * 0.8
 
     def test_contrast_lut_matches_reference_curve(self):
         """Fast contrast should stay visually equivalent to the reference math."""

@@ -573,13 +573,22 @@ class TestImageController:
         controller.cleanup()
 
     def test_fit_to_window(self, qapp, sample_image_path):
-        """Test fit to window."""
+        """Fit shows the whole image inside the viewport."""
         view = ImageView()
         controller = ImageController(view, use_threading=False)
         controller.load_image(sample_image_path)
-        
-        # Should not raise
+        view.set_zoom_factor(4.0)
+
         controller.fit_to_window()
+
+        viewport = view._scroll_area.viewport().size()
+        canvas = view._image_canvas.size()
+        assert view.get_zoom_factor() != 4.0
+        assert canvas.width() <= viewport.width()
+        assert canvas.height() <= viewport.height()
+        # ...and fills it along the limiting side (fit uses a 5% margin).
+        fill = max(canvas.width() / viewport.width(), canvas.height() / viewport.height())
+        assert fill >= 0.9
         controller.cleanup()
 
     def test_view_100_percent(self, qapp, sample_image_path):

@@ -42,4 +42,9 @@ include = ["src*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: real worker threads, real files or the full MainWindow",
+    "perf: wall-clock time budgets (skipped under coverage tracing)",
+    "raw: needs camera RAW files in test_images/ (skipped when absent)",
+]
 

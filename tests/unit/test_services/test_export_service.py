@@ -17,9 +17,6 @@ def sample_linear_image(sample_image):
 class TestExportService:
     """Test cases for ExportService."""
 
-    def test_service_initialization(self):
-        service = ExportService()
-        assert service is not None
 
     def test_export_jpeg(self, sample_linear_image, tmp_path):
         service = ExportService()

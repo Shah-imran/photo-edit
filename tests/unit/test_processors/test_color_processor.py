@@ -7,6 +7,12 @@ from src.processors.color_processor import ColorProcessor
 from src.utils.color_pipeline import pil_to_linear
 
 
+def _saturation(image):
+    """HSV saturation (max - min) / max per pixel."""
+    maxc = image.max(axis=-1)
+    return (maxc - image.min(axis=-1)) / np.maximum(maxc, 1e-6)
+
+
 @pytest.fixture
 def sample_linear_image(sample_image):
     return pil_to_linear(sample_image)
@@ -24,10 +30,6 @@ def saturated_linear():
 
 class TestColorProcessor:
     """Test cases for ColorProcessor."""
-
-    def test_processor_initialization(self):
-        processor = ColorProcessor()
-        assert processor is not None
 
     def test_process_no_adjustment_preserves_shape_and_dtype(self, sample_linear_image):
         processor = ColorProcessor()
@@ -48,27 +50,25 @@ class TestColorProcessor:
         assert result.shape == sample_linear_image.shape
         assert result.dtype == np.float32
 
-    def test_vibrance_increase_grows_low_saturation_more(self, saturated_linear):
+    def test_vibrance_increase_grows_low_saturation_more(self):
         processor = ColorProcessor()
-        # Mix a low- and a high-saturation pixel; vibrance+100 should
-        # boost the desaturated one more than the saturated one.
-        low_sat = np.full((1, 1, 3), 0.4, dtype=np.float32)
-        result_low = processor.process(low_sat, vibrance=100.0)
-        result_high = processor.process(saturated_linear, vibrance=100.0)
+        # A muted pixel (S=0.2) and a vivid one (S=0.9), same hue.
+        image = np.array([[[0.5, 0.45, 0.4], [0.5, 0.15, 0.05]]], dtype=np.float32)
 
-        # The very-saturated pixel barely changes; the flat grey pixel
-        # cannot gain saturation either (V=S boost is multiplied by
-        # (1-S), and S of pure grey is 0... but H is arbitrary so it
-        # stays grey). We just assert the function returns a sensible
-        # array; the relative-magnitude property is exercised by the
-        # numerical-correctness suite.
-        assert result_low.shape == low_sat.shape
-        assert result_high.shape == saturated_linear.shape
+        result = processor.process(image, vibrance=100.0)
 
-    def test_vibrance_decrease(self, sample_linear_image):
+        before = _saturation(image)
+        gain = _saturation(result) - before
+        assert gain[0, 0] > 0.0 and gain[0, 1] > 0.0
+        assert gain[0, 0] > 2.0 * gain[0, 1]
+
+    def test_vibrance_decrease_reduces_saturation(self):
         processor = ColorProcessor()
-        result = processor.process(sample_linear_image, vibrance=-50.0)
-        assert result.shape == sample_linear_image.shape
+        image = np.array([[[0.5, 0.45, 0.4], [0.5, 0.15, 0.05]]], dtype=np.float32)
+
+        result = processor.process(image, vibrance=-50.0)
+
+        assert np.all(_saturation(result) < _saturation(image))
 
     def test_combined_adjustments(self, sample_linear_image):
         processor = ColorProcessor()

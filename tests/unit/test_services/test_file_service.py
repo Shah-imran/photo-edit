@@ -8,10 +8,6 @@ from src.services.file_service import FileService
 class TestFileService:
     """Test cases for FileService class."""
 
-    def test_file_service_initialization(self):
-        """Test FileService can be initialized."""
-        service = FileService()
-        assert service is not None
 
     def test_get_image_files_from_directory(self, tmp_path):
         """Test getting image files from a directory."""

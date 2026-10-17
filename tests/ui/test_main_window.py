@@ -430,12 +430,19 @@ class TestUndoRedo:
         main_window._image_controller.load_image(sample_image_file)
         qtbot.wait(100)
         
-        # Ctrl+R should reset without crashing
+        main_window._image_controller.on_adjustments_changed({"exposure": 1.0})
+        main_window._image_controller.on_slider_released()
+        assert main_window._image_controller.get_adjustment_state()["exposure"] == 1.0
+
+        main_window.activateWindow()
         QTest.keyClick(
             main_window,
             Qt.Key.Key_R,
             Qt.KeyboardModifier.ControlModifier
         )
+
+        assert main_window._image_controller.get_adjustment_state()["exposure"] == 0.0
+        assert main_window._tools_panel.get_adjustments()["exposure"] == 0.0
 
 
 class TestLibraryPanel:

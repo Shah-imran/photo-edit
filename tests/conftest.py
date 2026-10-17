@@ -1,5 +1,7 @@
 """Shared pytest fixtures for PhotoEdit tests."""
 
+import sys
+
 import pytest
 from PIL import Image
 from pathlib import Path
@@ -76,3 +78,17 @@ def thumbnail_cache_service(thumbnail_cache_dir):
 def image_preview_cache_service(image_preview_cache_dir):
     """Per-test edited-preview cache service."""
     return LibraryImagePreviewCacheService(cache_dir=image_preview_cache_dir)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Mark tests/performance/* as ``perf`` and skip wall-clock budgets
+    under a line tracer (coverage), where timings are meaningless."""
+    for item in items:
+        if "performance" in item.path.parts:
+            item.add_marker(pytest.mark.perf)
+    if sys.gettrace() is None:
+        return
+    skip = pytest.mark.skip(reason="timing budgets are skipped under a tracer")
+    for item in items:
+        if "perf" in item.keywords:
+            item.add_marker(skip)

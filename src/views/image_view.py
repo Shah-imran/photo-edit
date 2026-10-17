@@ -380,6 +380,12 @@ class ImageView(QWidget):
             return None
         return self._pixmap.width(), self._pixmap.height()
 
+    def get_display_image(self) -> Optional[QImage]:
+        """The image currently on screen (before zoom), or None."""
+        if self._pixmap is None:
+            return None
+        return self._pixmap.toImage()
+
     def _base_size(self) -> tuple[int, int]:
         """Full-resolution size zoom is measured against."""
         if self._source_size is not None:

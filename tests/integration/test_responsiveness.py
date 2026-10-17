@@ -23,6 +23,8 @@ from src.utils import pixel_kernels
 from src.views.image_view import ImageView
 
 
+pytestmark = pytest.mark.integration
+
 UI_CALL_BUDGET_MS = 50.0
 
 

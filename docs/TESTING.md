@@ -3,6 +3,13 @@
 
 ---
 
+> **Current layout and rules (2026-10):** see
+> [planning/TEST_SUITE_AUDIT.md](planning/TEST_SUITE_AUDIT.md). In short:
+> test outcomes (pixels on screen, undo results, UI-thread time) on the
+> production render path; mark tiers with `integration`, `perf`, `raw`;
+> every develop stage must pass `tests/performance/test_stage_budgets.py`;
+> visual changes must be re-approved against `tests/fixtures/golden/`.
+
 ## 1. Testing Philosophy
 
 ### Core Principles

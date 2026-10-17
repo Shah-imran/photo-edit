@@ -20,6 +20,8 @@ import pytest
 
 from src.processing.processing_worker import ProcessingWorker
 
+pytestmark = pytest.mark.perf
+
 
 # stage name -> (worker processor attribute suffix, params, kind)
 # kind "point" = per-pixel operation, "spatial" = needs neighbourhoods.

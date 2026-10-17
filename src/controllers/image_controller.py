@@ -269,7 +269,8 @@ class ImageController(QObject):
         image_service: Optional[ImageService] = None,
         history_service: Optional[HistoryService] = None,
         settings_service: Optional[SettingsService] = None,
-        use_threading: bool = True
+        use_threading: bool = True,
+        worker_factory=None,
     ):
         """Initialize the ImageController.
         
@@ -282,6 +283,10 @@ class ImageController(QObject):
                 directories. When ``None`` the dialog uses an empty default,
                 preserving previous behavior.
             use_threading: Whether to use background threading for processing
+            worker_factory: Optional ``(**proxy_kwargs) -> ProcessingWorker``
+                used instead of ``ProcessingWorker``. Tests pass an inline
+                worker so the production (threaded) code path runs
+                deterministically without threads.
         """
         super().__init__()
         
@@ -291,6 +296,7 @@ class ImageController(QObject):
         self._history_service = history_service or HistoryService()
         self._settings_service = settings_service
         self._use_threading = use_threading
+        self._worker_factory = worker_factory or ProcessingWorker
         
         # Processors (for synchronous fallback / export)
         self._exposure_processor = ExposureProcessor()
@@ -432,13 +438,13 @@ class ImageController(QObject):
             )
 
         # Create and start processing worker
-        self._processing_worker = ProcessingWorker(
+        self._processing_worker = self._worker_factory(
             proxy_max_size=proxy_max_size,
             interactive_proxy_max_size=interactive_proxy_max_size,
         )
         self._processing_worker.preview_ready.connect(self._on_preview_ready)
         self._processing_worker.error_occurred.connect(self._on_processing_error)
-        self._final_processing_worker = ProcessingWorker(
+        self._final_processing_worker = self._worker_factory(
             proxy_max_size=proxy_max_size,
             interactive_proxy_max_size=interactive_proxy_max_size,
         )
