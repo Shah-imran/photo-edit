@@ -161,5 +161,20 @@ def test_editing_session_never_freezes_the_window(qtbot, window, photos):
     window._cancel_crop()
     qtbot.wait(300)
 
+    # Switching straight from one tool to another (each entry cancels the
+    # previous tool) used to re-render full size on the UI thread per hop.
+    for tool, enter in [
+        ("crop -> heal", window._enter_healing_mode),
+        ("heal -> mask", window._enter_mask_mode),
+        ("mask -> crop", window._enter_crop_mode),
+        ("crop -> mask", window._enter_mask_mode),
+    ]:
+        recorder.step = tool
+        enter()
+        qtbot.wait(250)
+    assert window._image_view.is_in_mask_mode()
+    window._cancel_mask()
+    qtbot.wait(300)
+
     recorder.stop()
     assert recorder.stalls == [], f"UI froze: {recorder.stalls}"

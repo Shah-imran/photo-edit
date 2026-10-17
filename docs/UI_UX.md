@@ -78,6 +78,57 @@ Accent (Active):          #005a9e (Darker blue)
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Placement spec: Lightroom reference (researched 2026-10-17)
+
+Source: Adobe, *Develop module basics* and *Keyboard shortcuts* for
+Lightroom Classic (helpx.adobe.com, updated Jul 2024). Every UI change is
+checked against this section (see docs/planning/PERFORMANCE_OVERHAUL.md,
+Phase 7).
+
+**Lightroom Classic Develop module, right panel, top to bottom**
+
+1. **Histogram** (with RGB values under the pointer, Smart Preview status).
+2. **Tool strip** directly under the Histogram: Crop Overlay, Remove
+   (heal/clone/content-aware), Red Eye Correction, Masking.
+   - Selecting a tool opens its options in a **tool drawer** directly
+     under the strip, inside the right panel; the adjustment panels stay
+     below it. Deselecting the tool (click it again, click Done, or pick
+     another tool) closes the drawer.
+   - A dot under a tool marks that it has edits on this photo.
+3. Adjustment panels (default order, user-reorderable): **Basic** (profile,
+   white balance, tone, presence), **Tone Curve**, **Color Mixer** (HSL /
+   Point Color), **Color Grading**, **Detail**, **Lens Blur**, **Lens
+   Corrections**, **Transform**, **Effects** (vignette, grain),
+   **Calibration**.
+4. **Previous / Sync / Reset** buttons at the bottom of the right panel.
+
+**Left panel:** Navigator, Presets, Snapshots, History, Collections; Copy /
+Paste buttons at its bottom. **Toolbar under the photo:** view mode,
+Before/After, zoom; shown/hidden with **T**. Tool options never live in
+the toolbar under the photo.
+
+**Shortcuts:** R Crop, Q Remove (spot removal), Shift+W open/close
+Masking, K brush, M gradient, W white-balance picker, Z / Space toggle
+Fit and 1:1, \ Before only, Ctrl+Shift+R reset all settings, Ctrl+Alt+R
+reset crop, Ctrl+0-9 open/close right panels, T show/hide toolbar.
+
+**Lightroom (desktop, non-Classic)** groups the same controls as Light,
+Color, Effects, Detail, Optics, Geometry (the names PhotoEdit uses), with
+the edit tools on the right edge. PhotoEdit follows Classic's placement
+of the tool strip and drawer, with Lightroom desktop's panel names.
+
+**PhotoEdit gaps against this spec (to fix in Phase 7)**
+
+| Area | Lightroom | PhotoEdit today |
+|---|---|---|
+| Tool options | Drawer under the tool strip, in the right panel | Separate Crop/Mask/Heal toolbars under the photo |
+| Mask controls | In the drawer, beside the mask list | 4 full-width sliders under the photo (shrinks the canvas) |
+| Tool toggle | Click the active tool again to close it | Only Apply/Cancel buttons |
+| Edit indicator | Dot under tools with edits | None |
+| Shortcuts | R, Q, Shift+W; Ctrl+Shift+R reset all | None for tools; Ctrl+R resets all |
+| Red Eye | In the tool strip | Not implemented |
+| Calibration, Lens Blur | Panels | Not implemented |
+
 ### Panel Organization
 - **Left Panel (Library)**: 250-300px width, collapsible
 - **Center (Image View)**: Flexible, takes remaining space
