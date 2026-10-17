@@ -221,10 +221,14 @@ class MainWindow(QMainWindow):
         # Editing workspace: canvas, local controls, then the active-library strip.
         layout.addWidget(self._image_view, 1)
         layout.addWidget(self._image_toolbar)
-        layout.addWidget(self._crop_toolbar)
-        layout.addWidget(self._mask_toolbar)
-        layout.addWidget(self._healing_toolbar)
         layout.addWidget(self._filmstrip_view)
+        # Crop/Heal/Mask options open in the right panel's tool drawer,
+        # under the tool strip (Lightroom layout, docs/UI_UX.md), so the
+        # photo keeps its full height while a tool is active.
+        drawer = self._tools_panel.tool_drawer
+        drawer.add_page("crop", self._crop_toolbar)
+        drawer.add_page("heal", self._healing_toolbar)
+        drawer.add_page("mask", self._mask_toolbar)
         
         # Left panel - Library
         self.library_dock = QDockWidget("Library", self)
@@ -351,6 +355,22 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._create_action("Toggle &Library Panel", self._toggle_library_panel, "F5"))
         view_menu.addAction(self._create_action("Toggle &Tools Panel", self._toggle_tools_panel, "F6"))
 
+        # Tools menu: Lightroom's tool shortcuts. Pressing a tool's key while
+        # it is active closes it (Done); Esc cancels.
+        tools_menu = menubar.addMenu("&Tools")
+        tools_menu.addAction(
+            self._create_action("&Crop", lambda: self._toggle_tool("crop"), "R")
+        )
+        tools_menu.addAction(
+            self._create_action("&Remove Spots", lambda: self._toggle_tool("heal"), "Q")
+        )
+        tools_menu.addAction(
+            self._create_action("&Masking", lambda: self._toggle_tool("mask"), "Shift+W")
+        )
+        tools_menu.addAction(
+            self._create_action("Cancel &Tool", self._cancel_active_tool, "Esc")
+        )
+
         help_menu = menubar.addMenu("&Help")
         help_menu.addAction(self._create_action("&About PhotoEdit", self._show_about))
 
@@ -472,18 +492,18 @@ class MainWindow(QMainWindow):
         self._tools_panel.color_grading_changed.connect(self._on_color_grading_changed)
         self._tools_panel.slider_released.connect(self._on_slider_released)
         self._tools_panel.profile_apply_requested.connect(self._apply_profile)
-        self._tools_panel.crop_tool_requested.connect(self._enter_crop_mode)
+        self._tools_panel.crop_tool_requested.connect(lambda: self._toggle_tool("crop"))
         self._crop_toolbar.apply_requested.connect(self._apply_crop)
         self._crop_toolbar.cancel_requested.connect(self._cancel_crop)
         self._crop_toolbar.aspect_ratio_changed.connect(self._on_crop_aspect_ratio_changed)
-        self._tools_panel.mask_tool_requested.connect(self._enter_mask_mode)
+        self._tools_panel.mask_tool_requested.connect(lambda: self._toggle_tool("mask"))
         self._mask_toolbar.apply_requested.connect(self._apply_mask)
         self._mask_toolbar.cancel_requested.connect(self._cancel_mask)
         self._mask_toolbar.remove_requested.connect(self._remove_mask)
         self._mask_toolbar.mask_type_changed.connect(self._on_mask_type_changed)
         self._mask_toolbar.invert_changed.connect(self._on_mask_invert_changed)
         self._mask_toolbar.adjustments_changed.connect(self._on_mask_adjustments_changed)
-        self._tools_panel.heal_tool_requested.connect(self._enter_healing_mode)
+        self._tools_panel.heal_tool_requested.connect(lambda: self._toggle_tool("heal"))
         self._healing_toolbar.apply_requested.connect(self._apply_healing)
         self._healing_toolbar.cancel_requested.connect(self._cancel_healing)
         self._healing_toolbar.remove_last_requested.connect(self._on_heal_remove_last)
@@ -1087,26 +1107,26 @@ class MainWindow(QMainWindow):
         self._crop_toolbar.reset_to_free()
         if overlay is not None:
             overlay.set_locked_aspect(None)
-        self._crop_toolbar.show()
-        self._image_toolbar.hide()
+        self._sync_tool_ui()
 
     def _apply_crop(self) -> None:
         """Commit the overlay's current rectangle via on_crop_changed."""
+        before = self._image_controller.get_adjustment_state()
         overlay = self._image_view.get_crop_overlay()
         if overlay is not None:
             rect = overlay.get_rect()
             self._image_controller.on_crop_changed(rect)
         self._image_view.exit_crop_mode()
-        self._crop_toolbar.hide()
-        self._image_toolbar.show()
+        self._sync_tool_ui()
         self._pre_crop_mode_adjustment_state = None
-        self._status_bar.showMessage("Crop applied", 2000)
+        # Only announce a real change (switching tools also commits).
+        if self._image_controller.get_adjustment_state() != before:
+            self._status_bar.showMessage("Crop applied", 2000)
 
     def _cancel_crop(self) -> None:
         """Exit crop mode without changing the committed crop state."""
         self._image_view.exit_crop_mode()
-        self._crop_toolbar.hide()
-        self._image_toolbar.show()
+        self._sync_tool_ui()
         self._pre_crop_mode_adjustment_state = None
         self._image_controller.refresh_view()
 
@@ -1151,21 +1171,22 @@ class MainWindow(QMainWindow):
         self._mask_toolbar.set_values(
             mask_type, invert, exposure, contrast, saturation, clarity
         )
-        self._mask_toolbar.show()
-        self._image_toolbar.hide()
+        self._sync_tool_ui()
 
     def _apply_mask(self) -> None:
         """Commit the overlay's geometry + toolbar's adjustments via
         ``on_mask_changed`` -- the ONE real, committed, undoable edit."""
+        before = self._image_controller.get_adjustment_state()
         overlay = self._image_view.get_mask_overlay()
         if overlay is not None:
             mask = overlay.get_geometry()
             mask.update(self._mask_toolbar.get_adjustments())
             self._image_controller.on_mask_changed(mask)
         self._image_view.exit_mask_mode()
-        self._mask_toolbar.hide()
-        self._image_toolbar.show()
-        self._status_bar.showMessage("Mask applied", 2000)
+        self._sync_tool_ui()
+        # Only announce a real change (switching tools also commits).
+        if self._image_controller.get_adjustment_state() != before:
+            self._status_bar.showMessage("Mask applied", 2000)
 
     def _cancel_mask(self) -> None:
         """Exit mask mode without committing.
@@ -1178,16 +1199,14 @@ class MainWindow(QMainWindow):
         preview-mode state to roll back.
         """
         self._image_view.exit_mask_mode()
-        self._mask_toolbar.hide()
-        self._image_toolbar.show()
+        self._sync_tool_ui()
         self._image_controller.refresh_view()
 
     def _remove_mask(self) -> None:
         """Commit clearing the mask (``on_mask_changed(None)``) and exit."""
         self._image_controller.on_mask_changed(None)
         self._image_view.exit_mask_mode()
-        self._mask_toolbar.hide()
-        self._image_toolbar.show()
+        self._sync_tool_ui()
         self._status_bar.showMessage("Mask removed", 2000)
 
     def _on_mask_type_changed(self, mask_type: str) -> None:
@@ -1226,24 +1245,51 @@ class MainWindow(QMainWindow):
     # -- Crop/Mask/Heal three-way mutual exclusion --------------------------
 
     def _exit_any_interactive_tool_mode(self) -> None:
-        """Cancel whichever of Crop/Mask/Heal mode is currently active.
+        """Close whichever of Crop/Mask/Heal is active, keeping its edit.
 
         Crop, Mask, and Heal can never be simultaneously active. Each
-        ``_enter_X_mode`` calls this FIRST, so entering any one of the
-        three tools while mid-edit on either of the OTHER two always
-        discards that other edit (never commits it) -- exactly like
-        clicking its own Cancel button would. A shared helper, rather
-        than three separate pairwise checks, keeps this DRY as a third
-        mode is added (see docs/planning/implementation-notes/
-        2026-10-13-healing-tool-ui.md section 5, which also refactors the
-        prior slice's own Crop<->Mask pairwise checks into this form).
+        ``_enter_X_mode`` calls this first. Like Lightroom, picking another
+        tool commits the current one (same as its Done button); only
+        Cancel or Esc discards.
         """
         if self._image_view.is_in_crop_mode():
-            self._cancel_crop()
+            self._apply_crop()
         if self._image_view.is_in_mask_mode():
-            self._cancel_mask()
+            self._apply_mask()
         if self._image_view.is_in_healing_mode():
-            self._cancel_healing()
+            self._apply_healing()
+
+    def _active_tool(self):
+        """"crop", "heal", "mask" or None, from the image view's mode."""
+        if self._image_view.is_in_crop_mode():
+            return "crop"
+        if self._image_view.is_in_healing_mode():
+            return "heal"
+        if self._image_view.is_in_mask_mode():
+            return "mask"
+        return None
+
+    def _sync_tool_ui(self) -> None:
+        """Show the active tool's drawer page and highlight its strip button."""
+        self._tools_panel.set_active_tool(self._active_tool())
+
+    def _toggle_tool(self, tool: str) -> None:
+        """Strip button / shortcut: open ``tool``, or close it (Done) if it
+        is already active -- Lightroom's click-again behaviour."""
+        if self._active_tool() == tool:
+            {"crop": self._apply_crop, "heal": self._apply_healing,
+             "mask": self._apply_mask}[tool]()
+            return
+        {"crop": self._enter_crop_mode, "heal": self._enter_healing_mode,
+         "mask": self._enter_mask_mode}[tool]()
+        self._sync_tool_ui()
+
+    def _cancel_active_tool(self) -> None:
+        """Esc: discard the active tool's uncommitted edit."""
+        tool = self._active_tool()
+        if tool is not None:
+            {"crop": self._cancel_crop, "heal": self._cancel_healing,
+             "mask": self._cancel_mask}[tool]()
 
     # -- Healing mode ---------------------------------------------------------
 
@@ -1278,19 +1324,20 @@ class MainWindow(QMainWindow):
             overlay.set_pending_mode("heal")
             overlay.set_pending_feather(0.3)
             overlay.set_pending_opacity(1.0)
-        self._healing_toolbar.show()
-        self._image_toolbar.hide()
+        self._sync_tool_ui()
 
     def _apply_healing(self) -> None:
         """Commit the overlay's full spot list via ``on_heal_spots_changed``
         -- the ONE real, committed, undoable edit."""
+        before = self._image_controller.get_adjustment_state()
         overlay = self._image_view.get_healing_overlay()
         if overlay is not None:
             self._image_controller.on_heal_spots_changed(overlay.get_spots())
         self._image_view.exit_healing_mode()
-        self._healing_toolbar.hide()
-        self._image_toolbar.show()
-        self._status_bar.showMessage("Healing applied", 2000)
+        self._sync_tool_ui()
+        # Only announce a real change (switching tools also commits).
+        if self._image_controller.get_adjustment_state() != before:
+            self._status_bar.showMessage("Healing applied", 2000)
 
     def _cancel_healing(self) -> None:
         """Exit healing mode without committing.
@@ -1303,8 +1350,7 @@ class MainWindow(QMainWindow):
         ``_cancel_mask``'s own trivial simplicity exactly.
         """
         self._image_view.exit_healing_mode()
-        self._healing_toolbar.hide()
-        self._image_toolbar.show()
+        self._sync_tool_ui()
         self._image_controller.refresh_view()
 
     def _on_heal_remove_last(self) -> None:

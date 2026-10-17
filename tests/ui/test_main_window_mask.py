@@ -112,7 +112,9 @@ class TestEnterMaskModeWithImage:
             "clarity": 0.0,
         }
         assert main_window._mask_toolbar.isVisible()
-        assert not main_window._image_toolbar.isVisible()
+        # Lightroom keeps the photo toolbar; the tool opens in the drawer.
+        assert main_window._image_toolbar.isVisible()
+        assert main_window._tools_panel.tool_drawer.isVisible()
 
     def test_initializes_overlay_and_toolbar_from_existing_mask(
         self, main_window, sample_image

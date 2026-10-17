@@ -11,7 +11,9 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QPushButton, QWidget
+from PyQt6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+
+from src.views.widgets.tool_drawer import drawer_buttons, drawer_page_qss
 
 # (label, ratio-or-None). "Free" (no lock) and "Original" (resolved at
 # runtime via set_original_ratio) are handled specially; the rest are
@@ -46,38 +48,27 @@ class CropToolbar(QFrame):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("cropToolbar")
-        self.setFixedHeight(44)
-        self.setStyleSheet(
-            """
-            QFrame#cropToolbar {
-                background: #202020;
-                border-top: 1px solid #343434;
-                border-bottom: 1px solid #343434;
-            }
-            QToolButton, QPushButton { min-width: 28px; min-height: 24px; padding: 2px 7px; }
-            """
-        )
+        # Lives in the right panel's tool drawer, under the tool strip (Lightroom layout; docs/UI_UX.md placement spec).
+        self.setStyleSheet(drawer_page_qss("cropToolbar"))
 
         self._original_ratio: Optional[float] = None
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 5, 10, 5)
-        layout.setSpacing(6)
-        layout.addStretch(1)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 10)
+        layout.setSpacing(8)
 
+        aspect_row = QHBoxLayout()
+        aspect_row.addWidget(QLabel("Aspect"))
         self._aspect_combo = QComboBox()
         self._aspect_combo.addItem(_FREE)
         self._aspect_combo.addItem(_ORIGINAL)
         for label, _ratio in _FIXED_PRESETS:
             self._aspect_combo.addItem(label)
-        layout.addWidget(self._aspect_combo)
+        aspect_row.addWidget(self._aspect_combo, 1)
+        layout.addLayout(aspect_row)
 
-        layout.addSpacing(8)
-        self._cancel_button = QPushButton("Cancel")
-        self._apply_button = QPushButton("Apply")
-        layout.addWidget(self._cancel_button)
-        layout.addWidget(self._apply_button)
-        layout.addStretch(1)
+        self._cancel_button, self._apply_button, buttons = drawer_buttons()
+        layout.addLayout(buttons)
 
         self._aspect_combo.currentTextChanged.connect(self._on_combo_changed)
         self._apply_button.clicked.connect(self.apply_requested)

@@ -96,7 +96,9 @@ class TestEnterCropModeWithImage:
         assert overlay is not None
         assert overlay.get_rect() == {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
         assert main_window._crop_toolbar.isVisible()
-        assert not main_window._image_toolbar.isVisible()
+        # Lightroom keeps the photo toolbar; the tool opens in the drawer.
+        assert main_window._image_toolbar.isVisible()
+        assert main_window._tools_panel.tool_drawer.isVisible()
 
     def test_uses_current_crop_state_as_initial_rect(self, main_window, sample_image):
         _make_has_image(main_window, sample_image)

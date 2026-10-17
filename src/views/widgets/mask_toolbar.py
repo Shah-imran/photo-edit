@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.views.widgets.adjustment_slider import AdjustmentSlider
+from src.views.widgets.tool_drawer import drawer_buttons, drawer_page_qss
 
 _LINEAR_LABEL = "Linear"
 _RADIAL_LABEL = "Radial"
@@ -68,41 +69,21 @@ class MaskToolbar(QFrame):
         super().__init__(parent)
         self.setObjectName("maskToolbar")
         self._suppress_signals = False
-        self.setStyleSheet(
-            """
-            QFrame#maskToolbar {
-                background: #202020;
-                border-top: 1px solid #343434;
-                border-bottom: 1px solid #343434;
-            }
-            QToolButton, QPushButton { min-width: 28px; min-height: 24px; padding: 2px 7px; }
-            QLabel { color: #e0e0e0; }
-            QCheckBox { color: #e0e0e0; }
-            """
-        )
+        # Lives in the right panel's tool drawer, under the tool strip (Lightroom layout; docs/UI_UX.md placement spec).
+        self.setStyleSheet(drawer_page_qss("maskToolbar"))
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 6, 10, 6)
+        outer.setContentsMargins(12, 8, 12, 10)
         outer.setSpacing(6)
 
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
-
         self._type_combo = QComboBox()
         self._type_combo.addItem(_LINEAR_LABEL)
         self._type_combo.addItem(_RADIAL_LABEL)
-        top_row.addWidget(self._type_combo)
-
+        top_row.addWidget(self._type_combo, 1)
         self._invert_checkbox = QCheckBox("Invert")
         top_row.addWidget(self._invert_checkbox)
-        top_row.addStretch(1)
-
-        self._remove_button = QPushButton("Remove Mask")
-        self._cancel_button = QPushButton("Cancel")
-        self._apply_button = QPushButton("Apply")
-        top_row.addWidget(self._remove_button)
-        top_row.addWidget(self._cancel_button)
-        top_row.addWidget(self._apply_button)
         outer.addLayout(top_row)
 
         self._exposure_slider = AdjustmentSlider(
@@ -128,6 +109,11 @@ class MaskToolbar(QFrame):
             self._clarity_slider,
         ):
             outer.addWidget(slider)
+
+        self._remove_button = QPushButton("Remove Mask")
+        self._cancel_button, self._apply_button, buttons = drawer_buttons()
+        buttons.insertWidget(0, self._remove_button)
+        outer.addLayout(buttons)
 
         self._type_combo.currentTextChanged.connect(self._on_type_changed)
         self._invert_checkbox.toggled.connect(self._on_invert_toggled)

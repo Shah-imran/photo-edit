@@ -23,9 +23,10 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from src.views.widgets.adjustment_slider import AdjustmentSlider
+from src.views.widgets.tool_drawer import drawer_buttons, drawer_page_qss
 
 _HEAL_LABEL = "Heal"
 _CLONE_LABEL = "Clone"
@@ -67,40 +68,20 @@ class HealingToolbar(QFrame):
         super().__init__(parent)
         self.setObjectName("healingToolbar")
         self._suppress_signals = False
-        self.setStyleSheet(
-            """
-            QFrame#healingToolbar {
-                background: #202020;
-                border-top: 1px solid #343434;
-                border-bottom: 1px solid #343434;
-            }
-            QToolButton, QPushButton { min-width: 28px; min-height: 24px; padding: 2px 7px; }
-            QLabel { color: #e0e0e0; }
-            """
-        )
+        # Lives in the right panel's tool drawer, under the tool strip (Lightroom layout; docs/UI_UX.md placement spec).
+        self.setStyleSheet(drawer_page_qss("healingToolbar"))
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 6, 10, 6)
+        outer.setContentsMargins(12, 8, 12, 10)
         outer.setSpacing(6)
 
-        top_row = QHBoxLayout()
-        top_row.setSpacing(8)
-
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode"))
         self._mode_combo = QComboBox()
         self._mode_combo.addItem(_HEAL_LABEL)
         self._mode_combo.addItem(_CLONE_LABEL)
-        top_row.addWidget(self._mode_combo)
-        top_row.addStretch(1)
-
-        self._remove_last_button = QPushButton("Remove Last")
-        self._clear_all_button = QPushButton("Clear All")
-        self._cancel_button = QPushButton("Cancel")
-        self._apply_button = QPushButton("Apply")
-        top_row.addWidget(self._remove_last_button)
-        top_row.addWidget(self._clear_all_button)
-        top_row.addWidget(self._cancel_button)
-        top_row.addWidget(self._apply_button)
-        outer.addLayout(top_row)
+        mode_row.addWidget(self._mode_combo, 1)
+        outer.addLayout(mode_row)
 
         self._feather_slider = AdjustmentSlider(
             "Feather", min_value=_FEATHER_RANGE[0], max_value=_FEATHER_RANGE[1],
@@ -112,6 +93,15 @@ class HealingToolbar(QFrame):
         )
         outer.addWidget(self._feather_slider)
         outer.addWidget(self._opacity_slider)
+
+        spots_row = QHBoxLayout()
+        self._remove_last_button = QPushButton("Remove Last")
+        self._clear_all_button = QPushButton("Clear All")
+        spots_row.addWidget(self._remove_last_button)
+        spots_row.addWidget(self._clear_all_button)
+        outer.addLayout(spots_row)
+        self._cancel_button, self._apply_button, buttons = drawer_buttons()
+        outer.addLayout(buttons)
 
         self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
         self._feather_slider.value_changed.connect(self._on_feather_changed)

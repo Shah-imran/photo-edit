@@ -157,7 +157,9 @@ class TestEnterHealingModeWithImage:
 
         assert main_window._image_view.is_in_healing_mode()
         assert main_window._healing_toolbar.isVisible()
-        assert not main_window._image_toolbar.isVisible()
+        # Lightroom keeps the photo toolbar; the tool opens in the drawer.
+        assert main_window._image_toolbar.isVisible()
+        assert main_window._tools_panel.tool_drawer.isVisible()
 
     def test_seeds_overlay_with_existing_committed_spots(self, main_window, sample_image):
         existing_spots = [

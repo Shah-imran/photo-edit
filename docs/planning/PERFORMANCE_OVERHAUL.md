@@ -175,3 +175,8 @@ Updated as phases land; see git history for detail.
   responsive. Writing the file also runs in the background, and Export
   with Previous runs entirely in the background with a status-bar
   message. Real CR3 with 11 adjustments: 4.3 s end to end, no UI freeze.
+- **2026-10-17 Phase 7 (part 1)** - Crop/Heal/Mask options moved from
+  toolbars under the photo into a Lightroom-style drawer under the tool
+  strip; click the active tool again = Done, switching tools commits,
+  Esc cancels, R / Q / Shift+W shortcuts. Spec and remaining gaps in
+  docs/UI_UX.md.

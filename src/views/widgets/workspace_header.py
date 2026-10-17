@@ -132,6 +132,7 @@ class EditingToolStrip(QFrame):
             QToolButton { background: transparent; border: none; border-radius: 4px;
                 padding: 7px 4px; color: #cbd3dc; min-width: 56px; }
             QToolButton:hover { background: #2d343c; }
+            QToolButton:checked { background: #2b4a66; color: #ffffff; }
             QToolButton:disabled { color: #79818a; }
             """
         )
@@ -152,22 +153,25 @@ class EditingToolStrip(QFrame):
             button.setIcon(line_icon(icon_name, "#b8c2cc", 20))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             button.setAccessibleName(label)
+            # Checkable so the active tool stays highlighted; the owner
+            # drives the checked state (set_active), clicks only request.
+            button.setCheckable(True)
             if label == "Crop":
                 button.setEnabled(True)
-                button.setToolTip("Crop the image")
+                button.setToolTip("Crop & straighten (R)")
                 button.clicked.connect(self.crop_tool_requested)
                 self._crop_button = button
             elif label == "Mask":
                 button.setEnabled(True)
                 button.setToolTip(
-                    "Add a linear or radial local-adjustment mask"
+                    "Masking: linear or radial local adjustment (Shift+W)"
                 )
                 button.clicked.connect(self.mask_tool_requested)
                 self._mask_button = button
             elif label == "Heal":
                 button.setEnabled(True)
                 button.setToolTip(
-                    "Remove small blemishes/spots (heal or clone)"
+                    "Remove spots: heal or clone (Q)"
                 )
                 button.clicked.connect(self.heal_tool_requested)
                 self._heal_button = button
@@ -175,3 +179,15 @@ class EditingToolStrip(QFrame):
                 button.setEnabled(False)
                 button.setToolTip(f"{label} is planned but not implemented yet")
             layout.addWidget(button, 1)
+
+    def set_active(self, tool: Optional[str]) -> None:
+        """Highlight ``tool`` ("crop", "heal", "mask") or none."""
+        for name, button in (
+            ("crop", self._crop_button),
+            ("heal", self._heal_button),
+            ("mask", self._mask_button),
+        ):
+            if button is not None:
+                button.blockSignals(True)
+                button.setChecked(name == tool)
+                button.blockSignals(False)

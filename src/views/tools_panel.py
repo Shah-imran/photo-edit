@@ -25,6 +25,7 @@ from src.views.widgets.curve_editor import CurveEditor
 from src.views.widgets.hsl_mixer_panel import HslMixerPanel
 from src.views.widgets.collapsible_section import CollapsibleSection
 from src.views.widgets.histogram_widget import HistogramWidget
+from src.views.widgets.tool_drawer import ToolDrawer
 from src.views.widgets.workspace_header import EditingToolStrip
 from src.views.icons import line_icon
 
@@ -164,6 +165,10 @@ class ToolsPanel(QWidget):
         main_layout.addWidget(histogram_section)
         self._editing_tool_strip = EditingToolStrip()
         main_layout.addWidget(self._editing_tool_strip)
+        # The selected tool's options open here, under the strip
+        # (Lightroom's tool drawer); MainWindow adds the pages.
+        self._tool_drawer = ToolDrawer()
+        main_layout.addWidget(self._tool_drawer)
         
         # Scroll area for controls
         scroll_area = QScrollArea()
@@ -594,6 +599,17 @@ class ToolsPanel(QWidget):
         self._color_grading_panel.set_values(values)
         self._on_color_grading_changed(values)
         self.slider_released.emit()
+
+    @property
+    def tool_drawer(self) -> ToolDrawer:
+        """Drawer under the tool strip that holds each tool's options."""
+        return self._tool_drawer
+
+    def set_active_tool(self, tool) -> None:
+        """Show ``tool``'s options in the drawer and highlight its strip
+        button; None closes the drawer."""
+        self._editing_tool_strip.set_active(tool)
+        self._tool_drawer.show_page(tool)
 
     def update_histogram(self, image) -> None:
         """Refresh the panel histogram and simple mean-channel readout."""
