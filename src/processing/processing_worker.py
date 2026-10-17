@@ -15,40 +15,24 @@ from PyQt6.QtCore import QMutex, QObject, QThread, QWaitCondition, pyqtSignal
 
 from src.processing.display_frame import DisplayFrame
 from src.processing.processing_queue import ProcessingQueue, ProcessingRequest
+from src.processing.pipeline import DevelopPipeline
 from src.processing.proxy_manager import ProxyManager
-from src.processors.color_grading_processor import ColorGradingProcessor
-from src.processors.color_processor import ColorProcessor
-from src.processors.curve_processor import CurveProcessor
-from src.processors.exposure_processor import ExposureProcessor
-from src.processors.hsl_mixer_processor import HslMixerProcessor
-from src.processors.tonal_processor import TonalProcessor
-from src.processors.texture_processor import TextureProcessor
-from src.processors.clarity_processor import ClarityProcessor
-from src.processors.dehaze_processor import DehazeProcessor
-from src.processors.vignette_processor import VignetteProcessor
-from src.processors.grain_processor import GrainProcessor
-from src.processors.sharpening_processor import SharpeningProcessor
-from src.processors.luminance_noise_reduction_processor import (
-    LuminanceNoiseReductionProcessor,
-)
-from src.processors.color_noise_reduction_processor import (
-    ColorNoiseReductionProcessor,
-)
-from src.processors.remove_chromatic_aberration_processor import (
-    RemoveChromaticAberrationProcessor,
-)
-from src.processors.defringe_processor import DefringeProcessor
-from src.processors.geometry_processor import GeometryProcessor
-from src.processors.straighten_processor import StraightenProcessor
-from src.processors.crop_processor import CropProcessor
-from src.processors.mask_processor import MaskProcessor
-from src.processors.healing_processor import HealingProcessor
-from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 
 logger = logging.getLogger(__name__)
+
+
+# Positional order of the stage keywords in submit_request.
+_PARAM_ORDER = (
+    "exposure_params", "tonal_params", "color_params", "curve_params",
+    "wb_params", "hsl_params", "color_grading_params", "texture_params",
+    "clarity_params", "dehaze_params", "vignette_params", "grain_params",
+    "sharpening_params", "luminance_nr_params", "color_nr_params",
+    "remove_ca_params", "defringe_params", "geometry_params",
+    "straighten_params", "crop_params", "mask_params", "healing_params",
+)
 
 
 def _elapsed_ms(start: float) -> float:
@@ -117,29 +101,11 @@ class ProcessingWorker(QObject):
         self._result_cache: OrderedDict[Tuple, _CachedPreview] = OrderedDict()
         self._max_cache_entries = 16
         
-        # Processors
-        self._exposure_processor = ExposureProcessor()
-        self._tonal_processor = TonalProcessor()
-        self._curve_processor = CurveProcessor()
-        self._wb_processor = WhiteBalanceProcessor()
-        self._color_processor = ColorProcessor()
-        self._hsl_processor = HslMixerProcessor()
-        self._color_grading_processor = ColorGradingProcessor()
-        self._texture_processor = TextureProcessor()
-        self._clarity_processor = ClarityProcessor()
-        self._dehaze_processor = DehazeProcessor()
-        self._vignette_processor = VignetteProcessor()
-        self._grain_processor = GrainProcessor()
-        self._sharpening_processor = SharpeningProcessor()
-        self._luminance_nr_processor = LuminanceNoiseReductionProcessor()
-        self._color_nr_processor = ColorNoiseReductionProcessor()
-        self._remove_ca_processor = RemoveChromaticAberrationProcessor()
-        self._defringe_processor = DefringeProcessor()
-        self._geometry_processor = GeometryProcessor()
-        self._straighten_processor = StraightenProcessor()
-        self._crop_processor = CropProcessor()
-        self._mask_processor = MaskProcessor()
-        self._healing_processor = HealingProcessor()
+        # One pipeline definition (src/processing/pipeline.py); the
+        # per-stage attributes alias its processors for callers and tests.
+        self._pipeline = DevelopPipeline()
+        for _name, _processor in self._pipeline.processors.items():
+            setattr(self, f"_{_name}_processor", _processor)
 
         # Thread control
         self._running = False
@@ -711,239 +677,24 @@ class ProcessingWorker(QObject):
             ProcessingWorker._hashable_heal_spots(request.healing_params),
         )
 
-    def _apply_adjustments(
-        self,
-        image: LinearImage,
-        exposure_params: Dict[str, float],
-        tonal_params: Dict[str, float],
-        color_params: Dict[str, float],
-        curve_params: Optional[Dict[str, Any]] = None,
-        wb_params: Optional[Dict[str, float]] = None,
-        hsl_params: Optional[Dict[str, float]] = None,
-        color_grading_params: Optional[Dict[str, float]] = None,
-        texture_params: Optional[Dict[str, float]] = None,
-        clarity_params: Optional[Dict[str, float]] = None,
-        dehaze_params: Optional[Dict[str, float]] = None,
-        vignette_params: Optional[Dict[str, float]] = None,
-        grain_params: Optional[Dict[str, float]] = None,
-        sharpening_params: Optional[Dict[str, float]] = None,
-        luminance_nr_params: Optional[Dict[str, float]] = None,
-        color_nr_params: Optional[Dict[str, float]] = None,
-        remove_ca_params: Optional[Dict[str, float]] = None,
-        defringe_params: Optional[Dict[str, float]] = None,
-        geometry_params: Optional[Dict[str, float]] = None,
-        straighten_params: Optional[Dict[str, float]] = None,
-        crop_params: Optional[Dict[str, float]] = None,
-        mask_params: Optional[Dict[str, Any]] = None,
-        healing_params: Optional[Dict[str, Any]] = None,
-    ) -> LinearImage:
-        """Apply exposure, tonal, white balance, curve, color, HSL mixer,
-        and Color Grading adjustments to a ``LinearImage``."""
+    def _apply_adjustments(self, image: LinearImage, *args, **params) -> LinearImage:
+        """Run the develop pipeline (src/processing/pipeline.py) on ``image``.
+
+        Accepts the ``<stage>_params`` keywords (positional order of
+        :meth:`submit_request` is also accepted for older callers) and logs
+        per-stage timings.
+        """
+        if args:
+            params.update(zip(_PARAM_ORDER, args))
         total_start = perf_counter()
-        copy_start = perf_counter()
-        result = image.copy()
-        copy_ms = _elapsed_ms(copy_start)
-
-        # Healing runs FIRST, before every other adjustment (including
-        # Exposure, which used to be first) -- it is a repair operation on
-        # the as-shot pixels, not a creative adjustment, so every later
-        # tonal/color/effects step should see an already-healed image. See
-        # docs/planning/implementation-notes/2026-10-13-healing-processor.md.
-        healing_ms = 0.0
-        if healing_params and healing_params.get("heal_spots"):
-            healing_start = perf_counter()
-            result = self._healing_processor.process(result, **healing_params)
-            healing_ms = _elapsed_ms(healing_start)
-
-        exposure_ms = 0.0
-        tonal_ms = 0.0
-        wb_ms = 0.0
-        curve_ms = 0.0
-        color_ms = 0.0
-        hsl_ms = 0.0
-        color_grading_ms = 0.0
-
-        if exposure_params and any(v != 0 for v in exposure_params.values()):
-            exposure_start = perf_counter()
-            result = self._exposure_processor.process(result, **exposure_params)
-            exposure_ms = _elapsed_ms(exposure_start)
-
-        if tonal_params and any(v != 0 for v in tonal_params.values()):
-            tonal_start = perf_counter()
-            result = self._tonal_processor.process(result, **tonal_params)
-            tonal_ms = _elapsed_ms(tonal_start)
-
-        if wb_params and any(v != 0 for v in wb_params.values()):
-            wb_start = perf_counter()
-            result = self._wb_processor.process(result, **wb_params)
-            wb_ms = _elapsed_ms(wb_start)
-
-        if curve_params:
-            curve_start = perf_counter()
-            result = self._curve_processor.process(result, **curve_params)
-            curve_ms = _elapsed_ms(curve_start)
-
-        if color_params and any(v != 0 for v in color_params.values()):
-            color_start = perf_counter()
-            result = self._color_processor.process(result, **color_params)
-            color_ms = _elapsed_ms(color_start)
-
-        if hsl_params and any(v != 0 for v in hsl_params.values()):
-            hsl_start = perf_counter()
-            result = self._hsl_processor.process(result, **hsl_params)
-            hsl_ms = _elapsed_ms(hsl_start)
-
-        if color_grading_params:
-            color_grading_start = perf_counter()
-            result = self._color_grading_processor.process(
-                result, **color_grading_params
-            )
-            color_grading_ms = _elapsed_ms(color_grading_start)
-
-        texture_ms = 0.0
-        if texture_params and texture_params.get("texture", 0.0) != 0.0:
-            texture_start = perf_counter()
-            result = self._texture_processor.process(result, **texture_params)
-            texture_ms = _elapsed_ms(texture_start)
-
-        clarity_ms = 0.0
-        if clarity_params and clarity_params.get("clarity", 0.0) != 0.0:
-            clarity_start = perf_counter()
-            result = self._clarity_processor.process(result, **clarity_params)
-            clarity_ms = _elapsed_ms(clarity_start)
-
-        dehaze_ms = 0.0
-        if dehaze_params and dehaze_params.get("dehaze", 0.0) != 0.0:
-            dehaze_start = perf_counter()
-            result = self._dehaze_processor.process(result, **dehaze_params)
-            dehaze_ms = _elapsed_ms(dehaze_start)
-
-        vignette_ms = 0.0
-        if vignette_params and vignette_params.get("vignette", 0.0) != 0.0:
-            vignette_start = perf_counter()
-            result = self._vignette_processor.process(result, **vignette_params)
-            vignette_ms = _elapsed_ms(vignette_start)
-
-        grain_ms = 0.0
-        if grain_params and grain_params.get("grain", 0.0) != 0.0:
-            grain_start = perf_counter()
-            result = self._grain_processor.process(result, **grain_params)
-            grain_ms = _elapsed_ms(grain_start)
-
-        sharpening_ms = 0.0
-        if sharpening_params and sharpening_params.get("sharpening", 0.0) != 0.0:
-            sharpening_start = perf_counter()
-            result = self._sharpening_processor.process(result, **sharpening_params)
-            sharpening_ms = _elapsed_ms(sharpening_start)
-
-        luminance_nr_ms = 0.0
-        if luminance_nr_params and luminance_nr_params.get("luminance_nr", 0.0) != 0.0:
-            luminance_nr_start = perf_counter()
-            result = self._luminance_nr_processor.process(
-                result, **luminance_nr_params
-            )
-            luminance_nr_ms = _elapsed_ms(luminance_nr_start)
-
-        color_nr_ms = 0.0
-        if color_nr_params and color_nr_params.get("color_nr", 0.0) != 0.0:
-            color_nr_start = perf_counter()
-            result = self._color_nr_processor.process(result, **color_nr_params)
-            color_nr_ms = _elapsed_ms(color_nr_start)
-
-        remove_ca_ms = 0.0
-        if remove_ca_params and remove_ca_params.get("remove_ca", 0.0) != 0.0:
-            remove_ca_start = perf_counter()
-            result = self._remove_ca_processor.process(result, **remove_ca_params)
-            remove_ca_ms = _elapsed_ms(remove_ca_start)
-
-        defringe_ms = 0.0
-        if defringe_params and defringe_params.get("defringe", 0.0) != 0.0:
-            defringe_start = perf_counter()
-            result = self._defringe_processor.process(result, **defringe_params)
-            defringe_ms = _elapsed_ms(defringe_start)
-
-        # Geometry (Distortion/Vertical/Horizontal/Scale/Offset) runs
-        # immediately BEFORE Straighten -- see docs/planning/
-        # implementation-notes/2026-10-13-geometry-processor.md section 2.
-        geometry_ms = 0.0
-        if geometry_params and (
-            geometry_params.get("distortion", 0.0) != 0.0
-            or geometry_params.get("vertical", 0.0) != 0.0
-            or geometry_params.get("horizontal", 0.0) != 0.0
-            or geometry_params.get("scale", 100.0) != 100.0
-            or geometry_params.get("offset_x", 0.0) != 0.0
-            or geometry_params.get("offset_y", 0.0) != 0.0
-        ):
-            geometry_start = perf_counter()
-            result = self._geometry_processor.process(result, **geometry_params)
-            geometry_ms = _elapsed_ms(geometry_start)
-
-        straighten_ms = 0.0
-        if straighten_params and straighten_params.get("straighten", 0.0) != 0.0:
-            straighten_start = perf_counter()
-            result = self._straighten_processor.process(result, **straighten_params)
-            straighten_ms = _elapsed_ms(straighten_start)
-
-        # Mask is applied after every other adjustment (including
-        # Straighten) and strictly BEFORE Crop -- it blends pixel VALUES
-        # only (never changes shape), so its geometry is expressed in the
-        # full, pre-crop frame's own normalized coordinates and never
-        # needs to account for a separate, edit-time-dependent crop
-        # rectangle. See docs/planning/implementation-notes/
-        # 2026-10-13-mask-processor.md.
-        mask_ms = 0.0
-        if mask_params:
-            mask_start = perf_counter()
-            result = self._mask_processor.process(result, mask=mask_params)
-            mask_ms = _elapsed_ms(mask_start)
-
-        # Crop is applied strictly LAST, after every other processor
-        # (including Straighten and Mask) -- it is the only processor in
-        # this codebase that deliberately changes output shape. See
-        # docs/planning/implementation-notes/2026-10-13-crop-processor.md
-        # section 1.
-        crop_ms = 0.0
-        if crop_params:
-            crop_start = perf_counter()
-            result = self._crop_processor.process(result, **crop_params)
-            crop_ms = _elapsed_ms(crop_start)
-
+        timings: Dict[str, float] = {}
+        result = self._pipeline.render(image, timings=timings, **params)
         logger.info(
-            "PERF worker.apply shape=%s copy_ms=%.2f healing_ms=%.2f "
-            "exposure_ms=%.2f "
-            "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f hsl_ms=%.2f "
-            "color_grading_ms=%.2f texture_ms=%.2f clarity_ms=%.2f dehaze_ms=%.2f "
-            "vignette_ms=%.2f grain_ms=%.2f sharpening_ms=%.2f "
-            "luminance_nr_ms=%.2f color_nr_ms=%.2f remove_ca_ms=%.2f "
-            "defringe_ms=%.2f geometry_ms=%.2f straighten_ms=%.2f mask_ms=%.2f crop_ms=%.2f "
-            "total_ms=%.2f",
+            "PERF worker.apply shape=%s %s total_ms=%.2f",
             image.shape,
-            copy_ms,
-            healing_ms,
-            exposure_ms,
-            tonal_ms,
-            wb_ms,
-            curve_ms,
-            color_ms,
-            hsl_ms,
-            color_grading_ms,
-            texture_ms,
-            clarity_ms,
-            dehaze_ms,
-            vignette_ms,
-            grain_ms,
-            sharpening_ms,
-            luminance_nr_ms,
-            color_nr_ms,
-            remove_ca_ms,
-            defringe_ms,
-            geometry_ms,
-            straighten_ms,
-            mask_ms,
-            crop_ms,
+            " ".join(f"{name}_ms={ms:.2f}" for name, ms in timings.items()),
             _elapsed_ms(total_start),
         )
-
         return result
 
     def _full_size_of(

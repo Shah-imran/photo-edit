@@ -4,34 +4,9 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from src.commands.base_command import BaseCommand
 from src.models.image_model import ImageModel
-from src.processors.color_grading_processor import ColorGradingProcessor
 from src.processors.color_processor import ColorProcessor
-from src.processors.curve_processor import CurveProcessor
 from src.processors.exposure_processor import ExposureProcessor
-from src.processors.hsl_mixer_processor import HslMixerProcessor
-from src.processors.tonal_processor import TonalProcessor
-from src.processors.white_balance_processor import WhiteBalanceProcessor
-from src.processors.texture_processor import TextureProcessor
-from src.processors.clarity_processor import ClarityProcessor
-from src.processors.dehaze_processor import DehazeProcessor
-from src.processors.vignette_processor import VignetteProcessor
-from src.processors.grain_processor import GrainProcessor
-from src.processors.sharpening_processor import SharpeningProcessor
-from src.processors.luminance_noise_reduction_processor import (
-    LuminanceNoiseReductionProcessor,
-)
-from src.processors.color_noise_reduction_processor import (
-    ColorNoiseReductionProcessor,
-)
-from src.processors.remove_chromatic_aberration_processor import (
-    RemoveChromaticAberrationProcessor,
-)
-from src.processors.defringe_processor import DefringeProcessor
-from src.processors.geometry_processor import GeometryProcessor
-from src.processors.straighten_processor import StraightenProcessor
-from src.processors.crop_processor import CropProcessor
-from src.processors.mask_processor import MaskProcessor
-from src.processors.healing_processor import HealingProcessor
+from src.processing.pipeline import shared_pipeline
 from src.utils.color_pipeline import LinearImage
 
 if TYPE_CHECKING:
@@ -173,42 +148,20 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._previous_image = image_model.get_current_image()
         self._new_image: Optional[LinearImage] = None
 
-        self._exposure_processor = ExposureProcessor()
-        self._tonal_processor = TonalProcessor()
-        self._curve_processor = CurveProcessor()
-        self._wb_processor = WhiteBalanceProcessor()
-        self._color_processor = ColorProcessor()
-        self._hsl_processor = HslMixerProcessor()
-        self._color_grading_processor = ColorGradingProcessor()
-        self._texture_processor = TextureProcessor()
         self._texture_params = texture_params or {}
-        self._clarity_processor = ClarityProcessor()
         self._clarity_params = clarity_params or {}
-        self._dehaze_processor = DehazeProcessor()
         self._dehaze_params = dehaze_params or {}
-        self._vignette_processor = VignetteProcessor()
         self._vignette_params = vignette_params or {}
-        self._grain_processor = GrainProcessor()
         self._grain_params = grain_params or {}
-        self._sharpening_processor = SharpeningProcessor()
         self._sharpening_params = sharpening_params or {}
-        self._luminance_nr_processor = LuminanceNoiseReductionProcessor()
         self._luminance_nr_params = luminance_nr_params or {}
-        self._color_nr_processor = ColorNoiseReductionProcessor()
         self._color_nr_params = color_nr_params or {}
-        self._remove_ca_processor = RemoveChromaticAberrationProcessor()
         self._remove_ca_params = remove_ca_params or {}
-        self._defringe_processor = DefringeProcessor()
         self._defringe_params = defringe_params or {}
-        self._geometry_processor = GeometryProcessor()
         self._geometry_params = geometry_params or {}
-        self._straighten_processor = StraightenProcessor()
         self._straighten_params = straighten_params or {}
-        self._crop_processor = CropProcessor()
         self._crop_params = crop_params or {}
-        self._mask_processor = MaskProcessor()
         self._mask_params = mask_params or {}
-        self._healing_processor = HealingProcessor()
         self._healing_params = healing_params or {}
 
     def execute(self) -> None:
@@ -219,110 +172,31 @@ class CombinedAdjustmentCommand(BaseCommand):
         if original is None:
             return
 
-        result = original.copy()
-
-        # Healing runs FIRST, before every other adjustment -- see
-        # docs/planning/implementation-notes/2026-10-13-healing-processor.md.
-        if self._healing_params:
-            result = self._healing_processor.process(result, **self._healing_params)
-
-        if self._exposure_params:
-            result = self._exposure_processor.process(result, **self._exposure_params)
-
-        if self._tonal_params:
-            result = self._tonal_processor.process(result, **self._tonal_params)
-
-        if self._wb_params:
-            result = self._wb_processor.process(result, **self._wb_params)
-
-        if self._curve_params:
-            result = self._curve_processor.process(result, **self._curve_params)
-
-        if self._color_params:
-            result = self._color_processor.process(result, **self._color_params)
-
-        if self._hsl_params:
-            result = self._hsl_processor.process(result, **self._hsl_params)
-
-        if self._color_grading_params:
-            result = self._color_grading_processor.process(
-                result, **self._color_grading_params
-            )
-
-        if self._texture_params:
-            result = self._texture_processor.process(
-                result, **self._texture_params
-            )
-
-        if self._clarity_params:
-            result = self._clarity_processor.process(
-                result, **self._clarity_params
-            )
-
-        if self._dehaze_params:
-            result = self._dehaze_processor.process(
-                result, **self._dehaze_params
-            )
-
-        if self._vignette_params:
-            result = self._vignette_processor.process(
-                result, **self._vignette_params
-            )
-
-        if self._grain_params:
-            result = self._grain_processor.process(
-                result, **self._grain_params
-            )
-
-        if self._sharpening_params:
-            result = self._sharpening_processor.process(
-                result, **self._sharpening_params
-            )
-
-        if self._luminance_nr_params:
-            result = self._luminance_nr_processor.process(
-                result, **self._luminance_nr_params
-            )
-
-        if self._color_nr_params:
-            result = self._color_nr_processor.process(
-                result, **self._color_nr_params
-            )
-
-        if self._remove_ca_params:
-            result = self._remove_ca_processor.process(
-                result, **self._remove_ca_params
-            )
-
-        if self._defringe_params:
-            result = self._defringe_processor.process(
-                result, **self._defringe_params
-            )
-
-        # Geometry runs immediately BEFORE Straighten -- see
-        # docs/planning/implementation-notes/
-        # 2026-10-13-geometry-processor.md section 2.
-        if self._geometry_params:
-            result = self._geometry_processor.process(
-                result, **self._geometry_params
-            )
-
-        if self._straighten_params:
-            result = self._straighten_processor.process(
-                result, **self._straighten_params
-            )
-
-        # Mask is applied after every other adjustment (including
-        # Straighten) and strictly BEFORE Crop -- see
-        # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
-        if self._mask_params:
-            result = self._mask_processor.process(result, mask=self._mask_params)
-
-        # Crop is applied strictly LAST, after every other processor
-        # (including Straighten and Mask) -- see docs/planning/
-        # implementation-notes/2026-10-13-crop-processor.md section 1.
-        if self._crop_params:
-            result = self._crop_processor.process(result, **self._crop_params)
+        result = shared_pipeline().render(
+            original,
+            exposure_params=self._exposure_params,
+            tonal_params=self._tonal_params,
+            color_params=self._color_params,
+            curve_params=self._curve_params,
+            wb_params=self._wb_params,
+            hsl_params=self._hsl_params,
+            color_grading_params=self._color_grading_params,
+            texture_params=self._texture_params,
+            clarity_params=self._clarity_params,
+            dehaze_params=self._dehaze_params,
+            vignette_params=self._vignette_params,
+            grain_params=self._grain_params,
+            sharpening_params=self._sharpening_params,
+            luminance_nr_params=self._luminance_nr_params,
+            color_nr_params=self._color_nr_params,
+            remove_ca_params=self._remove_ca_params,
+            defringe_params=self._defringe_params,
+            geometry_params=self._geometry_params,
+            straighten_params=self._straighten_params,
+            crop_params=self._crop_params,
+            mask_params=self._mask_params,
+            healing_params=self._healing_params,
+        )
 
         self._new_image = result
         self._image_model.current_image = result
