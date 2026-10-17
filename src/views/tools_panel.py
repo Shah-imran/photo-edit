@@ -611,6 +611,10 @@ class ToolsPanel(QWidget):
         self._editing_tool_strip.set_active(tool)
         self._tool_drawer.show_page(tool)
 
+    def set_tool_edits(self, edited: dict) -> None:
+        """Mark which local tools have edits on the current photo."""
+        self._editing_tool_strip.set_edited(edited)
+
     def update_histogram(self, image) -> None:
         """Refresh the panel histogram and simple mean-channel readout."""
         self._histogram_widget.set_image(image)

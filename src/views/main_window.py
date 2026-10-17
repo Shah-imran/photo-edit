@@ -310,6 +310,10 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._redo_action)
         edit_menu.addSeparator()
         edit_menu.addAction(self._create_action("&Reset Adjustments", self._reset_adjustments, "Ctrl+R"))
+        # Lightroom's "Reset all settings" shortcut, alongside the existing one.
+        edit_menu.addAction(
+            self._create_action("Reset All Settings", self._reset_adjustments, "Ctrl+Shift+R")
+        )
         edit_menu.addAction(
             self._create_action(
                 "&Copy Edit Settings", self._copy_edit_settings, "Ctrl+Alt+C"
@@ -788,6 +792,7 @@ class MainWindow(QMainWindow):
         self._pending_adjustment_payload = None
         self._tools_panel.set_adjustments(adjustments, emit_signal=False)
         self._image_controller.restore_adjustment_state(adjustments)
+        self._sync_tool_ui()
         # Image switches always start fitted. Per-image zoom persistence made
         # navigation appear random (a previously saved 100% view reopened at
         # full size), while preview/full swaps also queued competing fit calls.
@@ -1068,6 +1073,7 @@ class MainWindow(QMainWindow):
         """
         self._tools_panel.set_adjustments(state, emit_signal=False)
         self._adjustment_persist_timer.start()
+        self._sync_tool_ui()
         # current_image may be a preview proxy; report the real output size.
         output_size = self._image_controller.get_output_size()
         if output_size is not None:
@@ -1270,8 +1276,16 @@ class MainWindow(QMainWindow):
         return None
 
     def _sync_tool_ui(self) -> None:
-        """Show the active tool's drawer page and highlight its strip button."""
+        """Show the active tool's drawer page, highlight its strip button,
+        and dot the tools that have edits on this photo (Lightroom)."""
         self._tools_panel.set_active_tool(self._active_tool())
+        state = self._image_controller.get_adjustment_state()
+        crop = state.get("crop") or {}
+        self._tools_panel.set_tool_edits({
+            "crop": bool(crop) and crop != {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
+            "heal": bool(state.get("heal_spots")),
+            "mask": bool(state.get("mask")),
+        })
 
     def _toggle_tool(self, tool: str) -> None:
         """Strip button / shortcut: open ``tool``, or close it (Done) if it
@@ -1407,6 +1421,7 @@ class MainWindow(QMainWindow):
         if self._image_controller.has_image():
             self._tools_panel.set_adjustments({}, emit_signal=False)
             self._image_controller.restore_adjustment_state({})
+            self._sync_tool_ui()
             self._adjustment_persist_timer.start()
             self._status_bar.showMessage("Reset to original", 2000)
 
@@ -1448,6 +1463,7 @@ class MainWindow(QMainWindow):
         state_for_controller = copy.deepcopy(self._copied_adjustment_state)
         self._tools_panel.set_adjustments(state_for_tools_panel, emit_signal=False)
         self._image_controller.restore_adjustment_state(state_for_controller)
+        self._sync_tool_ui()
         self._adjustment_persist_timer.start()
         self._status_bar.showMessage("Pasted edit settings", 2000)
 
@@ -1476,6 +1492,7 @@ class MainWindow(QMainWindow):
         state_for_controller = copy.deepcopy(profile_state)
         self._tools_panel.set_adjustments(state_for_tools_panel, emit_signal=False)
         self._image_controller.restore_adjustment_state(state_for_controller)
+        self._sync_tool_ui()
         self._adjustment_persist_timer.start()
         self._status_bar.showMessage(f"Applied profile: {profile_name}", 2000)
 
@@ -1610,6 +1627,7 @@ class MainWindow(QMainWindow):
         state_for_controller = copy.deepcopy(adjustments)
         self._tools_panel.set_adjustments(state_for_tools_panel, emit_signal=False)
         self._image_controller.restore_adjustment_state(state_for_controller)
+        self._sync_tool_ui()
         self._adjustment_persist_timer.start()
         self._settings_service.set_last_preset_dir(path)
         self._status_bar.showMessage(f"Imported preset: {preset_name}", 2000)

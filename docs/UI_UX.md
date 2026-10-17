@@ -125,8 +125,8 @@ of the tool strip and drawer, with Lightroom desktop's panel names.
 | Mask controls | In the drawer, beside the mask list | **Done**: in the drawer (single mask; no mask list yet) |
 | Tool toggle | Click the active tool again to close it (Done); switching tools commits; Esc cancels | **Done** |
 | Active tool | Highlighted in the strip | **Done** |
-| Edit indicator | Dot under tools with edits | None |
-| Shortcuts | R, Q, Shift+W; Ctrl+Shift+R reset all | **Done**: R, Q, Shift+W, Esc; reset all is still Ctrl+R |
+| Edit indicator | Dot under tools with edits | **Done** |
+| Shortcuts | R, Q, Shift+W; Ctrl+Shift+R reset all | **Done**: R, Q, Shift+W, Esc, Ctrl+Shift+R (Ctrl+R kept) |
 | Mask list | Multiple masks listed in the drawer | One mask only |
 | Red Eye | In the tool strip | Not implemented |
 | Calibration, Lens Blur | Panels | Not implemented |

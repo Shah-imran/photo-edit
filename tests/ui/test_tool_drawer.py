@@ -146,3 +146,28 @@ def test_typing_in_search_box_does_not_trigger_tool_shortcuts(window, qtbot):
 
     assert box.text() == "rq"
     _assert_active(window, None)
+
+
+def test_tools_with_edits_show_a_dot(window, qtbot):
+    strip_button = lambda tool: _strip_button(window, tool)  # noqa: E731
+    assert not any(strip_button(t).is_edited() for t in ("crop", "heal", "mask"))
+
+    strip_button("crop").click()
+    window._image_view.get_crop_overlay().set_rect(0.1, 0.1, 0.9, 0.9)
+    strip_button("crop").click()  # Done
+    assert strip_button("crop").is_edited()
+    assert not strip_button("mask").is_edited()
+
+    window._image_controller.undo()
+    qtbot.wait(50)
+    assert not strip_button("crop").is_edited()
+
+
+def test_ctrl_shift_r_resets_all_settings(window, qtbot):
+    controller = window._image_controller
+    controller.on_adjustments_changed({"exposure": 1.0})
+    controller.on_slider_released()
+
+    QTest.keyClick(window, Qt.Key.Key_R, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+
+    assert controller.get_adjustment_state()["exposure"] == 0.0

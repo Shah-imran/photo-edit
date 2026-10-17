@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -100,6 +101,34 @@ class WorkspaceHeader(QFrame):
         return button
 
 
+class _StripButton(QToolButton):
+    """Tool-strip button that can show Lightroom's "this tool has edits on
+    this photo" dot under its label."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._edited = False
+
+    def set_edited(self, edited: bool) -> None:
+        if edited != self._edited:
+            self._edited = edited
+            self.update()
+
+    def is_edited(self) -> bool:
+        return self._edited
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self._edited:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#9cc9ff"))
+        painter.drawEllipse(QPointF(self.width() / 2.0, self.height() - 3.5), 2.0, 2.0)
+        painter.end()
+
+
 class EditingToolStrip(QFrame):
     """Visible home for local-editing tools.
 
@@ -148,7 +177,7 @@ class EditingToolStrip(QFrame):
             ("Mask", "mask"),
             ("Transform", "transform"),
         ):
-            button = QToolButton()
+            button = _StripButton()
             button.setText(label)
             button.setIcon(line_icon(icon_name, "#b8c2cc", 20))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
@@ -191,3 +220,14 @@ class EditingToolStrip(QFrame):
                 button.blockSignals(True)
                 button.setChecked(name == tool)
                 button.blockSignals(False)
+
+    def set_edited(self, edited: dict) -> None:
+        """Show a dot under each tool that has an edit on this photo
+        (``{"crop": bool, "heal": bool, "mask": bool}``)."""
+        for name, button in (
+            ("crop", self._crop_button),
+            ("heal", self._heal_button),
+            ("mask", self._mask_button),
+        ):
+            if button is not None:
+                button.set_edited(bool(edited.get(name)))
