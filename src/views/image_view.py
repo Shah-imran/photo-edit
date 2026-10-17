@@ -431,9 +431,40 @@ class ImageView(QWidget):
         """
         factor = max(self.MIN_ZOOM, min(self.MAX_ZOOM, factor))
         if factor != self._zoom_factor:
+            # Keep the image point under the viewport centre in place (the
+            # wheel handler re-anchors on the cursor afterwards). Without
+            # this, 100% jumped to the image's top-left corner.
+            center = self._viewport_center_in_image()
             self._zoom_factor = factor
             self._update_display()
+            if center is not None:
+                viewport = self._scroll_area.viewport()
+                self._scroll_area.horizontalScrollBar().setValue(
+                    int(round(center[0] * factor - viewport.width() / 2))
+                )
+                self._scroll_area.verticalScrollBar().setValue(
+                    int(round(center[1] * factor - viewport.height() / 2))
+                )
             self.zoom_changed.emit(self._zoom_factor)
+
+    def _viewport_center_in_image(self) -> Optional[tuple[float, float]]:
+        """Full-resolution image coordinates under the viewport centre."""
+        if self._pixmap is None or self._zoom_factor <= 0:
+            return None
+        viewport = self._scroll_area.viewport()
+        canvas = self._image_canvas
+        base_w, base_h = self._base_size()
+        if canvas.width() <= viewport.width():
+            cx = base_w / 2.0
+        else:
+            h_bar = self._scroll_area.horizontalScrollBar()
+            cx = (h_bar.value() + viewport.width() / 2.0) / self._zoom_factor
+        if canvas.height() <= viewport.height():
+            cy = base_h / 2.0
+        else:
+            v_bar = self._scroll_area.verticalScrollBar()
+            cy = (v_bar.value() + viewport.height() / 2.0) / self._zoom_factor
+        return cx, cy
 
     def zoom_in(self) -> None:
         """Zoom in by one step."""
