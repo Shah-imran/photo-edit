@@ -635,27 +635,19 @@ class TestImageController:
         assert np.allclose(controller.image_model.current_image, current)
         controller.cleanup()
 
-    def test_threaded_final_render_commits_history_without_reprocessing(
+    def test_final_detail_frame_is_presented_without_touching_history(
         self, qapp, sample_image, monkeypatch
     ):
-        """Completed worker results are stored in history as image states."""
+        """A full-resolution detail frame is shown via set_display_frame (no
+        UI-thread float conversion) and never creates an undo step."""
         view = ImageView()
         controller = ImageController(view, use_threading=False)
         original = pil_to_linear(sample_image)
         controller._apply_loaded_image("sample.jpg", original)
 
         rendered = np.full_like(original, 0.75)
-        previous = original.copy()
-        controller._pending_history_previous_image = previous
-        # The real capture flow (_capture_pending_history_state) snapshots
-        # get_adjustment_state() at the same moment it snapshots the image
-        # -- replicate that here since this test sets
-        # _pending_history_previous_image directly rather than going
-        # through apply_adjustments().
-        controller._pending_history_previous_state = controller.get_adjustment_state()
+        frame = DisplayFrame.from_linear(7, "full", (), rendered)
         controller._pending_final_request_id = 7
-        controller._exposure_params = {"exposure": 1.0}
-        controller._color_params = {"saturation": 0.0}
 
         class FakeWorker:
             def is_latest_request(self, request_id):
@@ -665,23 +657,208 @@ class TestImageController:
                 pass
 
         def fail_if_called(*args, **kwargs):
-            raise AssertionError("history commit should not reprocess")
+            raise AssertionError("detail frame must not reprocess")
 
+        displayed = []
         controller._processing_worker = FakeWorker()
+        monkeypatch.setattr(controller._exposure_processor, "process", fail_if_called)
+        monkeypatch.setattr(view, "set_image", fail_if_called)
         monkeypatch.setattr(
-            controller._exposure_processor,
-            "process",
-            fail_if_called,
+            view,
+            "set_display_frame",
+            lambda delivered, preserve_view_scale=True: displayed.append(delivered),
         )
 
-        controller._on_processing_complete(7, rendered)
+        controller._on_processing_complete(7, frame)
 
-        assert controller.can_undo() is True
+        assert displayed == [frame]
         assert np.allclose(controller.image_model.current_image, rendered)
+        assert controller.can_undo() is False
+        assert controller._pending_final_request_id == -1
+        controller.cleanup()
 
+    def test_threaded_undo_rerenders_in_background_without_float_conversion(
+        self, qapp, sample_image, monkeypatch
+    ):
+        """Undo restores settings and asks the worker for a quality frame; it
+        must never convert a float image on the UI thread."""
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._use_threading = True
+
+        class FakeWorker:
+            def __init__(self):
+                self.preview_calls = []
+
+            def submit_preview_request(self, **kwargs):
+                self.preview_calls.append(kwargs)
+                return len(self.preview_calls)
+
+            def stop(self):
+                pass
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("undo must not convert floats on the UI thread")
+
+        worker = FakeWorker()
+        controller._processing_worker = worker
+        controller._final_processing_worker = None
+        controller.on_adjustments_changed({"exposure": 1.5})
+        controller.on_slider_released()
+        assert controller.can_undo() is True
+
+        monkeypatch.setattr(view, "set_image", fail_if_called)
+        worker.preview_calls.clear()
         controller.undo()
 
-        assert np.allclose(controller.image_model.current_image, previous)
+        assert controller.get_adjustment_state()["exposure"] == 0.0
+        assert len(worker.preview_calls) == 1
+        assert worker.preview_calls[0]["interactive_preview"] is False
+        assert worker.preview_calls[0]["exposure_params"]["exposure"] == 0.0
+
+        worker.preview_calls.clear()
+        controller.redo()
+        assert controller.get_adjustment_state()["exposure"] == 1.5
+        assert worker.preview_calls[0]["exposure_params"]["exposure"] == 1.5
+        controller.cleanup()
+
+    def test_threaded_history_holds_no_pixel_buffers(self, qapp, sample_image):
+        """Undo steps store settings, not images (each image step used to
+        hold two full-resolution float buffers)."""
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._use_threading = True
+
+        class FakeWorker:
+            def submit_preview_request(self, **kwargs):
+                return 1
+
+            def stop(self):
+                pass
+
+        controller._processing_worker = FakeWorker()
+        controller._final_processing_worker = None
+        for value in (0.5, 1.0, 1.5):
+            controller.on_adjustments_changed({"exposure": value})
+            controller.on_slider_released()
+
+        commands = controller.history_service._undo_stack
+        assert len(commands) == 3
+        for command in commands:
+            assert command._previous_image is None
+            assert command._new_image is None
+        controller.cleanup()
+
+    def test_threaded_restore_adjustment_state_renders_off_ui_thread(
+        self, qapp, sample_image, monkeypatch
+    ):
+        """Switching photos / pasting settings must not render full size on
+        the UI thread."""
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._use_threading = True
+
+        class FakeWorker:
+            def __init__(self):
+                self.preview_calls = []
+
+            def submit_preview_request(self, **kwargs):
+                self.preview_calls.append(kwargs)
+                return 1
+
+            def cancel_pending(self):
+                pass
+
+            def stop(self):
+                pass
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("restore must not process on the UI thread")
+
+        worker = FakeWorker()
+        controller._processing_worker = worker
+        controller._final_processing_worker = None
+        monkeypatch.setattr(controller._exposure_processor, "process", fail_if_called)
+        monkeypatch.setattr(view, "set_image", fail_if_called)
+
+        controller.restore_adjustment_state({"exposure": 1.0, "contrast": 20.0})
+
+        assert len(worker.preview_calls) == 1
+        assert worker.preview_calls[0]["exposure_params"]["exposure"] == 1.0
+        controller.cleanup()
+
+    def test_threaded_mask_preview_does_not_render_on_ui_thread(
+        self, qapp, sample_image, monkeypatch
+    ):
+        """Mask drags go to the worker as display-only frames; a synchronous
+        full-size get_export_image per mouse move made the tool unusable."""
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._use_threading = True
+
+        class FakeWorker:
+            def __init__(self):
+                self.preview_calls = []
+
+            def submit_preview_request(self, **kwargs):
+                self.preview_calls.append(kwargs)
+                return 100 + len(self.preview_calls)
+
+            def stop(self):
+                pass
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("mask preview must not render synchronously")
+
+        worker = FakeWorker()
+        controller._processing_worker = worker
+        monkeypatch.setattr(controller, "get_export_image", fail_if_called)
+
+        mask = {"type": "radial", "cx": 0.5, "cy": 0.5, "rx": 0.2, "ry": 0.2,
+                "exposure": 1.0}
+        controller.preview_mask(mask)
+
+        assert len(worker.preview_calls) == 1
+        assert worker.preview_calls[0]["interactive_preview"] is True
+        assert worker.preview_calls[0]["mask_params"]["type"] == "radial"
+        assert 101 in controller._display_only_request_ids
+        # The committed mask is untouched.
+        assert controller._mask_params == {}
+        controller.cleanup()
+
+    def test_async_load_presents_prebuilt_display_frame(
+        self, qapp, sample_image, monkeypatch
+    ):
+        """Opening a photo shows the frame built on the load thread instead
+        of converting floats on the UI thread."""
+        from src.controllers.image_controller import LoadedImage
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        image = pil_to_linear(sample_image)
+        frame = DisplayFrame.from_linear(-1, "full", (), image)
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("load must not convert floats on the UI thread")
+
+        displayed = []
+        monkeypatch.setattr(view, "set_image", fail_if_called)
+        monkeypatch.setattr(
+            view,
+            "set_display_frame",
+            lambda delivered, emit_loaded=False, preserve_view_scale=True: (
+                displayed.append(delivered)
+            ),
+        )
+        controller._latest_load_request_id = 3
+        controller._on_async_image_loaded(3, "sample.jpg", LoadedImage(image, frame))
+
+        assert displayed == [frame]
+        assert controller.has_image()
         controller.cleanup()
 
     def test_threaded_apply_adjustments_schedules_preview_without_ui_processing(
@@ -876,10 +1053,12 @@ class TestImageController:
         assert display_calls == []
         controller.cleanup()
 
-    def test_threaded_apply_adjustments_schedules_final_without_ui_processing(
+    def test_threaded_apply_adjustments_with_history_commits_settings_now(
         self, qapp, sample_image, monkeypatch
     ):
-        """Threaded final requests must not process or commit on the UI thread."""
+        """A discrete threaded edit shows a quality preview and records a
+        settings-only undo step at once; it never waits on a full render
+        or processes pixels on the UI thread."""
         view = ImageView()
         controller = ImageController(view, use_threading=False)
         original = pil_to_linear(sample_image)
@@ -916,16 +1095,56 @@ class TestImageController:
             add_to_history=True,
         )
 
-        assert fake_worker.preview_calls == []
-        assert len(fake_worker.final_calls) == 1
-        assert controller._pending_final_request_id == 21
-        assert controller.can_undo() is False
+        assert len(fake_worker.preview_calls) == 1
+        assert fake_worker.preview_calls[0]["interactive_preview"] is False
+        assert fake_worker.final_calls == []
+        assert controller.can_undo() is True
         controller.cleanup()
 
-    def test_slider_release_delays_full_render_until_idle(
+    def test_slider_release_skips_full_render_when_view_is_fitted(
         self, qapp, qtbot, sample_image
     ):
-        """Releasing a slider should not immediately occupy the worker."""
+        """A fitted view already shows every pixel it can; releasing a
+        slider must not spend seconds on a full-resolution render."""
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._use_threading = True
+        controller._exposure_params = {"exposure": 1.0}
+
+        class FakePreviewWorker:
+            def submit_preview_request(self, **kwargs):
+                return 30
+
+            def stop(self):
+                pass
+
+        class FakeFinalWorker:
+            def __init__(self):
+                self.final_calls = []
+
+            def submit_final_request(self, **kwargs):
+                self.final_calls.append(kwargs)
+                return 31
+
+            def stop(self):
+                pass
+
+        fake_final_worker = FakeFinalWorker()
+        controller._processing_worker = FakePreviewWorker()
+        controller._final_processing_worker = fake_final_worker
+
+        controller.on_slider_released()
+        qtbot.wait(controller._final_render_timer.interval() + 150)
+
+        assert fake_final_worker.final_calls == []
+        controller.cleanup()
+
+    def test_slider_release_renders_detail_when_zoomed_into_preview(
+        self, qapp, qtbot, sample_image
+    ):
+        """Releasing a slider should not immediately occupy the worker, and
+        a full render follows only when the view magnifies a preview."""
         view = ImageView()
         controller = ImageController(view, use_threading=False)
         original = pil_to_linear(sample_image)
@@ -960,6 +1179,12 @@ class TestImageController:
         fake_final_worker = FakeFinalWorker()
         controller._processing_worker = fake_preview_worker
         controller._final_processing_worker = fake_final_worker
+        # Simulate a small preview frame on screen, zoomed to 300%.
+        small = DisplayFrame.from_linear(
+            1, "quality", (), np.full((20, 20, 3), 0.5, dtype=np.float32)
+        )
+        view.set_display_frame(small, preserve_view_scale=False)
+        view.set_zoom_factor(3.0)
 
         controller.on_slider_released()
 
@@ -976,17 +1201,14 @@ class TestImageController:
     def test_pending_final_render_does_not_refresh_full_res_view(
         self, qapp, sample_image, monkeypatch
     ):
-        """Background full renders should update model/history without repainting full-res."""
+        """A background full render is presented as a prebuilt frame, never
+        through refresh_view's float conversion."""
         view = ImageView()
         controller = ImageController(view, use_threading=False)
         original = pil_to_linear(sample_image)
         controller._apply_loaded_image("sample.jpg", original)
 
         rendered = np.full_like(original, 0.8)
-        controller._pending_history_previous_image = original
-        # See the matching comment in
-        # test_threaded_final_render_commits_history_without_reprocessing.
-        controller._pending_history_previous_state = controller.get_adjustment_state()
         controller._pending_final_request_id = 42
         controller._exposure_params = {"exposure": 1.0}
         controller._color_params = {"saturation": 0.0}
@@ -1010,7 +1232,7 @@ class TestImageController:
 
         assert refresh_calls == []
         assert np.allclose(controller.image_model.current_image, rendered)
-        assert controller.can_undo() is True
+        assert controller.can_undo() is False
         controller.cleanup()
 
     def test_new_slider_movement_cancels_pending_full_render(

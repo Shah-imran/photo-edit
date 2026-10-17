@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen
+from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPaintEvent, QPen
 from PyQt6.QtWidgets import QWidget
 
 # Handle names, in a fixed, documented order -- 4 corners + 4 edge
@@ -227,11 +227,14 @@ class CropOverlay(QWidget):
         full = QRectF(0, 0, self.width(), self.height())
         crop = self._rect_px()
 
-        # Dim everything, then punch a transparent hole for the crop rect.
-        painter.fillRect(full, QColor(0, 0, 0, 150))
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        painter.fillRect(crop, QColor(0, 0, 0, 255))
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        # Dim only the area outside the crop rect. (Clearing a "hole" with
+        # CompositionMode_Clear erased the photo underneath to black: a
+        # child widget shares its parent's backing store.)
+        outside = QPainterPath()
+        outside.setFillRule(Qt.FillRule.OddEvenFill)
+        outside.addRect(full)
+        outside.addRect(crop)
+        painter.fillPath(outside, QColor(0, 0, 0, 150))
 
         # Border.
         painter.setPen(QPen(QColor("#0078d4"), 2))

@@ -153,3 +153,11 @@ route (Phase 6) target the remaining per-pixel cost where it is measured.
 ## 6. Progress log
 
 Updated as phases land; see git history for detail.
+
+- **2026-10-17 Phase 0** - stage budget tests, UI-stall watchdog.
+- **2026-10-17 Phases 1-2 (+ part of 4)** - all renders off the UI thread,
+  settings-only undo history, full-resolution renders only for zoomed-in
+  detail, true source-relative zoom, crop overlay no longer blanks the
+  photo. Real-app run on a 24 MP CR3: no UI stalls over 50 ms across
+  open, drag, release, undo, redo, zoom, mask and crop. Details:
+  [implementation-notes/2026-10-17-responsiveness-overhaul.md](implementation-notes/2026-10-17-responsiveness-overhaul.md).

@@ -6,7 +6,7 @@ from typing import Optional, Union
 
 import numpy as np
 from PIL import Image
-from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import (
     QScrollArea,
@@ -77,7 +77,21 @@ class _ImageCanvas(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._placeholder)
             return
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        painter.drawPixmap(self.rect(), self._pixmap, self._pixmap.rect())
+        # Scale only the exposed part. Drawing the whole pixmap into a
+        # zoomed-in canvas (thousands of px wide) costs hundreds of ms per
+        # repaint, which made zooming and panning stutter.
+        target = event.rect().intersected(self.rect())
+        if target.isEmpty():
+            return
+        scale_x = self._pixmap.width() / max(1, self.width())
+        scale_y = self._pixmap.height() / max(1, self.height())
+        source = QRectF(
+            target.x() * scale_x,
+            target.y() * scale_y,
+            target.width() * scale_x,
+            target.height() * scale_y,
+        )
+        painter.drawPixmap(QRectF(target), self._pixmap, source)
 
 
 class _LoadingOverlay(QWidget):
@@ -147,6 +161,10 @@ class ImageView(QWidget):
         
         self._pixmap: Optional[QPixmap] = None
         self._display_frame: Optional[DisplayFrame] = None
+        # Full-resolution (width, height) the current pixmap stands for.
+        # Zoom is relative to this, so 100% means true 1:1 whether the
+        # pixmap is a 600 px drag preview or the full image.
+        self._source_size: Optional[tuple[int, int]] = None
         self._zoom_factor: float = 1.0
         self._pan_start: Optional[QPoint] = None
         self._is_panning: bool = False
@@ -203,6 +221,7 @@ class ImageView(QWidget):
         image's library entry is removed or deleted from disk)."""
         self._pixmap = None
         self._display_frame = None
+        self._source_size = None
         self._image_canvas.clear()
 
     def set_display_frame(
@@ -220,8 +239,7 @@ class ImageView(QWidget):
 
         old_w = old_h = 0
         if preserve_view_scale and self._pixmap is not None:
-            old_size = self._pixmap.size()
-            old_w, old_h = old_size.width(), old_size.height()
+            old_w, old_h = self._base_size()
 
         qimage_start = perf_counter()
         qimage = frame.to_qimage()
@@ -230,6 +248,9 @@ class ImageView(QWidget):
         pixmap_start = perf_counter()
         self._display_frame = frame
         self._pixmap = QPixmap.fromImage(qimage)
+        self._source_size = frame.source_size or (
+            self._pixmap.width(), self._pixmap.height()
+        )
         pixmap_ms = _elapsed_ms(pixmap_start)
 
         self._preserve_scale_after_pixmap_swap(
@@ -280,8 +301,7 @@ class ImageView(QWidget):
 
         old_w = old_h = 0
         if preserve_view_scale and self._pixmap is not None:
-            old_size = self._pixmap.size()
-            old_w, old_h = old_size.width(), old_size.height()
+            old_w, old_h = self._base_size()
 
         qimage_start = perf_counter()
         rgb = np.ascontiguousarray(linear_to_display_rgb(arr))
@@ -297,6 +317,7 @@ class ImageView(QWidget):
         pixmap_start = perf_counter()
         self._display_frame = None
         self._pixmap = QPixmap.fromImage(qimage)
+        self._source_size = (self._pixmap.width(), self._pixmap.height())
         pixmap_ms = _elapsed_ms(pixmap_start)
 
         self._preserve_scale_after_pixmap_swap(
@@ -322,6 +343,7 @@ class ImageView(QWidget):
         """Clear the currently displayed image."""
         self._pixmap = None
         self._display_frame = None
+        self._source_size = None
         self._zoom_factor = 1.0
         self._scroll_area.horizontalScrollBar().setValue(0)
         self._scroll_area.verticalScrollBar().setValue(0)
@@ -335,6 +357,7 @@ class ImageView(QWidget):
         """Show a cached preview image immediately during navigation."""
         self._display_frame = None
         self._pixmap = QPixmap.fromImage(image)
+        self._source_size = None
         self._scroll_area.horizontalScrollBar().setValue(0)
         self._scroll_area.verticalScrollBar().setValue(0)
         if zoom_factor is None:
@@ -345,11 +368,36 @@ class ImageView(QWidget):
 
     def has_image(self) -> bool:
         """Check if an image is currently loaded.
-        
+
         Returns:
             True if an image is loaded
         """
         return self._pixmap is not None
+
+    def get_pixmap_size(self) -> Optional[tuple[int, int]]:
+        """Return the displayed pixmap's ``(width, height)``, or None."""
+        if self._pixmap is None:
+            return None
+        return self._pixmap.width(), self._pixmap.height()
+
+    def _base_size(self) -> tuple[int, int]:
+        """Full-resolution size zoom is measured against."""
+        if self._source_size is not None:
+            return self._source_size
+        if self._pixmap is None:
+            return (0, 0)
+        return self._pixmap.width(), self._pixmap.height()
+
+    def _canvas_scale(self) -> float:
+        """Canvas pixels per pixmap pixel at the current zoom."""
+        if self._pixmap is None or self._pixmap.width() == 0:
+            return self._zoom_factor
+        return self._zoom_factor * self._base_size()[0] / self._pixmap.width()
+
+    def display_scale(self) -> float:
+        """Physical screen pixels per pixmap pixel. Above ~1 the pixmap is
+        being magnified and a higher-resolution frame would add detail."""
+        return self._canvas_scale() * self.devicePixelRatioF()
 
     def set_loading(self, loading: bool) -> None:
         """Show or hide the transition loading overlay."""
@@ -395,11 +443,11 @@ class ImageView(QWidget):
             return
         
         viewport_size = self._scroll_area.viewport().size()
-        pixmap_size = self._pixmap.size()
-        
+        base_w, base_h = self._base_size()
+
         # Calculate zoom to fit
-        width_ratio = viewport_size.width() / pixmap_size.width()
-        height_ratio = viewport_size.height() / pixmap_size.height()
+        width_ratio = viewport_size.width() / base_w
+        height_ratio = viewport_size.height() / base_h
         
         # Use the smaller ratio to ensure the image fits
         self.set_zoom_factor(min(width_ratio, height_ratio) * 0.95)
@@ -412,7 +460,7 @@ class ImageView(QWidget):
         """Update the displayed image based on current zoom level."""
         if not self.has_image():
             return
-        self._image_canvas.set_pixmap(self._pixmap, self._zoom_factor)
+        self._image_canvas.set_pixmap(self._pixmap, self._canvas_scale())
         if self._crop_overlay is not None and self._crop_overlay.isVisible():
             self._crop_overlay.resize(self._image_canvas.size())
         if self._mask_overlay is not None and self._mask_overlay.isVisible():
@@ -540,9 +588,8 @@ class ImageView(QWidget):
     ) -> None:
         """Keep visual scale stable when swapping proxy/full frames."""
         if preserve_view_scale and old_w > 0 and old_h > 0 and self._pixmap is not None:
-            new_size = self._pixmap.size()
-            new_w = new_size.width()
-            if new_w > 0:
+            new_w = self._base_size()[0]
+            if new_w > 0 and new_w != old_w:
                 self._zoom_factor *= old_w / float(new_w)
                 self._zoom_factor = max(
                     self.MIN_ZOOM, min(self.MAX_ZOOM, self._zoom_factor)

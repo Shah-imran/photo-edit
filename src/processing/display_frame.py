@@ -58,6 +58,11 @@ class DisplayFrame:
     adjustment_signature: Tuple
     rgb: np.ndarray
     linear_image: Optional[LinearImage] = None
+    # ``(width, height)`` of the full-resolution image this frame stands
+    # for. A 1400 px preview of a 6000 px photo carries (6000, 4000), so
+    # the view can show it at a true, resolution-independent zoom.
+    # ``None`` means the frame is already full resolution.
+    source_size: Optional[Tuple[int, int]] = None
 
     @classmethod
     def from_linear(
@@ -66,6 +71,7 @@ class DisplayFrame:
         tier: str,
         adjustment_signature: Tuple,
         image: LinearImage,
+        source_size: Optional[Tuple[int, int]] = None,
     ) -> "DisplayFrame":
         """Build a display frame from a processed linear preview image."""
         return cls(
@@ -74,6 +80,7 @@ class DisplayFrame:
             adjustment_signature=adjustment_signature,
             rgb=linear_to_display_rgb(image),
             linear_image=image,
+            source_size=source_size,
         )
 
     @property

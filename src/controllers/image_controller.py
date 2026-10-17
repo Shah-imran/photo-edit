@@ -92,9 +92,24 @@ class _ImageLoadWorker(QObject):
                 logger.exception("Preview load failed for %s", self._file_path)
 
             image = self._image_service.load_image(self._file_path)
-            self.loaded.emit(self._request_id, self._file_path, image)
+            # Convert to display RGB here, not on the UI thread: a 24 MP
+            # float-to-RGB pass is ~300 ms, which used to freeze every open.
+            frame = DisplayFrame.from_linear(-1, "full", (), image)
+            self.loaded.emit(
+                self._request_id, self._file_path, LoadedImage(image, frame)
+            )
         except Exception as e:
             self.failed.emit(self._request_id, self._file_path, str(e))
+
+
+class LoadedImage:
+    """A decoded image plus its display frame, built on the load thread."""
+
+    __slots__ = ("image", "frame")
+
+    def __init__(self, image, frame: Optional[DisplayFrame]):
+        self.image = image
+        self.frame = frame
 
 
 class ImageController(QObject):
@@ -118,7 +133,6 @@ class ImageController(QObject):
     # listens to this to resync the ToolsPanel sliders/curve/HSL/Color
     # Grading widgets and re-persist to the library catalog.
     adjustment_state_restored = pyqtSignal(dict)
-    _worker_image_set_requested = pyqtSignal(object)
     _ADJUSTMENT_DEFAULTS = {
         "exposure": 0.0,
         "contrast": 0.0,
@@ -372,11 +386,25 @@ class ImageController(QObject):
         self._preview_present_timer.setSingleShot(True)
         self._preview_present_timer.setInterval(16)  # Cap UI presents ~60 FPS
         self._preview_present_timer.timeout.connect(self._present_pending_preview)
+        # Full-resolution renders are only for detail: they run when the
+        # view is zoomed past what the quality preview can show, shortly
+        # after the user stops interacting. History never waits on them.
         self._final_render_timer = QTimer(self)
         self._final_render_timer.setSingleShot(True)
-        self._final_render_timer.setInterval(1500)
+        self._final_render_timer.setInterval(400)
         self._final_render_timer.timeout.connect(self._submit_delayed_final_render)
-        
+        # Requests whose frames are display-only (uncommitted tool previews,
+        # e.g. a mask mid-drag) must not replace image_model.current_image.
+        self._display_only_request_ids: set[int] = set()
+        # Mask/heal/crop previews: cheap interactive frames while the tool
+        # is being dragged, one quality frame once it settles.
+        self._pending_tool_overrides: Optional[Dict[str, Any]] = None
+        self._tool_preview_timer = QTimer(self)
+        self._tool_preview_timer.setSingleShot(True)
+        self._tool_preview_timer.setInterval(120)
+        self._tool_preview_timer.timeout.connect(self._submit_tool_quality_preview)
+        self._image_view.zoom_changed.connect(self._on_view_zoom_changed)
+
         if use_threading:
             self._setup_async_processing()
         
@@ -414,21 +442,16 @@ class ImageController(QObject):
             proxy_max_size=proxy_max_size,
             interactive_proxy_max_size=interactive_proxy_max_size,
         )
-        self._final_processing_worker.processing_complete.connect(
+        self._final_processing_worker.final_frame_ready.connect(
             self._on_processing_complete
         )
         self._final_processing_worker.error_occurred.connect(
             self._on_processing_error
         )
-        # Ensure expensive proxy generation runs in the worker thread.
-        self._worker_image_set_requested.connect(
-            self._processing_worker.set_image,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        self._worker_image_set_requested.connect(
-            self._final_processing_worker.set_image,
-            Qt.ConnectionType.QueuedConnection,
-        )
+        # Images reach the workers through ProcessingWorker.set_image, which
+        # defers proxy generation to the worker thread. (A queued signal to
+        # the worker ran it on the UI thread instead: the worker thread's
+        # event loop is never spun while _run() loops.)
         self._processing_worker.start()
         self._final_processing_worker.start()
         
@@ -462,6 +485,10 @@ class ImageController(QObject):
         in :meth:`load_image_async`) tear it down once the decode
         completes on its own.
         """
+        # Timers would otherwise fire into an already-destroyed view.
+        self._final_render_timer.stop()
+        self._tool_preview_timer.stop()
+        self._preview_present_timer.stop()
         if self._processing_worker is not None:
             self._processing_worker.stop()
         if self._final_processing_worker is not None:
@@ -617,11 +644,22 @@ class ImageController(QObject):
         self._image_view.clear()
         self._history_service.clear_history()
 
-    def _apply_loaded_image(self, file_path: str, image) -> None:
-        """Apply a decoded image to model/view state on the UI thread."""
+    def _apply_loaded_image(
+        self, file_path: str, image, frame: Optional[DisplayFrame] = None
+    ) -> None:
+        """Apply a decoded image to model/view state on the UI thread.
+
+        ``frame`` is the display conversion the load thread already made;
+        when present the UI thread only wraps it in a pixmap.
+        """
         self._image_model.file_path = file_path
         self._image_model.set_original_image(image)
-        self._image_view.set_image(image)
+        if frame is not None:
+            self._image_view.set_display_frame(
+                frame, emit_loaded=True, preserve_view_scale=False
+            )
+        else:
+            self._image_view.set_image(image)
         self._history_service.clear_history()
 
         # Reset adjustment params
@@ -652,9 +690,11 @@ class ImageController(QObject):
         self._pending_history_previous_state = None
         self._final_render_timer.stop()
 
-        # Set image in processing worker for proxy generation
-        if self._processing_worker is not None:
-            self._worker_image_set_requested.emit(image)
+        # Hand the image to both workers. set_image only queues it; proxy
+        # generation runs on each worker thread before its next request.
+        for worker in (self._processing_worker, self._final_processing_worker):
+            if worker is not None and hasattr(worker, "set_image"):
+                worker.set_image(image)
 
     def _on_async_image_preview_loaded(
         self, request_id: int, file_path: str, preview
@@ -673,7 +713,10 @@ class ImageController(QObject):
         if request_id != self._latest_load_request_id:
             return
         self._skip_intermediate_preview_request_ids.discard(request_id)
-        self._apply_loaded_image(file_path, image)
+        frame = None
+        if isinstance(image, LoadedImage):
+            image, frame = image.image, image.frame
+        self._apply_loaded_image(file_path, image, frame)
         self.image_load_finished.emit(file_path, True)
 
     def _on_async_image_failed(
@@ -860,7 +903,18 @@ class ImageController(QObject):
         return result
 
     def refresh_view(self) -> None:
-        """Refresh the image view with the current image state."""
+        """Show the committed adjustment state.
+
+        With background processing this asks the worker for a quality
+        render (usually a preview-cache hit) instead of converting a
+        full-size float image on the UI thread.
+        """
+        if self._renders_async() and self.has_image():
+            self._tool_preview_timer.stop()
+            self._pending_tool_overrides = None
+            self._request_render(interactive=False)
+            self._schedule_detail_render()
+            return
         current_image = self._image_model.get_current_image()
         if current_image is not None:
             # Don't emit image_loaded signal on refresh (only on initial load)
@@ -1095,6 +1149,13 @@ class ImageController(QObject):
         if not self.has_image():
             return
 
+        if self._renders_async():
+            # Render in the background; the synchronous full-size render
+            # below froze the window for seconds on every photo switch.
+            self._image_model.reset_to_original()
+            self.refresh_view()
+            return
+
         has_changes = (
             # Compared against each key's own default (not a bare 0.0)
             # because "scale" (Geometry) defaults to 100.0, not 0.0 --
@@ -1263,7 +1324,8 @@ class ImageController(QObject):
         not prefixed with an underscore despite being an internal API: a
         different module needs to call it.
         """
-        self._image_model.current_image = image
+        if image is not None:
+            self._image_model.current_image = image
         self._apply_state_params(state)
         self.adjustment_state_restored.emit(self.get_adjustment_state())
 
@@ -1439,63 +1501,17 @@ class ImageController(QObject):
             self._healing_params = healing_params
 
         if self._use_threading and self._processing_worker is not None:
+            self._pending_final_request_id = -1
             if add_to_history:
-                final_worker = self._final_processing_worker or self._processing_worker
-                self._pending_final_request_id = (
-                    final_worker.submit_final_request(
-                        exposure_params=self._exposure_params,
-                        tonal_params=self._tonal_params,
-                        color_params=self._color_params,
-                        curve_params=self._curve_params,
-                        wb_params=self._wb_params,
-                        hsl_params=self._hsl_params,
-                        color_grading_params=self._color_grading_params,
-                        texture_params=self._texture_params,
-                        clarity_params=self._clarity_params,
-                        dehaze_params=self._dehaze_params,
-                        vignette_params=self._vignette_params,
-                        grain_params=self._grain_params,
-                        sharpening_params=self._sharpening_params,
-                        luminance_nr_params=self._luminance_nr_params,
-                        color_nr_params=self._color_nr_params,
-                        remove_ca_params=self._remove_ca_params,
-                        defringe_params=self._defringe_params,
-                        geometry_params=self._geometry_params,
-                        straighten_params=self._straighten_params,
-                        crop_params=self._crop_params,
-                        mask_params=self._mask_params,
-                        healing_params=self._healing_params,
-                    )
-                )
+                # A discrete edit (crop/mask/heal Apply, a preset): show the
+                # quality preview and record a settings-only undo step now.
+                self._tool_preview_timer.stop()
+                self._pending_tool_overrides = None
+                self._request_render(interactive=False)
+                self._commit_pending_history()
+                self._schedule_detail_render()
             else:
-                self._pending_final_request_id = -1
-                self._latest_request_id = (
-                    self._processing_worker.submit_preview_request(
-                        exposure_params=self._exposure_params,
-                        tonal_params=self._tonal_params,
-                        color_params=self._color_params,
-                        curve_params=self._curve_params,
-                        wb_params=self._wb_params,
-                        hsl_params=self._hsl_params,
-                        color_grading_params=self._color_grading_params,
-                        texture_params=self._texture_params,
-                        clarity_params=self._clarity_params,
-                        dehaze_params=self._dehaze_params,
-                        vignette_params=self._vignette_params,
-                        grain_params=self._grain_params,
-                        sharpening_params=self._sharpening_params,
-                        luminance_nr_params=self._luminance_nr_params,
-                        color_nr_params=self._color_nr_params,
-                        remove_ca_params=self._remove_ca_params,
-                        defringe_params=self._defringe_params,
-                        geometry_params=self._geometry_params,
-                        straighten_params=self._straighten_params,
-                        crop_params=self._crop_params,
-                        mask_params=self._mask_params,
-                        healing_params=self._healing_params,
-                        interactive_preview=True,
-                    )
-                )
+                self._request_render(interactive=True)
             return
 
         if add_to_history:
@@ -2167,6 +2183,11 @@ class ImageController(QObject):
         if not self.has_image():
             return
         normalized = self._normalize_mask_state(mask)
+        if self._renders_async():
+            # Off the UI thread, on the preview proxy: a synchronous 24 MP
+            # render per mouse move made mask dragging unusable.
+            self._preview_tool_candidate(mask_params=normalized)
+            return
         preview = self.get_export_image(mask_override=normalized)
         if preview is not None:
             self._image_view.set_image(
@@ -2208,11 +2229,178 @@ class ImageController(QObject):
         if not self.has_image():
             return
         normalized = self._normalize_heal_spots_state(heal_spots)
+        if self._renders_async():
+            self._preview_tool_candidate(
+                healing_params={"heal_spots": normalized} if normalized else {}
+            )
+            return
         preview = self.get_export_image(heal_spots_override=normalized)
         if preview is not None:
             self._image_view.set_image(
                 preview, emit_loaded=False, preserve_view_scale=True
             )
+
+    def preview_uncropped(self) -> Optional[tuple[int, int]]:
+        """Show the full frame (every adjustment except crop) for crop
+        editing, and return its ``(width, height)`` at full resolution.
+
+        With background processing the frame is a quality preview rendered
+        off the UI thread; it stays display-only until the crop is applied
+        or cancelled (both of which re-render the committed state).
+        """
+        if not self.has_image():
+            return None
+        if self._renders_async():
+            original = self._image_model.get_original_image()
+            self._final_render_timer.stop()
+            self._tool_preview_timer.stop()
+            self._pending_tool_overrides = {"crop_params": {}}
+            self._request_render(interactive=False, display_only=True, crop_params={})
+            return original.shape[1], original.shape[0]
+        uncropped = self.get_export_image(apply_crop=False)
+        if uncropped is None:
+            return None
+        self._image_view.set_image(
+            uncropped, emit_loaded=False, preserve_view_scale=True
+        )
+        return uncropped.shape[1], uncropped.shape[0]
+
+    # -- Background render requests ---------------------------------------
+
+    def _render_kwargs(self, **overrides: Any) -> Dict[str, Any]:
+        """Every committed ``_xxx_params`` dict, keyed by the
+        ``ProcessingWorker.submit_request`` argument names, with
+        ``overrides`` (same names) replacing individual entries."""
+        kwargs: Dict[str, Any] = {
+            "exposure_params": self._exposure_params,
+            "tonal_params": self._tonal_params,
+            "color_params": self._color_params,
+            "curve_params": self._curve_params,
+            "wb_params": self._wb_params,
+            "hsl_params": self._hsl_params,
+            "color_grading_params": self._color_grading_params,
+            "texture_params": self._texture_params,
+            "clarity_params": self._clarity_params,
+            "dehaze_params": self._dehaze_params,
+            "vignette_params": self._vignette_params,
+            "grain_params": self._grain_params,
+            "sharpening_params": self._sharpening_params,
+            "luminance_nr_params": self._luminance_nr_params,
+            "color_nr_params": self._color_nr_params,
+            "remove_ca_params": self._remove_ca_params,
+            "defringe_params": self._defringe_params,
+            "geometry_params": self._geometry_params,
+            "straighten_params": self._straighten_params,
+            "crop_params": self._crop_params,
+            "mask_params": self._mask_params,
+            "healing_params": self._healing_params,
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def _renders_async(self) -> bool:
+        """True when renders go through the background preview worker."""
+        return (
+            self._use_threading
+            and self._processing_worker is not None
+            and hasattr(self._processing_worker, "submit_preview_request")
+        )
+
+    def _request_render(
+        self,
+        interactive: bool = False,
+        display_only: bool = False,
+        **overrides: Any,
+    ) -> int:
+        """Queue a preview render of the committed state (plus overrides).
+
+        ``display_only`` frames are shown but never become
+        ``image_model.current_image`` -- used for uncommitted tool previews.
+        """
+        request_id = self._processing_worker.submit_preview_request(
+            **self._render_kwargs(**overrides),
+            interactive_preview=interactive,
+        )
+        self._latest_request_id = request_id
+        if display_only:
+            self._display_only_request_ids.add(request_id)
+        return request_id
+
+    def _preview_tool_candidate(self, **overrides: Any) -> None:
+        """Show an uncommitted tool edit (mask, heal spots, uncropped frame):
+        a cheap interactive frame now, a quality frame once input settles."""
+        self._final_render_timer.stop()
+        self._pending_tool_overrides = overrides
+        self._request_render(interactive=True, display_only=True, **overrides)
+        self._tool_preview_timer.start()
+
+    def _submit_tool_quality_preview(self) -> None:
+        overrides = self._pending_tool_overrides
+        if overrides is None or not self.has_image() or not self._renders_async():
+            return
+        self._request_render(interactive=False, display_only=True, **overrides)
+
+    def _commit_pending_history(self) -> None:
+        """Push one settings-only undo step for the gesture that just ended.
+
+        History stores adjustment-state dicts, never pixels: undo re-renders
+        through the worker (usually a preview-cache hit), so a step costs a
+        few KB instead of two full-resolution float buffers.
+        """
+        previous_state = self._pending_history_previous_state
+        self._pending_history_previous_image = None
+        self._pending_history_previous_state = None
+        if previous_state is None:
+            return
+        new_state = self.get_adjustment_state()
+        if new_state == previous_state:
+            return
+        self._history_service.execute_command(
+            AdjustmentStateCommand(
+                controller=self,
+                previous_image=None,
+                previous_state=previous_state,
+                new_image=None,
+                new_state=new_state,
+            )
+        )
+
+    def get_output_size(self) -> Optional[tuple[int, int]]:
+        """``(width, height)`` of the fully adjusted full-resolution output."""
+        original = self._image_model.get_original_image()
+        if original is None:
+            return None
+        height, width = original.shape[0], original.shape[1]
+        if self._crop_params:
+            x0 = self._crop_params.get("x0", 0.0)
+            x1 = self._crop_params.get("x1", 1.0)
+            y0 = self._crop_params.get("y0", 0.0)
+            y1 = self._crop_params.get("y1", 1.0)
+            width = max(1, int(round(width * (x1 - x0))))
+            height = max(1, int(round(height * (y1 - y0))))
+        return width, height
+
+    def _view_needs_detail(self) -> bool:
+        """True when the view magnifies a preview that has fewer pixels than
+        the full-resolution output, so a full render would add detail."""
+        pixmap_size = self._image_view.get_pixmap_size()
+        output_size = self.get_output_size()
+        if pixmap_size is None or output_size is None:
+            return False
+        if pixmap_size[0] >= output_size[0] * 0.98:
+            return False
+        return self._image_view.display_scale() > 1.05
+
+    def _schedule_detail_render(self) -> None:
+        """Start the idle timer for a full-resolution detail render; the
+        timer re-checks :meth:`_view_needs_detail` when it fires."""
+        if self._final_processing_worker is None and self._processing_worker is None:
+            return
+        self._final_render_timer.start()
+
+    def _on_view_zoom_changed(self, _zoom: float) -> None:
+        if self._renders_async() and self.has_image() and self._view_needs_detail():
+            self._schedule_detail_render()
 
     def _on_throttled_adjustment(self, params: dict) -> None:
         """Handle throttled live preview updates during slider drags."""
@@ -2381,7 +2569,12 @@ class ImageController(QObject):
         request_id, frame = self._pending_preview
         self._pending_preview = None
         self._latest_presented_preview_id = request_id
-        if frame.linear_image is not None:
+        display_only = request_id in self._display_only_request_ids
+        if self._display_only_request_ids:
+            self._display_only_request_ids = {
+                rid for rid in self._display_only_request_ids if rid > request_id
+            }
+        if frame.linear_image is not None and not display_only:
             self._image_model.current_image = frame.linear_image
         self._image_view.set_display_frame(frame, preserve_view_scale=True)
         logger.info(
@@ -2391,21 +2584,32 @@ class ImageController(QObject):
             _elapsed_ms(start),
         )
 
-    def _on_processing_complete(self, request_id: int, image) -> None:
-        """Handle full-resolution processing complete from worker."""
+    def _on_processing_complete(self, request_id: int, payload) -> None:
+        """Present a full-resolution detail render from the final worker.
+
+        ``payload`` is normally a :class:`DisplayFrame` whose RGB
+        conversion already happened in the worker; a bare ``LinearImage``
+        is accepted for callers without one. History is not touched here:
+        it is committed (settings only) when the gesture ends.
+        """
         final_worker = self._final_processing_worker or self._processing_worker
         if final_worker is not None and \
            not final_worker.is_latest_request(request_id):
             return
         if request_id != self._pending_final_request_id:
             return
+        self._pending_final_request_id = -1
+
+        frame = payload
+        if not isinstance(frame, DisplayFrame):
+            frame = DisplayFrame.from_linear(request_id, "full", (), payload)
 
         # Final frame should supersede queued previews immediately.
         self._pending_preview = None
         self._preview_present_timer.stop()
-        self._image_model.current_image = image
-
-        self._commit_rendered_adjustment(image)
+        if frame.linear_image is not None:
+            self._image_model.current_image = frame.linear_image
+        self._image_view.set_display_frame(frame, preserve_view_scale=True)
 
     def _on_processing_error(self, request_id: int, error: str) -> None:
         """Handle processing error from worker.
@@ -2433,41 +2637,16 @@ class ImageController(QObject):
             if self._debouncer is not None:
                 self._debouncer.cancel()
 
-            # Show a better quality proxy immediately; the full-res render is
-            # delayed and uses a separate worker so it cannot block previews.
-            self._latest_request_id = self._processing_worker.submit_preview_request(
-                exposure_params=self._exposure_params,
-                tonal_params=self._tonal_params,
-                color_params=self._color_params,
-                curve_params=self._curve_params,
-                wb_params=self._wb_params,
-                hsl_params=self._hsl_params,
-                color_grading_params=self._color_grading_params,
-                texture_params=self._texture_params,
-                clarity_params=self._clarity_params,
-                dehaze_params=self._dehaze_params,
-                vignette_params=self._vignette_params,
-                grain_params=self._grain_params,
-                sharpening_params=self._sharpening_params,
-                luminance_nr_params=self._luminance_nr_params,
-                color_nr_params=self._color_nr_params,
-                remove_ca_params=self._remove_ca_params,
-                defringe_params=self._defringe_params,
-                geometry_params=self._geometry_params,
-                straighten_params=self._straighten_params,
-                crop_params=self._crop_params,
-                mask_params=self._mask_params,
-                healing_params=self._healing_params,
-                interactive_preview=False,
-            )
-
-            # Delay full-resolution processing. If the user grabs
-            # the slider again, the next adjustment cancels this timer before
-            # an expensive full render can occupy the worker.
-            self._final_render_timer.start()
+            # Show the quality preview and record the undo step right away
+            # (settings only). A full-resolution render follows only if the
+            # view is zoomed in far enough to need it; grabbing a slider
+            # again cancels that timer before it can occupy a worker.
+            self._request_render(interactive=False)
+            self._commit_pending_history()
+            self._schedule_detail_render()
             logger.info(
                 "PERF controller.slider_released quality_request=%s "
-                "full_idle_delay_ms=%s schedule_ms=%.2f",
+                "detail_idle_delay_ms=%s schedule_ms=%.2f",
                 self._latest_request_id,
                 self._final_render_timer.interval(),
                 _elapsed_ms(start),
@@ -2514,77 +2693,24 @@ class ImageController(QObject):
         )
 
     def _submit_delayed_final_render(self) -> None:
-        """Submit full-resolution render after the user has stayed idle."""
+        """Submit a full-resolution detail render after the user went idle,
+        but only when the view actually shows more pixels than the
+        quality preview has (zoomed in); a fitted view never needs it."""
         start = perf_counter()
         final_worker = self._final_processing_worker or self._processing_worker
         if not self.has_image() or final_worker is None:
             return
-
-        if not self._has_pending_adjustment_changes():
-            self._pending_history_previous_image = None
-            self._pending_history_previous_state = None
+        if self._pending_tool_overrides is not None:
+            return  # a tool preview is on screen; don't replace it
+        if not self._view_needs_detail():
             return
 
         self._pending_final_request_id = final_worker.submit_final_request(
-            exposure_params=self._exposure_params,
-            tonal_params=self._tonal_params,
-            color_params=self._color_params,
-            curve_params=self._curve_params,
-            wb_params=self._wb_params,
-            hsl_params=self._hsl_params,
-            color_grading_params=self._color_grading_params,
-            texture_params=self._texture_params,
-            clarity_params=self._clarity_params,
-            dehaze_params=self._dehaze_params,
-            vignette_params=self._vignette_params,
-            grain_params=self._grain_params,
-            sharpening_params=self._sharpening_params,
-            luminance_nr_params=self._luminance_nr_params,
-            color_nr_params=self._color_nr_params,
-            remove_ca_params=self._remove_ca_params,
-            defringe_params=self._defringe_params,
-            geometry_params=self._geometry_params,
-            straighten_params=self._straighten_params,
-            crop_params=self._crop_params,
-            mask_params=self._mask_params,
-            healing_params=self._healing_params,
+            **self._render_kwargs()
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
             self._pending_final_request_id,
-            _elapsed_ms(start),
-        )
-
-    def _commit_rendered_adjustment(self, rendered_image) -> None:
-        """Add a completed worker render to history without reprocessing."""
-        start = perf_counter()
-        previous = self._pending_history_previous_image
-        previous_state = self._pending_history_previous_state
-        self._pending_history_previous_image = None
-        self._pending_history_previous_state = None
-        self._pending_final_request_id = -1
-
-        if previous is None or previous_state is None:
-            return
-
-        if not self._has_pending_adjustment_changes():
-            return
-
-        # By this point self._xxx_params already reflect the committed
-        # edit (set earlier in apply_adjustments/on_adjustments_changed/
-        # on_curve_changed/on_hsl_changed/on_color_grading_changed), so
-        # get_adjustment_state() here is the post-edit "new" state.
-        command = AdjustmentStateCommand(
-            controller=self,
-            previous_image=previous,
-            previous_state=previous_state,
-            new_image=rendered_image,
-            new_state=self.get_adjustment_state(),
-        )
-        self._history_service.execute_command(command)
-        logger.info(
-            "PERF controller.commit_rendered shape=%s total_ms=%.2f",
-            rendered_image.shape,
             _elapsed_ms(start),
         )
 

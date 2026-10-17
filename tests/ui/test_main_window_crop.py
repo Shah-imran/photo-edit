@@ -58,6 +58,10 @@ def sample_image():
 def _make_has_image(main_window, sample_image):
     main_window._image_controller.has_image = MagicMock(return_value=True)
     main_window._image_controller.get_export_image = MagicMock(return_value=sample_image)
+    main_window._image_controller.preview_uncropped = MagicMock(
+        return_value=(sample_image.shape[1], sample_image.shape[0])
+    )
+    main_window._image_controller.refresh_view = MagicMock()
     main_window._image_controller.get_adjustment_state = MagicMock(
         return_value={"crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}}
     )
@@ -83,9 +87,10 @@ class TestEnterCropModeWithImage:
 
         main_window._enter_crop_mode()
 
-        main_window._image_controller.get_export_image.assert_called_once_with(
-            apply_crop=False
-        )
+        # The uncropped frame is rendered by the controller (off the UI
+        # thread when threaded), not by a synchronous get_export_image call.
+        main_window._image_controller.preview_uncropped.assert_called_once_with()
+        main_window._image_controller.get_export_image.assert_not_called()
         assert main_window._image_view.is_in_crop_mode()
         overlay = main_window._image_view.get_crop_overlay()
         assert overlay is not None
@@ -147,7 +152,7 @@ class TestDimensionsLabelUpdatesAfterCrop:
     ):
         main_window._image_controller.load_image(sample_image_file)
         qtbot.wait(100)
-        width0, height0 = main_window._image_controller.image_model.get_image_size()
+        width0, height0 = main_window._image_controller.get_output_size()
         assert main_window._dimensions_label.text() == f"{width0} × {height0}"
 
         with qtbot.waitSignal(
@@ -157,7 +162,9 @@ class TestDimensionsLabelUpdatesAfterCrop:
                 {"x0": 0.0, "y0": 0.0, "x1": 0.5, "y1": 0.5}
             )
 
-        new_width, new_height = main_window._image_controller.image_model.get_image_size()
+        # The label reports the full-resolution output size, which no
+        # longer depends on which preview frame happens to be on screen.
+        new_width, new_height = main_window._image_controller.get_output_size()
         assert new_width < width0
         assert new_height < height0
         assert main_window._dimensions_label.text() == f"{new_width} × {new_height}"

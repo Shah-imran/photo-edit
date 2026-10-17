@@ -79,6 +79,9 @@ class ProcessingWorker(QObject):
     processing_started = pyqtSignal(int)
     preview_ready = pyqtSignal(int, object)  # request_id, DisplayFrame
     processing_complete = pyqtSignal(int, object)  # request_id, LinearImage
+    # Full-resolution result with its RGB conversion already done in this
+    # thread, so the UI only wraps it in a QPixmap (request_id, DisplayFrame).
+    final_frame_ready = pyqtSignal(int, object)
     error_occurred = pyqtSignal(int, str)
     
     def __init__(
@@ -139,6 +142,7 @@ class ProcessingWorker(QObject):
 
         # Thread control
         self._running = False
+        self._pending_source: Optional[LinearImage] = None
         self._mutex = QMutex()
         self._condition = QWaitCondition()
         
@@ -184,13 +188,37 @@ class ProcessingWorker(QObject):
     def set_image(self, image: LinearImage) -> None:
         """Set the source ``LinearImage`` for processing.
 
-        Should be called from the main thread when a new image is loaded.
+        Called from the UI thread when a new image is loaded. While the
+        worker thread runs, this only hands the image over: proxy
+        generation (copies and resizes of a 24 MP buffer) happens on the
+        worker thread, and before any request submitted after this call,
+        so a render requested right after loading always sees the new
+        image.
         """
+        if self.is_running():
+            self._mutex.lock()
+            self._pending_source = image
+            self._condition.wakeOne()
+            self._mutex.unlock()
+            return
+        self._install_source(image)
+
+    def _install_source(self, image: LinearImage) -> None:
         self._proxy_manager.set_image(image)
         self._result_cache.clear()
+
+    def _take_pending_source(self) -> Optional[LinearImage]:
+        self._mutex.lock()
+        image = self._pending_source
+        self._pending_source = None
+        self._mutex.unlock()
+        return image
     
     def clear_image(self) -> None:
         """Clear the current image."""
+        self._mutex.lock()
+        self._pending_source = None
+        self._mutex.unlock()
         self._proxy_manager.clear()
         self._queue.clear()
         self._result_cache.clear()
@@ -266,8 +294,12 @@ class ProcessingWorker(QObject):
         )
         self._queue.enqueue(request)
 
-        # Wake up the worker thread
+        # Wake up the worker thread. Holding the mutex closes the gap
+        # between the worker's "queue is empty" check and its wait(), where
+        # an unlocked wake could be lost and the request left waiting.
+        self._mutex.lock()
         self._condition.wakeOne()
+        self._mutex.unlock()
 
         return request.request_id
 
@@ -426,13 +458,22 @@ class ProcessingWorker(QObject):
     def _run(self) -> None:
         """Main worker loop (runs in worker thread)."""
         while self._running:
+            # A newly loaded image always lands before the next request.
+            pending_source = self._take_pending_source()
+            if pending_source is not None:
+                self._install_source(pending_source)
+
             # Get next request
             request = self._queue.get_latest()
-            
+
             if request is None:
                 # No work, wait for signal
                 self._mutex.lock()
-                if self._running and self._queue.is_empty():
+                if (
+                    self._running
+                    and self._queue.is_empty()
+                    and self._pending_source is None
+                ):
                     self._condition.wait(self._mutex)
                 self._mutex.unlock()
                 continue
@@ -484,6 +525,7 @@ class ProcessingWorker(QObject):
                     adjustment_signature=self._adjustment_signature(request),
                     rgb=cached.rgb.copy(),
                     linear_image=result,
+                    source_size=self._full_size_of(result, source),
                 )
                 self._result_cache.move_to_end(cache_key)
                 cache_ms = _elapsed_ms(cache_start)
@@ -531,13 +573,16 @@ class ProcessingWorker(QObject):
 
             frame = None
             display_ms = 0.0
-            if request.use_proxy:
+            # Full renders get a display frame too: converting 24 MP to RGB
+            # here keeps that ~300 ms off the UI thread.
+            if request.use_proxy or self._wants_final_frames():
                 display_start = perf_counter()
                 frame = DisplayFrame.from_linear(
                     request.request_id,
                     tier,
                     self._adjustment_signature(request),
                     result,
+                    source_size=self._full_size_of(result, source),
                 )
                 display_ms = _elapsed_ms(display_start)
 
@@ -563,6 +608,8 @@ class ProcessingWorker(QObject):
                 self.preview_ready.emit(request.request_id, frame)
             else:
                 self.processing_complete.emit(request.request_id, result)
+                if frame is not None:
+                    self.final_frame_ready.emit(request.request_id, frame)
 
             logger.info(
                 "PERF worker request=%s tier=%s cache=miss source_ms=%.2f "
@@ -894,6 +941,22 @@ class ProcessingWorker(QObject):
         )
 
         return result
+
+    def _full_size_of(
+        self, result: LinearImage, source: LinearImage
+    ) -> Tuple[int, int]:
+        """Full-resolution ``(width, height)`` that ``result`` (rendered
+        from ``source``, possibly a proxy and possibly cropped) represents."""
+        original_w = self._proxy_manager.original_size[0] or source.shape[1]
+        scale = original_w / float(source.shape[1])
+        return (
+            max(1, int(round(result.shape[1] * scale))),
+            max(1, int(round(result.shape[0] * scale))),
+        )
+
+    def _wants_final_frames(self) -> bool:
+        """True when something listens for ``final_frame_ready``."""
+        return self.receivers(self.final_frame_ready) > 0
 
     @staticmethod
     def _request_tier(request: ProcessingRequest) -> str:

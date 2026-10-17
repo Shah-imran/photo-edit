@@ -670,6 +670,12 @@ class MainWindow(QMainWindow):
         image = self._image_controller.get_current_image()
         if image is None:
             return
+        # A 256-bin histogram is stable from ~0.25 MP; subsample so a
+        # full-resolution frame can't stall the UI thread (it cost ~100 ms
+        # on every photo open).
+        step = max(1, int(round((image.shape[0] * image.shape[1] / 250_000) ** 0.5)))
+        if step > 1:
+            image = image[::step, ::step]
         histogram = compute_luminance_histogram(image)
         self._tools_panel.update_curve_histogram(histogram)
         self._tools_panel.update_histogram(image)
@@ -1022,9 +1028,10 @@ class MainWindow(QMainWindow):
         """
         self._tools_panel.set_adjustments(state, emit_signal=False)
         self._adjustment_persist_timer.start()
-        current_image = self._image_controller.image_model.get_current_image()
-        if current_image is not None:
-            height, width = current_image.shape[0], current_image.shape[1]
+        # current_image may be a preview proxy; report the real output size.
+        output_size = self._image_controller.get_output_size()
+        if output_size is not None:
+            width, height = output_size
             self._dimensions_label.setText(f"{width} × {height}")
             self._megapixels_label.setText(f"{(width * height) / 1_000_000:.1f} MP")
 
@@ -1050,13 +1057,12 @@ class MainWindow(QMainWindow):
         state = self._image_controller.get_adjustment_state()
         self._pre_crop_mode_adjustment_state = state
         crop = state.get("crop") or {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
-        uncropped = self._image_controller.get_export_image(apply_crop=False)
-        if uncropped is None:
+        size = self._image_controller.preview_uncropped()
+        if size is None:
             return
-        self._image_view.set_image(uncropped, emit_loaded=False, preserve_view_scale=True)
         self._image_view.enter_crop_mode(crop)
         overlay = self._image_view.get_crop_overlay()
-        height, width = uncropped.shape[0], uncropped.shape[1]
+        width, height = size
         self._crop_toolbar.set_original_ratio(width / height if height else None)
         self._crop_toolbar.reset_to_free()
         if overlay is not None:
@@ -1082,9 +1088,7 @@ class MainWindow(QMainWindow):
         self._crop_toolbar.hide()
         self._image_toolbar.show()
         self._pre_crop_mode_adjustment_state = None
-        image = self._image_controller.get_export_image()
-        if image is not None:
-            self._image_view.set_image(image, emit_loaded=False, preserve_view_scale=True)
+        self._image_controller.refresh_view()
 
     def _on_crop_aspect_ratio_changed(self, ratio) -> None:
         overlay = self._image_view.get_crop_overlay()

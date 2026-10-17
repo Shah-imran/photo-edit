@@ -59,6 +59,10 @@ def sample_image():
 def _make_has_image(main_window, sample_image, heal_spots=None):
     main_window._image_controller.has_image = MagicMock(return_value=True)
     main_window._image_controller.get_export_image = MagicMock(return_value=sample_image)
+    main_window._image_controller.preview_uncropped = MagicMock(
+        return_value=(sample_image.shape[1], sample_image.shape[0])
+    )
+    main_window._image_controller.refresh_view = MagicMock()
     main_window._image_controller.get_adjustment_state = MagicMock(
         return_value={
             "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
