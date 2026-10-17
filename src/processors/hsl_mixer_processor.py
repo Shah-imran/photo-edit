@@ -25,6 +25,7 @@ import cv2
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 #: Band name -> hue center in degrees (HSV hue, as returned by
@@ -97,6 +98,24 @@ class HslMixerProcessor(BaseProcessor):
         Returns:
             A new float32 array of the same shape.
         """
+        if not band_params or all(v == 0.0 for v in band_params.values()):
+            return np.array(image, dtype=np.float32, copy=True)
+        fused = pixel_kernels.hsl(
+            image,
+            list(HSL_BAND_CENTERS.values()),
+            [band_params.get(f"{band}_hue", 0.0) / 100.0 * _MAX_HUE_SHIFT_DEG
+             for band in HSL_BAND_CENTERS],
+            [band_params.get(f"{band}_sat", 0.0) / 100.0 for band in HSL_BAND_CENTERS],
+            [band_params.get(f"{band}_lum", 0.0) / 100.0 * _LUM_STRENGTH
+             for band in HSL_BAND_CENTERS],
+            _BAND_WIDTH_DEG,
+        )
+        if fused is not None:
+            return fused
+        return self._process_numpy(image, **band_params)
+
+    def _process_numpy(self, image: LinearImage, **band_params: float) -> LinearImage:
+        """Reference implementation (and fallback without Numba)."""
         result = np.array(image, dtype=np.float32, copy=True)
 
         if not band_params or all(v == 0.0 for v in band_params.values()):

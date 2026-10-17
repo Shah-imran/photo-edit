@@ -52,19 +52,10 @@ TIERS = {
 }
 FULL_TIER = (6000, 4000, {"point": 400.0, "spatial": 900.0})
 
-# Stages that are known to be over budget and are being fixed in Phase 3
-# of the overhaul. Remove a name once its stage meets the budget; a stage
-# listed here that starts passing is reported as XPASS.
-KNOWN_SLOW: set[str] = {
-    "exposure",
-    "tonal",
-    "curve",
-    "color",
-    "hsl",
-    "color_grading",
-    "vignette",
-    "defringe",
-}
+# Stages allowed to be over budget while being fixed (xfail). Empty since
+# Phase 3 moved the slow stages to compiled kernels; keep it that way --
+# a new stage should meet its budget before it is committed.
+KNOWN_SLOW: set[str] = set()
 
 RUNS = 5
 

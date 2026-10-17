@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 
@@ -80,6 +81,28 @@ class ExposureProcessor(BaseProcessor):
         Returns:
             New ``LinearImage`` with adjustments applied.
         """
+        if exposure == 0.0 and contrast == 0.0 and brightness == 0.0:
+            return np.asarray(image, dtype=np.float32).copy()
+        fused = pixel_kernels.exposure(
+            image,
+            float(2.0 ** exposure) if exposure != 0.0 else None,
+            float(np.clip(1.0 + brightness / 100.0, 0.0, 2.0))
+            if brightness != 0.0 else None,
+            float(np.clip(1.0 + contrast / 100.0, 0.0, 2.0))
+            if contrast != 0.0 else None,
+            _linear_to_srgb_lut(),
+            _srgb_to_linear_lut(),
+            _SRGB_TO_LINEAR_MIN,
+            _SRGB_TO_LINEAR_MAX,
+        )
+        if fused is not None:
+            return fused
+        return self._process_numpy(image, exposure, contrast, brightness)
+
+    def _process_numpy(
+        self, image: LinearImage, exposure: float, contrast: float, brightness: float
+    ) -> LinearImage:
+        """Reference implementation (and fallback without Numba)."""
         result = np.asarray(image, dtype=np.float32).copy()
 
         if exposure != 0.0:

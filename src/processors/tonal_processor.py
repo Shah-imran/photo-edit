@@ -19,6 +19,7 @@ pipeline boundaries (``ImageService``, ``ImageView``), not here.
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 
@@ -64,6 +65,35 @@ class TonalProcessor(BaseProcessor):
         Returns:
             A new float32 array of the same shape. Values are not clamped.
         """
+        if highlights == 0.0 and shadows == 0.0 and whites == 0.0 and blacks == 0.0:
+            return np.array(linear_rgb, dtype=np.float32, copy=True)
+        black_point = span = None
+        if whites != 0.0 or blacks != 0.0:
+            white_point = 1.0 - whites / 200.0
+            black_point = -blacks / 200.0
+            span = max(white_point - black_point, 1e-06)
+        fused = pixel_kernels.tonal(
+            linear_rgb,
+            black_point,
+            span,
+            highlights / 100.0,
+            shadows / 100.0,
+            self._RECOVERY_STRENGTH,
+            self._LUMA_WEIGHTS,
+        )
+        if fused is not None:
+            return fused
+        return self._process_numpy(linear_rgb, highlights, shadows, whites, blacks)
+
+    def _process_numpy(
+        self,
+        linear_rgb: LinearImage,
+        highlights: float,
+        shadows: float,
+        whites: float,
+        blacks: float,
+    ) -> LinearImage:
+        """Reference implementation (and fallback without Numba)."""
         result = np.array(linear_rgb, dtype=np.float32, copy=True)
 
         if whites != 0.0 or blacks != 0.0:

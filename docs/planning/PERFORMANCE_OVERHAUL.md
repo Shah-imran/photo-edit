@@ -161,3 +161,10 @@ Updated as phases land; see git history for detail.
   photo. Real-app run on a 24 MP CR3: no UI stalls over 50 ms across
   open, drag, release, undo, redo, zoom, mask and crop. Details:
   [implementation-notes/2026-10-17-responsiveness-overhaul.md](implementation-notes/2026-10-17-responsiveness-overhaul.md).
+- **2026-10-17 Phase 3 (kernels)** - every slow develop stage runs as a
+  compiled, multi-threaded Numba kernel (`src/utils/pixel_kernels.py`),
+  with the original NumPy code kept as fallback and parity reference.
+  24 MP: tone curve 4.4 s -> 40 ms, defringe 2.9 s -> ~170 ms, exposure
+  1.0 s -> 50 ms, tonal 1.5 s -> 37 ms. All stages meet their budgets.
+  Also fixed: requests older than 1 s were silently dropped after
+  rendering, so any render slower than a second never appeared.

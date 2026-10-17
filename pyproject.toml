@@ -19,6 +19,9 @@ dependencies = [
     "rawpy",
     "piexif",
     "colorspacious",
+    # Compiled multi-threaded pixel kernels (src/utils/pixel_kernels.py);
+    # the app falls back to NumPy if it is missing.
+    "numba",
 ]
 
 [project.optional-dependencies]

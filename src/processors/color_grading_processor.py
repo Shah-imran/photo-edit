@@ -27,6 +27,7 @@ import cv2
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 COLOR_GRADING_RANGES: Tuple[str, str, str] = ("shadows", "midtones", "highlights")
@@ -134,6 +135,26 @@ class ColorGradingProcessor(BaseProcessor):
         ):
             return result
 
+        centers = _range_centers(params.get("balance", 0.0))
+        tints = np.zeros((3, 3), dtype=np.float32)
+        for index, (hue, sat, _lum) in enumerate(range_params.values()):
+            if sat != 0.0:
+                tint_hsv = np.array([[[hue, 1.0, 1.0]]], dtype=np.float32)
+                tints[index] = cv2.cvtColor(tint_hsv, cv2.COLOR_HSV2RGB)[0, 0]
+        fused = pixel_kernels.color_grading(
+            result,
+            [centers[range_] for range_ in COLOR_GRADING_RANGES],
+            _window_width(params.get("blending", 50.0)),
+            [sat / 100.0 * _TINT_STRENGTH for _, sat, _ in range_params.values()],
+            tints,
+            [lum / 100.0 * _LUM_STRENGTH for _, _, lum in range_params.values()],
+        )
+        if fused is not None:
+            return fused
+        return self._process_numpy(result, range_params, params)
+
+    def _process_numpy(self, result, range_params, params) -> LinearImage:
+        """Reference implementation (and fallback without Numba)."""
         original_rgb = result[..., :3]
         clipped = np.clip(original_rgb, 0.0, 1.0)
         hsv = cv2.cvtColor(clipped, cv2.COLOR_RGB2HSV)

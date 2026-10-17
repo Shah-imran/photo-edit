@@ -44,6 +44,7 @@ from src.processors.crop_processor import CropProcessor
 from src.processors.mask_processor import MaskProcessor
 from src.processors.healing_processor import HealingProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 
@@ -457,6 +458,9 @@ class ProcessingWorker(QObject):
     
     def _run(self) -> None:
         """Main worker loop (runs in worker thread)."""
+        # Compile/load the pixel kernels here, off the UI thread, so the
+        # first slider move doesn't pay the one-off JIT cost.
+        pixel_kernels.warm_up()
         while self._running:
             # A newly loaded image always lands before the next request.
             pending_source = self._take_pending_source()
@@ -478,7 +482,7 @@ class ProcessingWorker(QObject):
                 self._mutex.unlock()
                 continue
             
-            # Skip if cancelled or stale
+            # Skip if cancelled (superseded by a newer request)
             if not request.should_process():
                 continue
             

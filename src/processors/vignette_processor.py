@@ -17,6 +17,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 
@@ -40,6 +41,19 @@ class VignetteProcessor(BaseProcessor):
         value = float(np.clip(vignette, -100.0, 100.0))
         if value == 0.0:
             return source.copy()
+        fused = pixel_kernels.vignette(
+            source,
+            self._MIDPOINT,
+            abs(value) / 100.0,
+            value > 0.0,
+            self._LIGHTEN_COLOR,
+        )
+        if fused is not None:
+            return fused
+        return self._process_numpy(source, value)
+
+    def _process_numpy(self, source: LinearImage, value: float) -> LinearImage:
+        """Reference implementation (and fallback without Numba)."""
 
         height, width = source.shape[0], source.shape[1]
         half_h = max(height / 2.0, 1e-6)

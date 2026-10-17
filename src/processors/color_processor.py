@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 
@@ -33,6 +34,22 @@ class ColorProcessor(BaseProcessor):
         Returns:
             New ``LinearImage`` with adjustments applied.
         """
+        if vibrance == 0.0 and saturation == 0.0:
+            return np.asarray(image, dtype=np.float32).copy()
+        fused = pixel_kernels.color(
+            np.asarray(image, dtype=np.float32),
+            float(vibrance) / 100.0 if vibrance != 0.0 else None,
+            float(np.clip(1.0 + saturation / 100.0, 0.0, 2.0))
+            if saturation != 0.0 else None,
+        )
+        if fused is not None:
+            return fused
+        return self._process_numpy(image, saturation, vibrance)
+
+    def _process_numpy(
+        self, image: LinearImage, saturation: float, vibrance: float
+    ) -> LinearImage:
+        """Reference implementation (and fallback without Numba)."""
         result = np.asarray(image, dtype=np.float32).copy()
 
         # Vibrance first so subsequent saturation acts on the boosted

@@ -73,7 +73,12 @@ class ProcessingRequest:
         Returns:
             True if request should be processed
         """
-        return not self.cancelled and not self.is_stale()
+        # Only cancellation matters: enqueue() already cancels every older
+        # request, so "latest wins" holds without an age limit. The old
+        # 1-second staleness rule silently dropped any render that took
+        # longer than a second to compute (full-resolution detail, the
+        # first render after a kernel compile, slow machines).
+        return not self.cancelled
 
 
 class ProcessingQueue:

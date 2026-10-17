@@ -35,7 +35,9 @@ class TestProcessingRequest:
         request.timestamp = time.time() - 2.0
         
         assert request.is_stale(max_age_seconds=1.0) is True
-        assert request.should_process() is False
+        # Age alone no longer cancels a request: slow renders (full
+        # resolution, first render after a kernel compile) must still land.
+        assert request.should_process() is True
 
     def test_request_not_stale(self):
         """Test fresh request."""
@@ -314,3 +316,19 @@ class TestProcessingQueue:
         queue.enqueue(r2)
         assert queue.is_latest(r1.request_id) is False
         assert queue.is_latest(r2.request_id) is True
+
+
+def test_slow_requests_are_not_dropped_for_age():
+    """A render that takes longer than a second must still be delivered;
+    only a newer request may supersede it."""
+    import time as _time
+
+    from src.processing.processing_queue import ProcessingQueue
+
+    queue = ProcessingQueue()
+    request = queue.create_request(exposure_params={"exposure": 1.0})
+    queue.enqueue(request)
+    request.timestamp = _time.time() - 30.0  # took a long time
+
+    assert request.should_process() is True
+    assert queue.get_latest() is request

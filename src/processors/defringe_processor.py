@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 
@@ -76,7 +77,26 @@ class DefringeProcessor(BaseProcessor):
         value = float(np.clip(defringe, 0.0, 100.0))
         if value == 0.0:
             return source.copy()
+        luma = pixel_kernels.luma(source)
+        if luma is not None:
+            # Gradients stay in OpenCV (fast, separable); everything else is
+            # one fused per-pixel pass.
+            return pixel_kernels.defringe(
+                source,
+                luma,
+                cv2.Sobel(luma, cv2.CV_32F, 1, 0, ksize=3),
+                cv2.Sobel(luma, cv2.CV_32F, 0, 1, ksize=3),
+                value / 100.0,
+                self._EDGE_EPSILON,
+                self._CHROMA_GATE,
+                self._PURPLE_HUE_DEG,
+                self._GREEN_HUE_DEG,
+                self._HUE_BAND_WIDTH_DEG,
+            )
+        return self._process_numpy(source, value)
 
+    def _process_numpy(self, source: LinearImage, value: float) -> LinearImage:
+        """Reference implementation (and fallback without Numba)."""
         r, g, b = source[..., 0], source[..., 1], source[..., 2]
         y = 0.2126 * r + 0.7152 * g + 0.0722 * b
 

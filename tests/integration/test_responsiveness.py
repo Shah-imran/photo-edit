@@ -19,6 +19,7 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 
 from src.controllers.image_controller import ImageController
+from src.utils import pixel_kernels
 from src.views.image_view import ImageView
 
 
@@ -46,6 +47,9 @@ def big_image():
 
 @pytest.fixture
 def controller(qapp, qtbot):
+    # Compile (or load) the pixel kernels first: a first-ever JIT compile
+    # is a one-off install cost, not what these tests measure.
+    pixel_kernels.warm_up()
     view = ImageView()
     view.resize(1200, 800)
     view.show()
