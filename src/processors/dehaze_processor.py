@@ -20,7 +20,9 @@ import cv2
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
+from src.utils.spatial import gaussian_blur, relative_sigma
 
 
 class DehazeProcessor(BaseProcessor):
@@ -47,13 +49,15 @@ class DehazeProcessor(BaseProcessor):
 
         if value > 0.0:
             strength = value / 100.0
-            dark_channel = np.min(source, axis=-1)
-            veil = cv2.GaussianBlur(
-                dark_channel, (0, 0), sigmaX=self._SIGMA, sigmaY=self._SIGMA,
-                borderType=cv2.BORDER_REFLECT_101,
-            )[..., np.newaxis]
+            dark_channel = pixel_kernels.dark_channel(source)
+            if dark_channel is None:
+                dark_channel = np.min(source, axis=-1)
+            veil = gaussian_blur(dark_channel, relative_sigma(source, self._SIGMA))
             denom = max(1.0 - strength * self._VEIL_STRENGTH_FACTOR, self._EPSILON)
-            result = (source - strength * veil) / denom
+            fused = pixel_kernels.dehaze_combine(source, veil, strength, denom)
+            if fused is not None:
+                return fused
+            result = (source - strength * veil[..., np.newaxis]) / denom
         else:
             strength = -value / 100.0
             result = source + strength * (self._HAZE_COLOR - source)

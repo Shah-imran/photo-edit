@@ -180,3 +180,11 @@ Updated as phases land; see git history for detail.
   strip; click the active tool again = Done, switching tools commits,
   Esc cancels, R / Q / Shift+W shortcuts. Spec and remaining gaps in
   docs/UI_UX.md.
+- **2026-10-17 Phase 3 (pipeline)** - one develop pipeline for every render
+  path (`src/processing/pipeline.py`; five drifted copies removed, fixing a
+  mask crash in the synchronous preview). Spatial effects are now
+  resolution-independent (`src/utils/spatial.py`): Clarity's preview and
+  export differed by 2.3 levels on a 3.6-level effect, now 0.0; Dehaze
+  3.1 -> 0.3. Fused kernels for the arithmetic around the blurs. A
+  14-adjustment edit: drag 63 -> 26 ms, release 256 -> 104 ms, 24 MP
+  export render 4.0 -> 2.0 s; budgeted in test_stage_budgets.py.

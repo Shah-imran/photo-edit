@@ -591,6 +591,138 @@ def defringe(image, luma_plane, gx, gy, amount, edge_eps, chroma_gate, purple,
     return out
 
 
+
+if HAVE_NUMBA:
+    # Arithmetic around the blurs of the spatial stages (the blurs stay in
+    # OpenCV). Each replaces several full-image NumPy passes with one.
+
+    @njit(parallel=True, cache=True)
+    def _unsharp_kernel(source, blurred, amount, out):  # pragma: no cover
+        height, width, channels = source.shape
+        for y in prange(height):
+            for x in range(width):
+                for c in range(channels):
+                    v = source[y, x, c]
+                    out[y, x, c] = v + amount * (v - blurred[y, x, c])
+
+    @njit(parallel=True, cache=True)
+    def _masked_unsharp_kernel(source, blurred, amount, eps, out):  # pragma: no cover
+        height, width, channels = source.shape
+        for y in prange(height):
+            for x in range(width):
+                for c in range(channels):
+                    v = source[y, x, c]
+                    d = v - blurred[y, x, c]
+                    m = abs(d)
+                    out[y, x, c] = v + amount * d * (m / (m + eps))
+
+    @njit(parallel=True, cache=True)
+    def _dark_channel_kernel(source, out):  # pragma: no cover
+        height, width = source.shape[0], source.shape[1]
+        for y in prange(height):
+            for x in range(width):
+                out[y, x] = min(min(source[y, x, 0], source[y, x, 1]), source[y, x, 2])
+
+    @njit(parallel=True, cache=True)
+    def _dehaze_kernel(source, veil, strength, denom, out):  # pragma: no cover
+        height, width, channels = source.shape
+        for y in prange(height):
+            for x in range(width):
+                k = strength * veil[y, x]
+                for c in range(channels):
+                    out[y, x, c] = (source[y, x, c] - k) / denom
+
+    @njit(parallel=True, cache=True)
+    def _chroma_split_kernel(source, wr, wg, wb, luminance, chroma):  # pragma: no cover
+        height, width = source.shape[0], source.shape[1]
+        for y in prange(height):
+            for x in range(width):
+                r = source[y, x, 0]
+                b = source[y, x, 2]
+                lum = wr * r + wg * source[y, x, 1] + wb * b
+                luminance[y, x] = lum
+                chroma[y, x, 0] = r - lum
+                chroma[y, x, 1] = b - lum
+
+    @njit(parallel=True, cache=True)
+    def _chroma_merge_kernel(luminance, chroma, smoothed, t, wr, wg, wb, out):  # pragma: no cover
+        height, width = luminance.shape[0], luminance.shape[1]
+        for y in prange(height):
+            for x in range(width):
+                cr = chroma[y, x, 0] + t * (smoothed[y, x, 0] - chroma[y, x, 0])
+                cb = chroma[y, x, 1] + t * (smoothed[y, x, 1] - chroma[y, x, 1])
+                lum = luminance[y, x]
+                out[y, x, 0] = lum + cr
+                out[y, x, 1] = lum - (wr * cr + wb * cb) / wg
+                out[y, x, 2] = lum + cb
+
+
+def unsharp(source, blurred, amount):
+    """``source + amount * (source - blurred)`` in one pass, or None."""
+    if not HAVE_NUMBA:
+        return None
+    source = np.ascontiguousarray(source, dtype=np.float32)
+    out = np.empty_like(source)
+    _run(_unsharp_kernel, source, np.ascontiguousarray(blurred, dtype=np.float32),
+         np.float32(amount), out)
+    return out
+
+
+def masked_unsharp(source, blurred, amount, eps):
+    """Edge-masked unsharp mask (sharpening) in one pass, or None."""
+    if not HAVE_NUMBA:
+        return None
+    source = np.ascontiguousarray(source, dtype=np.float32)
+    out = np.empty_like(source)
+    _run(_masked_unsharp_kernel, source, np.ascontiguousarray(blurred, dtype=np.float32),
+         np.float32(amount), np.float32(eps), out)
+    return out
+
+
+def dark_channel(source):
+    """Per-pixel min over R, G, B, or None."""
+    if not HAVE_NUMBA:
+        return None
+    source = np.ascontiguousarray(source, dtype=np.float32)
+    out = np.empty(source.shape[:2], dtype=np.float32)
+    _run(_dark_channel_kernel, source, out)
+    return out
+
+
+def dehaze_combine(source, veil, strength, denom):
+    """``(source - strength * veil) / denom`` in one pass, or None."""
+    if not HAVE_NUMBA:
+        return None
+    source = np.ascontiguousarray(source, dtype=np.float32)
+    out = np.empty_like(source)
+    _run(_dehaze_kernel, source, np.ascontiguousarray(veil, dtype=np.float32),
+         np.float32(strength), np.float32(denom), out)
+    return out
+
+
+def chroma_split(source, weights):
+    """``(luminance, chroma)`` with chroma = (R - Y, B - Y), or None."""
+    if not HAVE_NUMBA:
+        return None
+    source = np.ascontiguousarray(source, dtype=np.float32)
+    luminance = np.empty(source.shape[:2], dtype=np.float32)
+    chroma = np.empty(source.shape[:2] + (2,), dtype=np.float32)
+    wr, wg, wb = (np.float32(w) for w in weights)
+    _run(_chroma_split_kernel, source, wr, wg, wb, luminance, chroma)
+    return luminance, chroma
+
+
+def chroma_merge(luminance, chroma, smoothed, t, weights):
+    """Blend chroma toward ``smoothed`` by ``t`` and rebuild RGB, or None."""
+    if not HAVE_NUMBA:
+        return None
+    out = np.empty(luminance.shape + (3,), dtype=np.float32)
+    wr, wg, wb = (np.float32(w) for w in weights)
+    _run(_chroma_merge_kernel, luminance, chroma,
+         np.ascontiguousarray(smoothed, dtype=np.float32), np.float32(t), wr, wg, wb, out)
+    return out
+
+
 def warm_up() -> None:
     """Compile (or load from the on-disk cache) every kernel once.
 
@@ -613,4 +745,9 @@ def warm_up() -> None:
     color_grading(tiny, [0.0, 0.5, 1.0], 1.0, [0.1, 0.0, 0.0], np.zeros((3, 3)), [0.0, 0.1, 0.0])
     plane = luma(tiny)
     defringe(tiny, plane, plane, plane, 0.5, 0.1, 0.05, 290.0, 110.0, 25.0)
+    unsharp(tiny, tiny, 0.5)
+    masked_unsharp(tiny, tiny, 0.5, 0.02)
+    dehaze_combine(tiny, dark_channel(tiny), 0.5, 0.6)
+    lum, chroma = chroma_split(tiny, (0.2, 0.7, 0.1))
+    chroma_merge(lum, chroma, chroma, 0.5, (0.2, 0.7, 0.1))
     logger.info("PERF kernels.warm_up numba ms=%.0f", (perf_counter() - start) * 1000)

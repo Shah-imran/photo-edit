@@ -101,3 +101,35 @@ def test_sync_live_preview_with_a_mask_does_not_raise(controller):
     fields as keyword arguments (TypeError)."""
     controller.apply_adjustments(add_to_history=False)
     assert controller.image_model.current_image is not None
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"clarity_params": {"clarity": 70.0}},
+        {"texture_params": {"texture": 70.0}},
+        {"dehaze_params": {"dehaze": 60.0}},
+        {"sharpening_params": {"sharpening": 80.0}},
+        {"color_nr_params": {"color_nr": 80.0}},
+    ],
+)
+def test_preview_matches_downscaled_export(params):
+    """What the user approves on the preview is what gets exported: the
+    same edit rendered at full size and downscaled matches the preview.
+    (Effects used fixed pixel radii, so Clarity on a 1400 px preview and on
+    a 6000 px export looked different.)"""
+    import cv2
+
+    rng = np.random.default_rng(3)
+    small = cv2.resize(rng.random((64, 96, 3), dtype=np.float32), (1050, 700),
+                       interpolation=cv2.INTER_CUBIC)
+    full = cv2.resize(small, (3150, 2100), interpolation=cv2.INTER_CUBIC)
+    pipeline = DevelopPipeline()
+
+    preview = pipeline.render(small, pixel_scale=1 / 3, **params)
+    export = pipeline.render(full, **params)
+    export_small = cv2.resize(export, (1050, 700), interpolation=cv2.INTER_AREA)
+
+    effect = np.abs(preview - small).mean()
+    mismatch = np.abs(preview - export_small).mean()
+    assert mismatch <= max(0.15 * effect, 2e-3), (mismatch, effect)

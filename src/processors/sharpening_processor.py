@@ -19,6 +19,7 @@ import cv2
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 
@@ -41,17 +42,29 @@ class SharpeningProcessor(BaseProcessor):
     _MAX_AMOUNT = 1.25
     _MASK_EPSILON = 0.02
 
-    def process(self, image: LinearImage, sharpening: float = 0.0) -> LinearImage:
+    def process(
+        self, image: LinearImage, sharpening: float = 0.0, pixel_scale: float = 1.0
+    ) -> LinearImage:
         """Apply Sharpening in the range ``0`` (none) to ``100`` (strongest)."""
         source = np.asarray(image, dtype=np.float32)
         value = float(np.clip(sharpening, 0.0, 100.0))
         if value == 0.0:
             return source.copy()
 
+        # Native-pixel radius; on a proxy (pixel_scale < 1) a sub-pixel radius
+        # means the export's sharpening is invisible at this size -- which
+        # is exactly what the downscaled export shows.
+        sigma = self._SIGMA * float(pixel_scale)
+        if sigma < 0.25:
+            return source.copy()
         blurred = cv2.GaussianBlur(
-            source, (0, 0), sigmaX=self._SIGMA, sigmaY=self._SIGMA,
-            borderType=cv2.BORDER_REFLECT_101,
+            source, (0, 0), sigmaX=sigma, sigmaY=sigma, borderType=cv2.BORDER_REFLECT_101
         )
+        fused = pixel_kernels.masked_unsharp(
+            source, blurred, (value / 100.0) * self._MAX_AMOUNT, self._MASK_EPSILON
+        )
+        if fused is not None:
+            return fused
         detail = source - blurred
 
         # Soft edge mask: near 0 where the residual is near 0 (flat/smooth

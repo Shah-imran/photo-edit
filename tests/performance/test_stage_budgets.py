@@ -126,3 +126,43 @@ def test_stage_full_resolution_budget(worker, stage):
     assert elapsed <= budgets[kind], (
         f"{stage} took {elapsed:.0f} ms at 24 MP; budget {budgets[kind]:.0f} ms"
     )
+
+
+# A heavy, realistic edit: 14 adjustments at once. Per-stage budgets can all
+# pass while the sum still misses the frame budget, so the whole pipeline is
+# budgeted too (docs/planning/PERFORMANCE_OVERHAUL.md section 3).
+HEAVY_RECIPE = dict(
+    exposure_params={"exposure": 0.6, "contrast": 15.0},
+    tonal_params={"shadows": 30.0, "highlights": -40.0},
+    wb_params={"temperature": 10.0},
+    color_params={"vibrance": 20.0, "saturation": 10.0},
+    curve_params={"points": [[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]]},
+    hsl_params={"blue_sat": -20.0},
+    texture_params={"texture": 20.0},
+    clarity_params={"clarity": 25.0},
+    dehaze_params={"dehaze": 10.0},
+    vignette_params={"vignette": -20.0},
+    sharpening_params={"sharpening": 40.0},
+    luminance_nr_params={"luminance_nr": 20.0},
+    color_nr_params={"color_nr": 25.0},
+    defringe_params={"defringe": 30.0},
+)
+PIPELINE_BUDGETS_MS = {"interactive": 33.0, "quality": 150.0}
+
+
+@pytest.mark.parametrize("tier", list(PIPELINE_BUDGETS_MS))
+def test_heavy_edit_renders_within_frame_budget(tier):
+    from src.processing.pipeline import DevelopPipeline
+
+    width, height, _ = TIERS[tier]
+    pipeline = DevelopPipeline()
+    image = _image(width, height)
+    scale = max(width, height) / 6000.0  # proxy of a 24 MP photo
+    best = float("inf")
+    for _ in range(RUNS):
+        start = perf_counter()
+        pipeline.render(image, pixel_scale=scale, **HEAVY_RECIPE)
+        best = min(best, (perf_counter() - start) * 1000.0)
+    assert best <= PIPELINE_BUDGETS_MS[tier], (
+        f"14-adjustment edit took {best:.0f} ms at {tier}; budget {PIPELINE_BUDGETS_MS[tier]:.0f} ms"
+    )

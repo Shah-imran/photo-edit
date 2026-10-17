@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 
@@ -60,7 +61,7 @@ class ColorNoiseReductionProcessor(BaseProcessor):
     _CHROMA_SIGMA = 4.0
 
     def process(
-        self, image: LinearImage, color_nr: float = 0.0
+        self, image: LinearImage, color_nr: float = 0.0, pixel_scale: float = 1.0
     ) -> LinearImage:
         """Apply Color NR in the range ``0`` (none) to ``100`` (strongest)."""
         source = np.asarray(image, dtype=np.float32)
@@ -68,6 +69,18 @@ class ColorNoiseReductionProcessor(BaseProcessor):
         if value == 0.0:
             return source.copy()
 
+        sigma = self._CHROMA_SIGMA * float(pixel_scale)
+        split = pixel_kernels.chroma_split(source, self._LUMINANCE_WEIGHTS)
+        if split is not None:
+            # Both chroma planes blurred in one OpenCV call; split and
+            # merge are single fused passes.
+            luminance, chroma = split
+            smoothed = cv2.GaussianBlur(
+                chroma, (0, 0), sigmaX=sigma, borderType=cv2.BORDER_REFLECT_101
+            )
+            return pixel_kernels.chroma_merge(
+                luminance, chroma, smoothed, value / 100.0, self._LUMINANCE_WEIGHTS
+            )
         wr, wg, wb = self._LUMINANCE_WEIGHTS
         r, g, b = source[..., 0], source[..., 1], source[..., 2]
         luminance = (wr * r + wg * g + wb * b).astype(np.float32)
@@ -77,13 +90,13 @@ class ColorNoiseReductionProcessor(BaseProcessor):
         smoothed_cr = cv2.GaussianBlur(
             cr,
             (0, 0),
-            sigmaX=self._CHROMA_SIGMA,
+            sigmaX=self._CHROMA_SIGMA * float(pixel_scale),
             borderType=cv2.BORDER_REFLECT_101,
         )
         smoothed_cb = cv2.GaussianBlur(
             cb,
             (0, 0),
-            sigmaX=self._CHROMA_SIGMA,
+            sigmaX=self._CHROMA_SIGMA * float(pixel_scale),
             borderType=cv2.BORDER_REFLECT_101,
         )
 

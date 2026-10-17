@@ -146,3 +146,48 @@ def test_defringe_matches_reference(rgb, value):
     fast = processor.process(rgb, defringe=value)
     reference = processor._process_numpy(rgb, value)
     np.testing.assert_allclose(fast, reference, atol=ATOL)
+
+
+from src.processors.clarity_processor import ClarityProcessor  # noqa: E402
+from src.processors.color_noise_reduction_processor import ColorNoiseReductionProcessor  # noqa: E402
+from src.processors.dehaze_processor import DehazeProcessor  # noqa: E402
+from src.processors.sharpening_processor import SharpeningProcessor  # noqa: E402
+from src.processors.texture_processor import TextureProcessor  # noqa: E402
+
+
+def _numpy_only(monkeypatch, *names):
+    for name in names:
+        monkeypatch.setattr(pixel_kernels, name, lambda *a, **k: None)
+
+
+@pytest.mark.parametrize("cls,kw", [(ClarityProcessor, "clarity"), (TextureProcessor, "texture")])
+@pytest.mark.parametrize("value", [-80.0, 45.0])
+def test_unsharp_stages_match_reference(rgb, monkeypatch, cls, kw, value):
+    fast = cls().process(rgb, **{kw: value})
+    _numpy_only(monkeypatch, "unsharp")
+    reference = cls().process(rgb, **{kw: value})
+    np.testing.assert_allclose(fast, reference, atol=ATOL)
+
+
+@pytest.mark.parametrize("value", [30.0, 100.0])
+def test_dehaze_matches_reference(rgb, monkeypatch, value):
+    fast = DehazeProcessor().process(rgb, dehaze=value)
+    _numpy_only(monkeypatch, "dark_channel", "dehaze_combine")
+    reference = DehazeProcessor().process(rgb, dehaze=value)
+    np.testing.assert_allclose(fast, reference, atol=ATOL)
+
+
+@pytest.mark.parametrize("value", [25.0, 100.0])
+def test_sharpening_matches_reference(rgb, monkeypatch, value):
+    fast = SharpeningProcessor().process(rgb, sharpening=value)
+    _numpy_only(monkeypatch, "masked_unsharp")
+    reference = SharpeningProcessor().process(rgb, sharpening=value)
+    np.testing.assert_allclose(fast, reference, atol=ATOL)
+
+
+@pytest.mark.parametrize("value", [40.0, 100.0])
+def test_color_nr_matches_reference(rgb, monkeypatch, value):
+    fast = ColorNoiseReductionProcessor().process(rgb, color_nr=value)
+    _numpy_only(monkeypatch, "chroma_split", "chroma_merge")
+    reference = ColorNoiseReductionProcessor().process(rgb, color_nr=value)
+    np.testing.assert_allclose(fast, reference, atol=ATOL)

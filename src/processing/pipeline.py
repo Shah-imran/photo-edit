@@ -70,7 +70,8 @@ class DevelopPipeline:
     """Owns one instance of every processor and applies them in order."""
 
     # (stage name, param keyword, "does this stage run?", call style)
-    # call style "kwargs" spreads the params; "mask" passes mask=params.
+    # call style "kwargs" spreads the params; "mask" passes mask=params;
+    # "pixel" spreads the params plus pixel_scale (native-pixel effects).
     STAGES: List[Tuple[str, str, Callable[[Any], bool], str]] = [
         ("healing", "healing_params", lambda p: bool(p and p.get("heal_spots")), "kwargs"),
         ("exposure", "exposure_params", _any_nonzero, "kwargs"),
@@ -85,9 +86,9 @@ class DevelopPipeline:
         ("dehaze", "dehaze_params", _key_nonzero("dehaze"), "kwargs"),
         ("vignette", "vignette_params", _key_nonzero("vignette"), "kwargs"),
         ("grain", "grain_params", _key_nonzero("grain"), "kwargs"),
-        ("sharpening", "sharpening_params", _key_nonzero("sharpening"), "kwargs"),
-        ("luminance_nr", "luminance_nr_params", _key_nonzero("luminance_nr"), "kwargs"),
-        ("color_nr", "color_nr_params", _key_nonzero("color_nr"), "kwargs"),
+        ("sharpening", "sharpening_params", _key_nonzero("sharpening"), "pixel"),
+        ("luminance_nr", "luminance_nr_params", _key_nonzero("luminance_nr"), "pixel"),
+        ("color_nr", "color_nr_params", _key_nonzero("color_nr"), "pixel"),
         ("remove_ca", "remove_ca_params", _key_nonzero("remove_ca"), "kwargs"),
         ("defringe", "defringe_params", _key_nonzero("defringe"), "kwargs"),
         ("geometry", "geometry_params", _geometry_active, "kwargs"),
@@ -123,13 +124,21 @@ class DevelopPipeline:
         }
 
     def render(
-        self, image: LinearImage, timings: Optional[Dict[str, float]] = None, **params: Any
+        self,
+        image: LinearImage,
+        timings: Optional[Dict[str, float]] = None,
+        pixel_scale: float = 1.0,
+        **params: Any,
     ) -> LinearImage:
         """Apply every active stage to ``image`` (never modified in place).
 
         ``params`` uses the ``<stage>_params`` keywords of
         ``ProcessingWorker.submit_request``; missing ones are identity.
         When ``timings`` is given, each run stage's milliseconds go in it.
+        ``pixel_scale`` is this image's size relative to the full-resolution
+        photo (a 1400 px proxy of a 6000 px photo: ~0.23); native-pixel
+        effects (sharpening, noise reduction) use it so previews match the
+        export (see src/utils/spatial.py).
         """
         unknown = set(params) - {keyword for _, keyword, _, _ in self.STAGES}
         if unknown:
@@ -143,6 +152,8 @@ class DevelopPipeline:
             processor = self.processors[name]
             if style == "mask":
                 result = processor.process(result, mask=stage_params)
+            elif style == "pixel":
+                result = processor.process(result, pixel_scale=pixel_scale, **stage_params)
             else:
                 result = processor.process(result, **stage_params)
             if timings is not None:

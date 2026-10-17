@@ -562,7 +562,8 @@ class TestProcessingWorkerSharpening:
         worker._process_request(ProcessingRequest(
             request_id=1, sharpening_params={"sharpening": 40.0}, use_proxy=False
         ))
-        assert calls == [{"sharpening": 40.0}]
+        assert [{k: v for k, v in c.items() if k != "pixel_scale"} for c in calls] == [{"sharpening": 40.0}]
+        assert 0.0 < calls[0]["pixel_scale"] <= 1.0  # native-pixel effect
 
     def test_zero_sharpening_skips_processor(self, monkeypatch):
         worker = ProcessingWorker()
@@ -611,7 +612,8 @@ class TestProcessingWorkerLuminanceNR:
             luminance_nr_params={"luminance_nr": 40.0},
             use_proxy=False,
         ))
-        assert calls == [{"luminance_nr": 40.0}]
+        assert [{k: v for k, v in c.items() if k != "pixel_scale"} for c in calls] == [{"luminance_nr": 40.0}]
+        assert 0.0 < calls[0]["pixel_scale"] <= 1.0  # native-pixel effect
 
     def test_zero_luminance_nr_skips_processor(self, monkeypatch):
         worker = ProcessingWorker()
@@ -662,7 +664,8 @@ class TestProcessingWorkerColorNR:
             color_nr_params={"color_nr": 40.0},
             use_proxy=False,
         ))
-        assert calls == [{"color_nr": 40.0}]
+        assert [{k: v for k, v in c.items() if k != "pixel_scale"} for c in calls] == [{"color_nr": 40.0}]
+        assert 0.0 < calls[0]["pixel_scale"] <= 1.0  # native-pixel effect
 
     def test_zero_color_nr_skips_processor(self, monkeypatch):
         worker = ProcessingWorker()

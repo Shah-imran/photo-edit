@@ -54,7 +54,12 @@ def _render(raw_path: Path) -> np.ndarray:
     image = ImageService().load_image(str(raw_path))
     proxy = ProxyManager(max_size=1400)
     proxy.set_image(image)
-    result = ProcessingWorker()._apply_adjustments(proxy.get_proxy(), **RECIPE)
+    preview = proxy.get_proxy()
+    # Render the preview exactly as the worker does, native-pixel effects
+    # scaled to the proxy (src/utils/spatial.py).
+    result = ProcessingWorker()._apply_adjustments(
+        preview, pixel_scale=max(preview.shape[:2]) / max(image.shape[:2]), **RECIPE
+    )
     rgb = linear_to_display_rgb(result)
     small = Image.fromarray(rgb).resize(
         (rgb.shape[1] // 4, rgb.shape[0] // 4), Image.Resampling.BOX

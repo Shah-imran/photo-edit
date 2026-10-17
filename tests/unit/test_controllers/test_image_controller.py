@@ -1571,12 +1571,13 @@ class TestImageControllerCleanupThreadSafety:
 
 
 class TestImageControllerTexture:
-    def test_texture_round_trips_and_reaches_export(self, qapp, sample_image):
+    def test_texture_round_trips_and_reaches_export(self, qapp):
+        # Texture's radius scales with the image (resolution independence;
+        # src/utils/spatial.py), so it needs a photo-sized frame to show.
         controller = ImageController(ImageView(), use_threading=False)
-        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
-        original = controller.image_model.get_original_image().copy()
-        original[40:60, 40:60] *= 0.6
-        controller.image_model.set_original_image(original)
+        original = np.full((700, 700, 3), 0.5, dtype=np.float32)
+        original[280:420, 280:420] *= 0.6
+        controller._apply_loaded_image("sample.tif", original)
         controller.restore_adjustment_state({"texture": 45.0})
         assert controller.get_adjustment_state()["texture"] == 45.0
         assert not np.array_equal(controller.get_export_image(), original)

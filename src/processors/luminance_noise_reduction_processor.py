@@ -63,7 +63,7 @@ class LuminanceNoiseReductionProcessor(BaseProcessor):
     _LUMINANCE_WEIGHTS = (0.2126, 0.7152, 0.0722)
 
     def process(
-        self, image: LinearImage, luminance_nr: float = 0.0
+        self, image: LinearImage, luminance_nr: float = 0.0, pixel_scale: float = 1.0
     ) -> LinearImage:
         """Apply Luminance NR in the range ``0`` (none) to ``100`` (strongest)."""
         source = np.asarray(image, dtype=np.float32)
@@ -82,11 +82,17 @@ class LuminanceNoiseReductionProcessor(BaseProcessor):
             r * source[..., 0] + g * source[..., 1] + b * source[..., 2]
         ).astype(np.float32)
 
+        # Native-pixel neighbourhood, shrunk on a proxy: noise that is a few
+        # pixels wide at full size is mostly averaged away in a preview.
+        diameter = int(round(self._DIAMETER * float(pixel_scale)))
+        if diameter < 3:
+            return source.copy()
+        diameter += 1 - diameter % 2  # odd
         smoothed = cv2.bilateralFilter(
             luminance,
-            d=self._DIAMETER,
+            d=diameter,
             sigmaColor=self._SIGMA_COLOR,
-            sigmaSpace=self._SIGMA_SPACE,
+            sigmaSpace=self._SIGMA_SPACE * float(pixel_scale),
         )
         delta = smoothed - luminance
 

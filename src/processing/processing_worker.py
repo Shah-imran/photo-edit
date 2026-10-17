@@ -514,6 +514,7 @@ class ProcessingWorker(QObject):
             
             # Apply adjustments
             apply_start = perf_counter()
+            original_long = max(self._proxy_manager.original_size) or max(source.shape[:2])
             result = self._apply_adjustments(
                 source,
                 request.exposure_params,
@@ -538,6 +539,7 @@ class ProcessingWorker(QObject):
                 request.crop_params,
                 request.mask_params,
                 request.healing_params,
+                pixel_scale=max(source.shape[:2]) / original_long,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -677,7 +679,9 @@ class ProcessingWorker(QObject):
             ProcessingWorker._hashable_heal_spots(request.healing_params),
         )
 
-    def _apply_adjustments(self, image: LinearImage, *args, **params) -> LinearImage:
+    def _apply_adjustments(
+        self, image: LinearImage, *args, pixel_scale: float = 1.0, **params
+    ) -> LinearImage:
         """Run the develop pipeline (src/processing/pipeline.py) on ``image``.
 
         Accepts the ``<stage>_params`` keywords (positional order of
@@ -688,7 +692,9 @@ class ProcessingWorker(QObject):
             params.update(zip(_PARAM_ORDER, args))
         total_start = perf_counter()
         timings: Dict[str, float] = {}
-        result = self._pipeline.render(image, timings=timings, **params)
+        result = self._pipeline.render(
+            image, timings=timings, pixel_scale=pixel_scale, **params
+        )
         logger.info(
             "PERF worker.apply shape=%s %s total_ms=%.2f",
             image.shape,

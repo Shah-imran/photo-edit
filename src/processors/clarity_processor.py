@@ -6,7 +6,9 @@ import cv2
 import numpy as np
 
 from src.processors.base_processor import BaseProcessor
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
+from src.utils.spatial import gaussian_blur, relative_sigma
 
 
 class ClarityProcessor(BaseProcessor):
@@ -27,10 +29,11 @@ class ClarityProcessor(BaseProcessor):
         value = float(np.clip(clarity, -100.0, 100.0))
         if value == 0.0:
             return source.copy()
-        blurred = cv2.GaussianBlur(
-            source, (0, 0), sigmaX=self._SIGMA, sigmaY=self._SIGMA,
-            borderType=cv2.BORDER_REFLECT_101,
-        )
+        blurred = gaussian_blur(source, relative_sigma(source, self._SIGMA))
+        amount = (value / 100.0) * self._MAX_AMOUNT
+        fused = pixel_kernels.unsharp(source, blurred, amount)
+        if fused is not None:
+            return fused
         detail = source - blurred
         result = source + (value / 100.0) * self._MAX_AMOUNT * detail
         return result.astype(np.float32, copy=False)

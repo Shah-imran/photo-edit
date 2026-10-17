@@ -6,7 +6,10 @@ from src.processors.texture_processor import TextureProcessor
 
 
 def _detail_image() -> np.ndarray:
-    grid = np.indices((17, 17)).sum(axis=0) % 2
+    # Texture's radius scales with the image (resolution independence), so
+    # the test image needs fine detail relative to its size: 2 px cells on
+    # a 700 px frame (radius 1 px here, as on a 1400 px preview at 2 px).
+    grid = (np.indices((700, 700)) // 2).sum(axis=0) % 2
     return np.repeat((0.4 + grid[..., None] * 0.2).astype(np.float32), 3, axis=2)
 
 
