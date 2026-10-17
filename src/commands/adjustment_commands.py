@@ -1,6 +1,6 @@
 """Adjustment commands for undo/redo functionality."""
 
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from src.commands.base_command import BaseCommand
 from src.models.image_model import ImageModel
@@ -12,7 +12,35 @@ from src.processors.hsl_mixer_processor import HslMixerProcessor
 from src.processors.tonal_processor import TonalProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.processors.texture_processor import TextureProcessor
+from src.processors.clarity_processor import ClarityProcessor
+from src.processors.dehaze_processor import DehazeProcessor
+from src.processors.vignette_processor import VignetteProcessor
+from src.processors.grain_processor import GrainProcessor
+from src.processors.sharpening_processor import SharpeningProcessor
+from src.processors.luminance_noise_reduction_processor import (
+    LuminanceNoiseReductionProcessor,
+)
+from src.processors.color_noise_reduction_processor import (
+    ColorNoiseReductionProcessor,
+)
+from src.processors.remove_chromatic_aberration_processor import (
+    RemoveChromaticAberrationProcessor,
+)
+from src.processors.defringe_processor import DefringeProcessor
+from src.processors.geometry_processor import GeometryProcessor
+from src.processors.straighten_processor import StraightenProcessor
+from src.processors.crop_processor import CropProcessor
+from src.processors.mask_processor import MaskProcessor
+from src.processors.healing_processor import HealingProcessor
 from src.utils.color_pipeline import LinearImage
+
+if TYPE_CHECKING:
+    # Avoided as a real top-level import: image_controller.py already
+    # imports FROM this module (CombinedAdjustmentCommand,
+    # ImageStateChangeCommand, AdjustmentStateCommand), so a top-level
+    # `from src.controllers.image_controller import ImageController` here
+    # would be a circular import. Only needed for the type hint below.
+    from src.controllers.image_controller import ImageController
 
 
 class AdjustmentCommand(BaseCommand):
@@ -106,6 +134,20 @@ class CombinedAdjustmentCommand(BaseCommand):
         hsl_params: Dict[str, float] = None,
         color_grading_params: Dict[str, float] = None,
         texture_params: Dict[str, float] = None,
+        clarity_params: Dict[str, float] = None,
+        dehaze_params: Dict[str, float] = None,
+        vignette_params: Dict[str, float] = None,
+        grain_params: Dict[str, float] = None,
+        sharpening_params: Dict[str, float] = None,
+        luminance_nr_params: Dict[str, float] = None,
+        color_nr_params: Dict[str, float] = None,
+        remove_ca_params: Dict[str, float] = None,
+        defringe_params: Dict[str, float] = None,
+        geometry_params: Dict[str, float] = None,
+        straighten_params: Dict[str, float] = None,
+        crop_params: Dict[str, float] = None,
+        mask_params: Dict[str, Any] = None,
+        healing_params: Dict[str, Any] = None,
     ):
         """Initialize the combined adjustment command.
 
@@ -140,6 +182,34 @@ class CombinedAdjustmentCommand(BaseCommand):
         self._color_grading_processor = ColorGradingProcessor()
         self._texture_processor = TextureProcessor()
         self._texture_params = texture_params or {}
+        self._clarity_processor = ClarityProcessor()
+        self._clarity_params = clarity_params or {}
+        self._dehaze_processor = DehazeProcessor()
+        self._dehaze_params = dehaze_params or {}
+        self._vignette_processor = VignetteProcessor()
+        self._vignette_params = vignette_params or {}
+        self._grain_processor = GrainProcessor()
+        self._grain_params = grain_params or {}
+        self._sharpening_processor = SharpeningProcessor()
+        self._sharpening_params = sharpening_params or {}
+        self._luminance_nr_processor = LuminanceNoiseReductionProcessor()
+        self._luminance_nr_params = luminance_nr_params or {}
+        self._color_nr_processor = ColorNoiseReductionProcessor()
+        self._color_nr_params = color_nr_params or {}
+        self._remove_ca_processor = RemoveChromaticAberrationProcessor()
+        self._remove_ca_params = remove_ca_params or {}
+        self._defringe_processor = DefringeProcessor()
+        self._defringe_params = defringe_params or {}
+        self._geometry_processor = GeometryProcessor()
+        self._geometry_params = geometry_params or {}
+        self._straighten_processor = StraightenProcessor()
+        self._straighten_params = straighten_params or {}
+        self._crop_processor = CropProcessor()
+        self._crop_params = crop_params or {}
+        self._mask_processor = MaskProcessor()
+        self._mask_params = mask_params or {}
+        self._healing_processor = HealingProcessor()
+        self._healing_params = healing_params or {}
 
     def execute(self) -> None:
         """Execute the combined adjustment command."""
@@ -150,6 +220,11 @@ class CombinedAdjustmentCommand(BaseCommand):
             return
 
         result = original.copy()
+
+        # Healing runs FIRST, before every other adjustment -- see
+        # docs/planning/implementation-notes/2026-10-13-healing-processor.md.
+        if self._healing_params:
+            result = self._healing_processor.process(result, **self._healing_params)
 
         if self._exposure_params:
             result = self._exposure_processor.process(result, **self._exposure_params)
@@ -178,6 +253,76 @@ class CombinedAdjustmentCommand(BaseCommand):
             result = self._texture_processor.process(
                 result, **self._texture_params
             )
+
+        if self._clarity_params:
+            result = self._clarity_processor.process(
+                result, **self._clarity_params
+            )
+
+        if self._dehaze_params:
+            result = self._dehaze_processor.process(
+                result, **self._dehaze_params
+            )
+
+        if self._vignette_params:
+            result = self._vignette_processor.process(
+                result, **self._vignette_params
+            )
+
+        if self._grain_params:
+            result = self._grain_processor.process(
+                result, **self._grain_params
+            )
+
+        if self._sharpening_params:
+            result = self._sharpening_processor.process(
+                result, **self._sharpening_params
+            )
+
+        if self._luminance_nr_params:
+            result = self._luminance_nr_processor.process(
+                result, **self._luminance_nr_params
+            )
+
+        if self._color_nr_params:
+            result = self._color_nr_processor.process(
+                result, **self._color_nr_params
+            )
+
+        if self._remove_ca_params:
+            result = self._remove_ca_processor.process(
+                result, **self._remove_ca_params
+            )
+
+        if self._defringe_params:
+            result = self._defringe_processor.process(
+                result, **self._defringe_params
+            )
+
+        # Geometry runs immediately BEFORE Straighten -- see
+        # docs/planning/implementation-notes/
+        # 2026-10-13-geometry-processor.md section 2.
+        if self._geometry_params:
+            result = self._geometry_processor.process(
+                result, **self._geometry_params
+            )
+
+        if self._straighten_params:
+            result = self._straighten_processor.process(
+                result, **self._straighten_params
+            )
+
+        # Mask is applied after every other adjustment (including
+        # Straighten) and strictly BEFORE Crop -- see
+        # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
+        if self._mask_params:
+            result = self._mask_processor.process(result, mask=self._mask_params)
+
+        # Crop is applied strictly LAST, after every other processor
+        # (including Straighten and Mask) -- see docs/planning/
+        # implementation-notes/2026-10-13-crop-processor.md section 1.
+        if self._crop_params:
+            result = self._crop_processor.process(result, **self._crop_params)
 
         self._new_image = result
         self._image_model.current_image = result
@@ -220,3 +365,58 @@ class ImageStateChangeCommand(BaseCommand):
         """Restore the image state from before this adjustment gesture."""
         super().undo()
         self._image_model.current_image = self._previous_image
+
+
+class AdjustmentStateCommand(BaseCommand):
+    """Undo/redo command that restores a full (image, adjustment-state)
+    snapshot via ``ImageController.apply_history_state`` -- not just the
+    pixel buffer.
+
+    This supersedes ``CombinedAdjustmentCommand``/``ImageStateChangeCommand``
+    as the object actually pushed onto the undo/redo stack: those two
+    classes are kept, unused by this new flow but still exercised by their
+    own direct unit tests and still reused for their pixel-computation
+    logic (``CombinedAdjustmentCommand.execute()`` in the synchronous
+    fallback path), a deliberate choice to minimize unrelated test churn.
+    See docs/planning/implementation-notes/
+    2026-10-13-state-aware-undo-redo.md.
+    """
+
+    def __init__(
+        self,
+        controller: "ImageController",
+        previous_image: LinearImage,
+        previous_state: Dict[str, Any],
+        new_image: LinearImage,
+        new_state: Dict[str, Any],
+    ):
+        """Initialize the adjustment-state command.
+
+        Args:
+            controller: The ``ImageController`` whose
+                ``apply_history_state`` performs the actual restore.
+            previous_image: Rendered image before this edit gesture.
+            previous_state: Full adjustment-state dict (the same shape
+                ``ImageController.get_adjustment_state()`` returns) before
+                this edit gesture.
+            new_image: Rendered image after this edit gesture.
+            new_state: Full adjustment-state dict after this edit gesture.
+        """
+        super().__init__()
+        self._controller = controller
+        self._previous_image = previous_image
+        self._previous_state = previous_state
+        self._new_image = new_image
+        self._new_state = new_state
+
+    def execute(self) -> None:
+        """Apply the post-edit (image, adjustment-state) snapshot."""
+        super().execute()
+        self._controller.apply_history_state(self._new_image, self._new_state)
+
+    def undo(self) -> None:
+        """Restore the pre-edit (image, adjustment-state) snapshot."""
+        super().undo()
+        self._controller.apply_history_state(
+            self._previous_image, self._previous_state
+        )

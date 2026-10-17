@@ -159,3 +159,158 @@ class TestMouseInteraction:
 
         assert editor.get_points() == [(0.0, 0.0), (1.0, 1.0)]
         assert released == [True]
+
+
+class TestPerChannel:
+    """Per-channel curve editing (PDF section 12, Phase E) -- channel
+    switching, per-channel point editing, and the new signals' payload
+    shape.
+    """
+
+    def test_active_channel_defaults_to_master(self, qapp):
+        editor = CurveEditor()
+        assert editor.get_active_channel() == "master"
+
+    def test_set_active_channel_switches_and_emits(self, qapp):
+        editor = CurveEditor()
+        received = []
+        editor.active_channel_changed.connect(received.append)
+
+        editor.set_active_channel("red")
+
+        assert editor.get_active_channel() == "red"
+        assert received == ["red"]
+
+    def test_set_active_channel_to_unknown_name_is_ignored(self, qapp):
+        editor = CurveEditor()
+        editor.set_active_channel("cyan")
+        assert editor.get_active_channel() == "master"
+
+    def test_get_set_points_default_to_active_channel(self, qapp):
+        editor = CurveEditor()
+        editor.set_active_channel("blue")
+        editor.set_points([(0.0, 0.1), (1.0, 0.8)])
+
+        assert editor.get_points() == [(0.0, 0.1), (1.0, 0.8)]
+        assert editor.get_points("blue") == [(0.0, 0.1), (1.0, 0.8)]
+        # Switching channels changes what the no-argument form reads.
+        editor.set_active_channel("master")
+        assert editor.get_points() == [(0.0, 0.0), (1.0, 1.0)]
+
+    def test_set_points_with_explicit_channel_does_not_touch_active(self, qapp):
+        editor = CurveEditor()  # active channel is "master"
+        editor.set_points([(0.0, 0.2), (1.0, 0.9)], channel="green")
+
+        assert editor.get_points("green") == [(0.0, 0.2), (1.0, 0.9)]
+        assert editor.get_points() == [(0.0, 0.0), (1.0, 1.0)]  # master untouched
+
+    def test_get_all_points_reports_every_channel(self, qapp):
+        editor = CurveEditor()
+        editor.set_points([(0.0, 0.3), (1.0, 0.6)], channel="red")
+
+        all_points = editor.get_all_points()
+
+        assert set(all_points.keys()) == {"master", "red", "green", "blue"}
+        assert all_points["red"] == [(0.0, 0.3), (1.0, 0.6)]
+        assert all_points["green"] == [(0.0, 0.0), (1.0, 1.0)]
+
+    def test_set_all_points_replaces_every_channel(self, qapp):
+        editor = CurveEditor()
+        editor.set_all_points(
+            {
+                "master": [(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)],
+                "red": [(0.0, 0.1), (1.0, 0.9)],
+            }
+        )
+
+        all_points = editor.get_all_points()
+        assert all_points["master"] == [(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)]
+        assert all_points["red"] == [(0.0, 0.1), (1.0, 0.9)]
+        # Channels missing from the argument fall back to identity.
+        assert all_points["green"] == [(0.0, 0.0), (1.0, 1.0)]
+        assert all_points["blue"] == [(0.0, 0.0), (1.0, 1.0)]
+
+    def test_dragging_edits_only_the_active_channel(self, qapp):
+        editor = CurveEditor()
+        editor.resize(220, 220 + 26)
+        editor.set_active_channel("red")
+
+        rect = editor._plot_rect()
+        start = editor._to_widget(0.0, 0.0, rect)
+        _press(editor, start)
+        moved = editor._to_widget(0.0, 0.4, rect)
+        _move(editor, moved)
+
+        x, y = editor.get_points("red")[0]
+        assert y == pytest.approx(0.4, abs=0.02)
+        # The other 3 channels are untouched.
+        assert editor.get_points("master") == [(0.0, 0.0), (1.0, 1.0)]
+        assert editor.get_points("green") == [(0.0, 0.0), (1.0, 1.0)]
+        assert editor.get_points("blue") == [(0.0, 0.0), (1.0, 1.0)]
+
+    def test_channel_curve_changed_emits_active_channel_and_points(self, qapp):
+        editor = CurveEditor()
+        editor.resize(220, 220 + 26)
+        editor.set_active_channel("green")
+        received = []
+        editor.channel_curve_changed.connect(
+            lambda channel, points: received.append((channel, points))
+        )
+
+        rect = editor._plot_rect()
+        pos = editor._to_widget(0.0, 0.0, rect)
+        _press(editor, pos)
+
+        assert received, "channel_curve_changed should fire on point press"
+        channel, points = received[-1]
+        assert channel == "green"
+        assert points == editor.get_points("green")
+
+    def test_curve_changed_still_fires_for_active_channel(self, qapp):
+        """``curve_changed`` keeps its original, pre-channel payload
+        shape (just a points list) regardless of which channel is
+        active -- backward compatibility for existing listeners.
+        """
+        editor = CurveEditor()
+        editor.resize(220, 220 + 26)
+        editor.set_active_channel("blue")
+        received = []
+        editor.curve_changed.connect(received.append)
+
+        rect = editor._plot_rect()
+        pos = editor._to_widget(0.0, 0.0, rect)
+        _press(editor, pos)
+
+        assert received
+        assert received[-1] == editor.get_points("blue")
+
+    def test_reset_resets_only_active_channel(self, qapp):
+        editor = CurveEditor()
+        editor.set_points([(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)], channel="master")
+        editor.set_points([(0.0, 0.2), (1.0, 0.9)], channel="red")
+        editor.set_active_channel("master")
+
+        editor.reset()
+
+        assert editor.get_points("master") == [(0.0, 0.0), (1.0, 1.0)]
+        assert editor.get_points("red") == [(0.0, 0.2), (1.0, 0.9)]
+
+    def test_reset_all_channels_resets_every_curve(self, qapp):
+        editor = CurveEditor()
+        editor.set_all_points(
+            {
+                "master": [(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)],
+                "red": [(0.0, 0.2), (1.0, 0.9)],
+                "green": [(0.0, 0.1), (1.0, 0.8)],
+                "blue": [(0.0, 0.3), (1.0, 0.6)],
+            }
+        )
+        released = []
+        editor.curve_released.connect(lambda: released.append(True))
+
+        editor.reset_all_channels()
+
+        all_points = editor.get_all_points()
+        for channel in ("master", "red", "green", "blue"):
+            assert all_points[channel] == [(0.0, 0.0), (1.0, 1.0)]
+        assert released == [True]

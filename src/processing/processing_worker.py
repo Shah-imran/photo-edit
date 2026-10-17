@@ -23,6 +23,26 @@ from src.processors.exposure_processor import ExposureProcessor
 from src.processors.hsl_mixer_processor import HslMixerProcessor
 from src.processors.tonal_processor import TonalProcessor
 from src.processors.texture_processor import TextureProcessor
+from src.processors.clarity_processor import ClarityProcessor
+from src.processors.dehaze_processor import DehazeProcessor
+from src.processors.vignette_processor import VignetteProcessor
+from src.processors.grain_processor import GrainProcessor
+from src.processors.sharpening_processor import SharpeningProcessor
+from src.processors.luminance_noise_reduction_processor import (
+    LuminanceNoiseReductionProcessor,
+)
+from src.processors.color_noise_reduction_processor import (
+    ColorNoiseReductionProcessor,
+)
+from src.processors.remove_chromatic_aberration_processor import (
+    RemoveChromaticAberrationProcessor,
+)
+from src.processors.defringe_processor import DefringeProcessor
+from src.processors.geometry_processor import GeometryProcessor
+from src.processors.straighten_processor import StraightenProcessor
+from src.processors.crop_processor import CropProcessor
+from src.processors.mask_processor import MaskProcessor
+from src.processors.healing_processor import HealingProcessor
 from src.processors.white_balance_processor import WhiteBalanceProcessor
 from src.utils.color_pipeline import LinearImage
 
@@ -61,16 +81,35 @@ class ProcessingWorker(QObject):
     processing_complete = pyqtSignal(int, object)  # request_id, LinearImage
     error_occurred = pyqtSignal(int, str)
     
-    def __init__(self, parent: Optional[QObject] = None):
+    def __init__(
+        self,
+        parent: Optional[QObject] = None,
+        proxy_max_size: Optional[int] = None,
+        interactive_proxy_max_size: Optional[int] = None,
+    ):
         """Initialize the processing worker.
-        
+
         Args:
             parent: Optional parent QObject
+            proxy_max_size: Optional override for the quality-preview
+                proxy's maximum dimension (px). ``None`` (the default)
+                uses ``ProxyManager.DEFAULT_PROXY_SIZE``, preserving
+                today's behavior exactly.
+            interactive_proxy_max_size: Optional override for the
+                interactive/drag-preview proxy's maximum dimension (px).
+                ``None`` (the default) uses
+                ``ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE``.
         """
         super().__init__(parent)
-        
+
         self._queue = ProcessingQueue()
-        self._proxy_manager = ProxyManager()
+        self._proxy_manager = ProxyManager(
+            max_size=proxy_max_size or ProxyManager.DEFAULT_PROXY_SIZE,
+            interactive_max_size=(
+                interactive_proxy_max_size
+                or ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE
+            ),
+        )
         self._result_cache: OrderedDict[Tuple, _CachedPreview] = OrderedDict()
         self._max_cache_entries = 16
         
@@ -83,6 +122,20 @@ class ProcessingWorker(QObject):
         self._hsl_processor = HslMixerProcessor()
         self._color_grading_processor = ColorGradingProcessor()
         self._texture_processor = TextureProcessor()
+        self._clarity_processor = ClarityProcessor()
+        self._dehaze_processor = DehazeProcessor()
+        self._vignette_processor = VignetteProcessor()
+        self._grain_processor = GrainProcessor()
+        self._sharpening_processor = SharpeningProcessor()
+        self._luminance_nr_processor = LuminanceNoiseReductionProcessor()
+        self._color_nr_processor = ColorNoiseReductionProcessor()
+        self._remove_ca_processor = RemoveChromaticAberrationProcessor()
+        self._defringe_processor = DefringeProcessor()
+        self._geometry_processor = GeometryProcessor()
+        self._straighten_processor = StraightenProcessor()
+        self._crop_processor = CropProcessor()
+        self._mask_processor = MaskProcessor()
+        self._healing_processor = HealingProcessor()
 
         # Thread control
         self._running = False
@@ -152,6 +205,20 @@ class ProcessingWorker(QObject):
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
         texture_params: Optional[Dict[str, float]] = None,
+        clarity_params: Optional[Dict[str, float]] = None,
+        dehaze_params: Optional[Dict[str, float]] = None,
+        vignette_params: Optional[Dict[str, float]] = None,
+        grain_params: Optional[Dict[str, float]] = None,
+        sharpening_params: Optional[Dict[str, float]] = None,
+        luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
+        remove_ca_params: Optional[Dict[str, float]] = None,
+        defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
+        straighten_params: Optional[Dict[str, float]] = None,
+        crop_params: Optional[Dict[str, float]] = None,
+        mask_params: Optional[Dict[str, Any]] = None,
+        healing_params: Optional[Dict[str, Any]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> int:
@@ -180,6 +247,20 @@ class ProcessingWorker(QObject):
             hsl_params=hsl_params,
             color_grading_params=color_grading_params,
             texture_params=texture_params,
+            clarity_params=clarity_params,
+            dehaze_params=dehaze_params,
+            vignette_params=vignette_params,
+            grain_params=grain_params,
+            sharpening_params=sharpening_params,
+            luminance_nr_params=luminance_nr_params,
+            color_nr_params=color_nr_params,
+            remove_ca_params=remove_ca_params,
+            defringe_params=defringe_params,
+            geometry_params=geometry_params,
+            straighten_params=straighten_params,
+            crop_params=crop_params,
+            mask_params=mask_params,
+            healing_params=healing_params,
             use_proxy=use_proxy,
             interactive_preview=interactive_preview,
         )
@@ -200,6 +281,20 @@ class ProcessingWorker(QObject):
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
         texture_params: Optional[Dict[str, float]] = None,
+        clarity_params: Optional[Dict[str, float]] = None,
+        dehaze_params: Optional[Dict[str, float]] = None,
+        vignette_params: Optional[Dict[str, float]] = None,
+        grain_params: Optional[Dict[str, float]] = None,
+        sharpening_params: Optional[Dict[str, float]] = None,
+        luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
+        remove_ca_params: Optional[Dict[str, float]] = None,
+        defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
+        straighten_params: Optional[Dict[str, float]] = None,
+        crop_params: Optional[Dict[str, float]] = None,
+        mask_params: Optional[Dict[str, Any]] = None,
+        healing_params: Optional[Dict[str, Any]] = None,
         interactive_preview: bool = True,
     ) -> int:
         """Submit a preview (proxy) processing request.
@@ -228,6 +323,20 @@ class ProcessingWorker(QObject):
             hsl_params,
             color_grading_params,
             texture_params,
+            clarity_params,
+            dehaze_params,
+            vignette_params,
+            grain_params,
+            sharpening_params,
+            luminance_nr_params,
+            color_nr_params,
+            remove_ca_params,
+            defringe_params,
+            geometry_params,
+            straighten_params,
+            crop_params,
+            mask_params,
+            healing_params,
             use_proxy=True,
             interactive_preview=interactive_preview,
         )
@@ -242,6 +351,20 @@ class ProcessingWorker(QObject):
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
         texture_params: Optional[Dict[str, float]] = None,
+        clarity_params: Optional[Dict[str, float]] = None,
+        dehaze_params: Optional[Dict[str, float]] = None,
+        vignette_params: Optional[Dict[str, float]] = None,
+        grain_params: Optional[Dict[str, float]] = None,
+        sharpening_params: Optional[Dict[str, float]] = None,
+        luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
+        remove_ca_params: Optional[Dict[str, float]] = None,
+        defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
+        straighten_params: Optional[Dict[str, float]] = None,
+        crop_params: Optional[Dict[str, float]] = None,
+        mask_params: Optional[Dict[str, Any]] = None,
+        healing_params: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Submit a full-resolution processing request.
 
@@ -268,9 +391,23 @@ class ProcessingWorker(QObject):
             hsl_params,
             color_grading_params,
             texture_params,
+            clarity_params,
+            dehaze_params,
+            vignette_params,
+            grain_params,
+            sharpening_params,
+            luminance_nr_params,
+            color_nr_params,
+            remove_ca_params,
+            defringe_params,
+            geometry_params,
+            straighten_params,
+            crop_params,
+            mask_params,
+            healing_params,
             use_proxy=False,
         )
-    
+
     def cancel_pending(self) -> None:
         """Cancel all pending requests."""
         self._queue.cancel_all()
@@ -375,6 +512,20 @@ class ProcessingWorker(QObject):
                 request.hsl_params,
                 request.color_grading_params,
                 request.texture_params,
+                request.clarity_params,
+                request.dehaze_params,
+                request.vignette_params,
+                request.grain_params,
+                request.sharpening_params,
+                request.luminance_nr_params,
+                request.color_nr_params,
+                request.remove_ca_params,
+                request.defringe_params,
+                request.geometry_params,
+                request.straighten_params,
+                request.crop_params,
+                request.mask_params,
+                request.healing_params,
             )
             apply_ms = _elapsed_ms(apply_start)
 
@@ -447,6 +598,38 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.hsl_params.items())),
             tuple(sorted(request.color_grading_params.items())),
             tuple(sorted(request.texture_params.items())),
+            tuple(sorted(request.clarity_params.items())),
+            tuple(sorted(request.dehaze_params.items())),
+            tuple(sorted(request.vignette_params.items())),
+            tuple(sorted(request.grain_params.items())),
+            tuple(sorted(request.sharpening_params.items())),
+            tuple(sorted(request.luminance_nr_params.items())),
+            tuple(sorted(request.color_nr_params.items())),
+            tuple(sorted(request.remove_ca_params.items())),
+            tuple(sorted(request.defringe_params.items())),
+            tuple(sorted(request.geometry_params.items())),
+            tuple(sorted(request.straighten_params.items())),
+            tuple(sorted(request.crop_params.items())),
+            tuple(sorted(request.mask_params.items())),
+            self._hashable_heal_spots(request.healing_params),
+        )
+
+    @staticmethod
+    def _hashable_heal_spots(healing_params: Dict[str, Any]) -> Tuple:
+        """Return a hashable form of ``healing_params``'s ``heal_spots``
+        list, for use inside a cache-key/signature tuple.
+
+        ``heal_spots`` is a list of dicts (unlike every other
+        ``_xxx_params`` field, which is flat and already hashable via
+        ``tuple(sorted(items()))``), so it needs its own conversion: a
+        tuple of per-spot ``tuple(sorted(spot.items()))`` tuples, which
+        is hashable as long as every spot value is itself hashable (true
+        for this schema -- floats and the ``mode`` string only).
+        """
+        return tuple(
+            tuple(sorted(spot.items()))
+            for spot in healing_params.get("heal_spots", [])
+            if isinstance(spot, dict)
         )
 
     @staticmethod
@@ -461,6 +644,20 @@ class ProcessingWorker(QObject):
             tuple(sorted(request.hsl_params.items())),
             tuple(sorted(request.color_grading_params.items())),
             tuple(sorted(request.texture_params.items())),
+            tuple(sorted(request.clarity_params.items())),
+            tuple(sorted(request.dehaze_params.items())),
+            tuple(sorted(request.vignette_params.items())),
+            tuple(sorted(request.grain_params.items())),
+            tuple(sorted(request.sharpening_params.items())),
+            tuple(sorted(request.luminance_nr_params.items())),
+            tuple(sorted(request.color_nr_params.items())),
+            tuple(sorted(request.remove_ca_params.items())),
+            tuple(sorted(request.defringe_params.items())),
+            tuple(sorted(request.geometry_params.items())),
+            tuple(sorted(request.straighten_params.items())),
+            tuple(sorted(request.crop_params.items())),
+            tuple(sorted(request.mask_params.items())),
+            ProcessingWorker._hashable_heal_spots(request.healing_params),
         )
 
     def _apply_adjustments(
@@ -474,6 +671,20 @@ class ProcessingWorker(QObject):
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
         texture_params: Optional[Dict[str, float]] = None,
+        clarity_params: Optional[Dict[str, float]] = None,
+        dehaze_params: Optional[Dict[str, float]] = None,
+        vignette_params: Optional[Dict[str, float]] = None,
+        grain_params: Optional[Dict[str, float]] = None,
+        sharpening_params: Optional[Dict[str, float]] = None,
+        luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
+        remove_ca_params: Optional[Dict[str, float]] = None,
+        defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
+        straighten_params: Optional[Dict[str, float]] = None,
+        crop_params: Optional[Dict[str, float]] = None,
+        mask_params: Optional[Dict[str, Any]] = None,
+        healing_params: Optional[Dict[str, Any]] = None,
     ) -> LinearImage:
         """Apply exposure, tonal, white balance, curve, color, HSL mixer,
         and Color Grading adjustments to a ``LinearImage``."""
@@ -481,6 +692,18 @@ class ProcessingWorker(QObject):
         copy_start = perf_counter()
         result = image.copy()
         copy_ms = _elapsed_ms(copy_start)
+
+        # Healing runs FIRST, before every other adjustment (including
+        # Exposure, which used to be first) -- it is a repair operation on
+        # the as-shot pixels, not a creative adjustment, so every later
+        # tonal/color/effects step should see an already-healed image. See
+        # docs/planning/implementation-notes/2026-10-13-healing-processor.md.
+        healing_ms = 0.0
+        if healing_params and healing_params.get("heal_spots"):
+            healing_start = perf_counter()
+            result = self._healing_processor.process(result, **healing_params)
+            healing_ms = _elapsed_ms(healing_start)
+
         exposure_ms = 0.0
         tonal_ms = 0.0
         wb_ms = 0.0
@@ -532,12 +755,120 @@ class ProcessingWorker(QObject):
             result = self._texture_processor.process(result, **texture_params)
             texture_ms = _elapsed_ms(texture_start)
 
+        clarity_ms = 0.0
+        if clarity_params and clarity_params.get("clarity", 0.0) != 0.0:
+            clarity_start = perf_counter()
+            result = self._clarity_processor.process(result, **clarity_params)
+            clarity_ms = _elapsed_ms(clarity_start)
+
+        dehaze_ms = 0.0
+        if dehaze_params and dehaze_params.get("dehaze", 0.0) != 0.0:
+            dehaze_start = perf_counter()
+            result = self._dehaze_processor.process(result, **dehaze_params)
+            dehaze_ms = _elapsed_ms(dehaze_start)
+
+        vignette_ms = 0.0
+        if vignette_params and vignette_params.get("vignette", 0.0) != 0.0:
+            vignette_start = perf_counter()
+            result = self._vignette_processor.process(result, **vignette_params)
+            vignette_ms = _elapsed_ms(vignette_start)
+
+        grain_ms = 0.0
+        if grain_params and grain_params.get("grain", 0.0) != 0.0:
+            grain_start = perf_counter()
+            result = self._grain_processor.process(result, **grain_params)
+            grain_ms = _elapsed_ms(grain_start)
+
+        sharpening_ms = 0.0
+        if sharpening_params and sharpening_params.get("sharpening", 0.0) != 0.0:
+            sharpening_start = perf_counter()
+            result = self._sharpening_processor.process(result, **sharpening_params)
+            sharpening_ms = _elapsed_ms(sharpening_start)
+
+        luminance_nr_ms = 0.0
+        if luminance_nr_params and luminance_nr_params.get("luminance_nr", 0.0) != 0.0:
+            luminance_nr_start = perf_counter()
+            result = self._luminance_nr_processor.process(
+                result, **luminance_nr_params
+            )
+            luminance_nr_ms = _elapsed_ms(luminance_nr_start)
+
+        color_nr_ms = 0.0
+        if color_nr_params and color_nr_params.get("color_nr", 0.0) != 0.0:
+            color_nr_start = perf_counter()
+            result = self._color_nr_processor.process(result, **color_nr_params)
+            color_nr_ms = _elapsed_ms(color_nr_start)
+
+        remove_ca_ms = 0.0
+        if remove_ca_params and remove_ca_params.get("remove_ca", 0.0) != 0.0:
+            remove_ca_start = perf_counter()
+            result = self._remove_ca_processor.process(result, **remove_ca_params)
+            remove_ca_ms = _elapsed_ms(remove_ca_start)
+
+        defringe_ms = 0.0
+        if defringe_params and defringe_params.get("defringe", 0.0) != 0.0:
+            defringe_start = perf_counter()
+            result = self._defringe_processor.process(result, **defringe_params)
+            defringe_ms = _elapsed_ms(defringe_start)
+
+        # Geometry (Distortion/Vertical/Horizontal/Scale/Offset) runs
+        # immediately BEFORE Straighten -- see docs/planning/
+        # implementation-notes/2026-10-13-geometry-processor.md section 2.
+        geometry_ms = 0.0
+        if geometry_params and (
+            geometry_params.get("distortion", 0.0) != 0.0
+            or geometry_params.get("vertical", 0.0) != 0.0
+            or geometry_params.get("horizontal", 0.0) != 0.0
+            or geometry_params.get("scale", 100.0) != 100.0
+            or geometry_params.get("offset_x", 0.0) != 0.0
+            or geometry_params.get("offset_y", 0.0) != 0.0
+        ):
+            geometry_start = perf_counter()
+            result = self._geometry_processor.process(result, **geometry_params)
+            geometry_ms = _elapsed_ms(geometry_start)
+
+        straighten_ms = 0.0
+        if straighten_params and straighten_params.get("straighten", 0.0) != 0.0:
+            straighten_start = perf_counter()
+            result = self._straighten_processor.process(result, **straighten_params)
+            straighten_ms = _elapsed_ms(straighten_start)
+
+        # Mask is applied after every other adjustment (including
+        # Straighten) and strictly BEFORE Crop -- it blends pixel VALUES
+        # only (never changes shape), so its geometry is expressed in the
+        # full, pre-crop frame's own normalized coordinates and never
+        # needs to account for a separate, edit-time-dependent crop
+        # rectangle. See docs/planning/implementation-notes/
+        # 2026-10-13-mask-processor.md.
+        mask_ms = 0.0
+        if mask_params:
+            mask_start = perf_counter()
+            result = self._mask_processor.process(result, mask=mask_params)
+            mask_ms = _elapsed_ms(mask_start)
+
+        # Crop is applied strictly LAST, after every other processor
+        # (including Straighten and Mask) -- it is the only processor in
+        # this codebase that deliberately changes output shape. See
+        # docs/planning/implementation-notes/2026-10-13-crop-processor.md
+        # section 1.
+        crop_ms = 0.0
+        if crop_params:
+            crop_start = perf_counter()
+            result = self._crop_processor.process(result, **crop_params)
+            crop_ms = _elapsed_ms(crop_start)
+
         logger.info(
-            "PERF worker.apply shape=%s copy_ms=%.2f exposure_ms=%.2f "
+            "PERF worker.apply shape=%s copy_ms=%.2f healing_ms=%.2f "
+            "exposure_ms=%.2f "
             "tonal_ms=%.2f wb_ms=%.2f curve_ms=%.2f color_ms=%.2f hsl_ms=%.2f "
-            "color_grading_ms=%.2f texture_ms=%.2f total_ms=%.2f",
+            "color_grading_ms=%.2f texture_ms=%.2f clarity_ms=%.2f dehaze_ms=%.2f "
+            "vignette_ms=%.2f grain_ms=%.2f sharpening_ms=%.2f "
+            "luminance_nr_ms=%.2f color_nr_ms=%.2f remove_ca_ms=%.2f "
+            "defringe_ms=%.2f geometry_ms=%.2f straighten_ms=%.2f mask_ms=%.2f crop_ms=%.2f "
+            "total_ms=%.2f",
             image.shape,
             copy_ms,
+            healing_ms,
             exposure_ms,
             tonal_ms,
             wb_ms,
@@ -546,6 +877,19 @@ class ProcessingWorker(QObject):
             hsl_ms,
             color_grading_ms,
             texture_ms,
+            clarity_ms,
+            dehaze_ms,
+            vignette_ms,
+            grain_ms,
+            sharpening_ms,
+            luminance_nr_ms,
+            color_nr_ms,
+            remove_ca_ms,
+            defringe_ms,
+            geometry_ms,
+            straighten_ms,
+            mask_ms,
+            crop_ms,
             _elapsed_ms(total_start),
         )
 

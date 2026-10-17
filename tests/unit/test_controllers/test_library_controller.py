@@ -109,6 +109,400 @@ class TestLibraryController:
         assert libraries[0]["name"] == "Library 1"
         assert new_current_id == libraries[0]["id"]
 
+    def test_set_entry_rating_delegates_and_refreshes_entries(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entry_rating(sample_image_path, 3)
+
+        _, entries = rebuilt.args
+        assert entries[0]["rating"] == 3
+
+    def test_set_entry_flag_delegates_and_refreshes_entries(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entry_flag(sample_image_path, "pick")
+
+        _, entries = rebuilt.args
+        assert entries[0]["flag"] == "pick"
+
+    def test_set_entry_keywords_delegates_and_refreshes_entries(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entry_keywords(sample_image_path, ["sunset", "beach"])
+
+        _, entries = rebuilt.args
+        assert entries[0]["keywords"] == ["sunset", "beach"]
+
+    def test_set_entry_captured_at_delegates_and_refreshes_entries(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entry_captured_at(sample_image_path, "2021-02-03T04:05:06")
+
+        _, entries = rebuilt.args
+        assert entries[0]["captured_at"] == "2021-02-03T04:05:06"
+
+    def test_set_entries_captured_at_batch_sets_same_value_for_all(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entries_captured_at(paths, "2019-07-04T09:00:00")
+
+        _, entries = rebuilt.args
+        assert {entry["captured_at"] for entry in entries} == {"2019-07-04T09:00:00"}
+
+    # -- Collections --------------------------------------------------
+    # See docs/planning/implementation-notes/2026-10-13-collections.md.
+
+    def test_create_collection_delegates_and_emits_collections_changed(
+        self, controller, qtbot
+    ):
+        controller.initialize()
+
+        with qtbot.waitSignal(controller.collections_changed, timeout=1000) as changed:
+            controller.create_collection("Travel")
+
+        collections = changed.args[0]
+        assert [item["name"] for item in collections] == ["Travel"]
+        assert collections[0]["count"] == 0
+
+    def test_add_entry_to_collection_updates_count_and_entry_payload(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.add_entry_to_collection(sample_image_path, collection_id)
+
+        _, entries = rebuilt.args
+        assert entries[0]["collection_ids"] == [collection_id]
+
+    def test_remove_entry_from_collection_clears_entry_payload(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+        controller.add_entry_to_collection(sample_image_path, collection_id)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.remove_entry_from_collection(sample_image_path, collection_id)
+
+        _, entries = rebuilt.args
+        assert entries[0]["collection_ids"] == []
+
+    def test_set_entry_collection_membership_toggles_both_ways(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+
+        controller.set_entry_collection_membership(sample_image_path, collection_id, True)
+        entry = controller._catalog_service.get_entry(
+            controller.current_library_id, sample_image_path
+        )
+        assert entry.collection_ids == [collection_id]
+
+        controller.set_entry_collection_membership(sample_image_path, collection_id, False)
+        entry = controller._catalog_service.get_entry(
+            controller.current_library_id, sample_image_path
+        )
+        assert entry.collection_ids == []
+
+    def test_create_collection_with_entry_creates_and_adds_in_one_call(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.collections_changed, timeout=1000) as changed:
+            controller.create_collection_with_entry(sample_image_path, "Travel")
+
+        collections = changed.args[0]
+        assert collections[0]["name"] == "Travel"
+        assert collections[0]["count"] == 1
+        entry = controller._catalog_service.get_entry(
+            controller.current_library_id, sample_image_path
+        )
+        assert entry.collection_ids == [collections[0]["id"]]
+
+    def test_delete_collection_strips_dangling_references_and_refreshes_entries(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+        controller.add_entry_to_collection(sample_image_path, collection_id)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.delete_collection(collection_id)
+
+        _, entries = rebuilt.args
+        assert entries[0]["collection_ids"] == []
+        assert controller._catalog_service.list_collections(
+            controller.current_library_id
+        ) == []
+
+    # -- Multi-select batch actions ------------------------------------
+    # See docs/planning/implementation-notes/2026-10-13-multi-select-
+    # batch-actions.md.
+
+    def _import_two_images(self, controller, tmp_path):
+        paths = []
+        for i in range(2):
+            path = tmp_path / f"batch_{i}.jpg"
+            Image.new("RGB", (20, 20), color=(i * 50, 0, 0)).save(path)
+            paths.append(str(path))
+        controller.import_images(paths)
+        return paths
+
+    def test_set_entries_favorite_sets_all_to_same_value_and_refreshes_once(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        rebuild_count = 0
+
+        def _count(*_args):
+            nonlocal rebuild_count
+            rebuild_count += 1
+
+        controller.entries_rebuilt.connect(_count)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entries_favorite(paths, True)
+
+        _, entries = rebuilt.args
+        assert {entry["favorite"] for entry in entries} == {True}
+        assert rebuild_count == 1
+
+    def test_set_entries_rating_sets_all_to_same_value(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+        controller.set_entry_rating(paths[0], 1)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entries_rating(paths, 4)
+
+        _, entries = rebuilt.args
+        assert {entry["rating"] for entry in entries} == {4}
+
+    def test_set_entries_flag_sets_all_to_same_value(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.set_entries_flag(paths, "pick")
+
+        _, entries = rebuilt.args
+        assert {entry["flag"] for entry in entries} == {"pick"}
+
+    def test_add_entries_keywords_is_additive_and_preserves_existing(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+        controller.set_entry_keywords(paths[0], ["existing"])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.add_entries_keywords(paths, ["sunset"])
+
+        _, entries = rebuilt.args
+        by_path = {entry["path"]: entry for entry in entries}
+        assert set(by_path[paths[0]]["keywords"]) == {"existing", "sunset"}
+        assert by_path[paths[1]]["keywords"] == ["sunset"]
+
+    def test_add_entries_to_collection_adds_every_path(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+        controller.create_collection("Travel")
+        collection_id = controller._catalog_service.list_collections(
+            controller.current_library_id
+        )[0].id
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.add_entries_to_collection(paths, collection_id)
+
+        _, entries = rebuilt.args
+        assert all(collection_id in entry["collection_ids"] for entry in entries)
+
+    def test_set_entries_favorite_no_op_on_empty_paths_or_no_current_library(
+        self, controller, qtbot
+    ):
+        # No current library yet (initialize() not called) -- must not raise.
+        controller.set_entries_favorite(["/nope.jpg"], True)
+        controller.initialize()
+        # Empty path list -- must not raise or emit a spurious rebuild.
+        received = []
+        controller.entries_rebuilt.connect(lambda *args: received.append(args))
+        controller.set_entries_favorite([], True)
+        assert received == []
+
+    # -- Remove Photo / Delete from Disk -------------------------------
+    # See docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+
+    def test_remove_entry_removes_from_catalog_leaves_file_by_default(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            result = controller.remove_entry(sample_image_path, delete_from_disk=False)
+
+        assert result is True
+        _, entries = rebuilt.args
+        assert entries == []
+        assert Path(sample_image_path).exists()
+
+    def test_remove_entry_delete_from_disk_deletes_real_file(
+        self, controller, sample_image_path, qtbot
+    ):
+        controller.initialize()
+        controller.import_images([sample_image_path])
+        assert Path(sample_image_path).exists()
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000):
+            result = controller.remove_entry(sample_image_path, delete_from_disk=True)
+
+        assert result is True
+        assert not Path(sample_image_path).exists()
+
+    def test_remove_entry_delete_from_disk_survives_oserror(
+        self, controller, sample_image_path, qtbot, monkeypatch
+    ):
+        """A failed disk deletion (permission error, locked file, etc.)
+        must not crash the app and must not block the catalog removal
+        that already succeeded."""
+        controller.initialize()
+        controller.import_images([sample_image_path])
+
+        def _raise_oserror(self, *args, **kwargs):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(Path, "unlink", _raise_oserror)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            result = controller.remove_entry(sample_image_path, delete_from_disk=True)
+
+        assert result is True
+        _, entries = rebuilt.args
+        assert entries == []
+        # The catalog entry is gone even though the OSError prevented the
+        # file itself from being deleted (monkeypatched to always raise).
+        assert controller.get_entry(controller.current_library_id, sample_image_path) is None
+
+    def test_remove_entry_no_op_on_unknown_path(self, controller, qtbot):
+        controller.initialize()
+        assert controller.remove_entry("/no/such/path.jpg") is False
+
+    def test_remove_entries_batch_removes_all_and_refreshes_once(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        rebuild_count = 0
+
+        def _count(*_args):
+            nonlocal rebuild_count
+            rebuild_count += 1
+
+        controller.entries_rebuilt.connect(_count)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000) as rebuilt:
+            controller.remove_entries(paths, delete_from_disk=False)
+
+        _, entries = rebuilt.args
+        assert entries == []
+        assert rebuild_count == 1
+        for path in paths:
+            assert Path(path).exists()
+
+    def test_remove_entries_batch_delete_from_disk_deletes_every_file(
+        self, controller, tmp_path, qtbot
+    ):
+        controller.initialize()
+        paths = self._import_two_images(controller, tmp_path)
+
+        with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000):
+            controller.remove_entries(paths, delete_from_disk=True)
+
+        for path in paths:
+            assert not Path(path).exists()
+
+    def test_remove_entries_no_op_on_empty_paths_or_no_current_library(
+        self, controller, qtbot
+    ):
+        controller.remove_entries(["/nope.jpg"], delete_from_disk=False)
+        controller.initialize()
+        received = []
+        controller.entries_rebuilt.connect(lambda *args: received.append(args))
+        controller.remove_entries([], delete_from_disk=False)
+        assert received == []
+
+    def test_entry_payload_and_thumbnail_ready_payload_have_identical_keys(
+        self, controller, sample_image_path, qtbot
+    ):
+        """Regression guard for the duplicated payload-dict construction
+        in ``_entry_payload()`` and ``_on_thumbnail_ready()`` -- a future
+        edit that adds/renames a key in one but not the other must fail
+        this test. See
+        docs/planning/implementation-notes/2026-10-13-collections.md.
+        """
+        controller.initialize()
+
+        with qtbot.waitSignal(
+            controller.entry_thumbnail_updated, timeout=3000
+        ) as updated:
+            with qtbot.waitSignal(controller.entries_rebuilt, timeout=3000) as rebuilt:
+                controller.import_images([sample_image_path])
+
+        _, entries = rebuilt.args
+        entry_payload_keys = set(entries[0].keys())
+        thumbnail_payload_keys = set(updated.args[1].keys())
+        assert entry_payload_keys == thumbnail_payload_keys
+
     def test_cleanup_stops_thumbnail_worker(
         self,
         qapp,

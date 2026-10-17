@@ -1,12 +1,15 @@
 """UI tests for MainWindow - simulates real user interactions."""
 
+import copy
 import pytest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 from PIL import Image
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtTest import QTest
 
+from src.models.builtin_profiles import BUILTIN_PROFILES
 from src.services.library_catalog_service import LibraryCatalogService
 from src.services.library_image_preview_cache_service import (
     LibraryImagePreviewCacheService,
@@ -108,6 +111,59 @@ class TestMainWindowUI:
         tools_panel = main_window._tools_panel
         assert tools_panel._exposure_slider.isEnabled() is False
         assert tools_panel._contrast_slider.isEnabled() is False
+
+    def test_remove_entry_requested_clears_editor_when_removing_open_image(
+        self, main_window, sample_image_file
+    ):
+        """Removing/deleting the currently-open image's library entry
+        (Remove Photo.../Delete from Disk, see docs/planning/
+        implementation-notes/2026-10-13-remove-delete-photo.md) must
+        reset the editor to its own "no image loaded" state -- the exact
+        state ``test_tools_panel_disabled_initially`` above checks for a
+        fresh window that has never loaded anything."""
+        main_window._library_controller.import_images([sample_image_file])
+        main_window._image_controller.load_image(sample_image_file)
+        assert main_window._image_controller.image_model.file_path == sample_image_file
+        assert main_window._tools_panel._exposure_slider.isEnabled() is True
+
+        main_window._on_remove_entry_requested(sample_image_file, False)
+
+        assert main_window._image_controller.image_model.file_path is None
+        assert main_window._tools_panel._exposure_slider.isEnabled() is False
+        assert main_window._settings_service.get_current_image_path() is None
+        # "Remove from Library" (delete_from_disk=False) -- the file
+        # itself must survive.
+        assert Path(sample_image_file).exists()
+
+    def test_remove_entry_requested_leaves_editor_alone_for_other_image(
+        self, main_window, sample_image_file, tmp_path
+    ):
+        """Removing an entry that is NOT the currently-open image must
+        not touch the editor at all."""
+        main_window._image_controller.load_image(sample_image_file)
+        other_path = str(tmp_path / "other.jpg")
+        Image.new("RGB", (10, 10), color="green").save(other_path)
+
+        main_window._on_remove_entry_requested(other_path, False)
+
+        assert main_window._image_controller.image_model.file_path == sample_image_file
+        assert main_window._tools_panel._exposure_slider.isEnabled() is True
+
+    def test_remove_entries_requested_batch_clears_editor_when_included(
+        self, main_window, sample_image_file
+    ):
+        main_window._library_controller.import_images([sample_image_file])
+        main_window._image_controller.load_image(sample_image_file)
+
+        main_window._on_remove_entries_requested(
+            [sample_image_file, "/other/not-open.jpg"], True
+        )
+
+        assert main_window._image_controller.image_model.file_path is None
+        assert main_window._tools_panel._exposure_slider.isEnabled() is False
+        # "Delete from Disk" (delete_from_disk=True) -- the open image's
+        # own file must actually be gone too.
+        assert not Path(sample_image_file).exists()
 
     def test_workspace_tabs_switch_panel_focus(self, main_window):
         main_window._workspace_header._library_tab.click()
@@ -762,6 +818,84 @@ class TestMainWindowSettingsPersistence:
         reopened.close()
 
 
+class TestCrashRecoveryNotice:
+    """Clean-shutdown-flag tracking and the recovery notice it gates.
+
+    See docs/planning/implementation-notes/
+    2026-10-13-crash-recovery-notice.md.
+    """
+
+    def _make_window(self, qtbot, tmp_path, settings):
+        window = MainWindow(
+            settings_service=settings,
+            catalog_service=LibraryCatalogService(catalog_path=tmp_path / "catalog.json"),
+            thumbnail_cache_service=LibraryThumbnailCacheService(
+                cache_dir=tmp_path / "cache"
+            ),
+            image_preview_cache_service=LibraryImagePreviewCacheService(
+                cache_dir=tmp_path / "preview-cache"
+            ),
+        )
+        qtbot.addWidget(window)
+        window.show()
+        qtbot.waitExposed(window)
+        return window
+
+    def test_clean_prior_session_shows_no_notice(self, qapp, qtbot, tmp_path):
+        ini_path = tmp_path / "main-window-clean.ini"
+        settings = SettingsService(
+            QSettings(str(ini_path), QSettings.Format.IniFormat)
+        )
+        assert settings.get_clean_shutdown() is True  # unset -> defaults True
+
+        with patch("src.views.main_window.QMessageBox.information") as mock_info:
+            window = self._make_window(qtbot, tmp_path, settings)
+            qtbot.wait(20)  # let the singleShot(0, ...) callback run
+            mock_info.assert_not_called()
+
+        # The new session is marked "in progress" regardless of whether
+        # the notice fired.
+        assert settings.get_clean_shutdown() is False
+        window.close()
+
+    def test_unclean_prior_session_shows_notice(self, qapp, qtbot, tmp_path):
+        ini_path = tmp_path / "main-window-unclean.ini"
+        settings = SettingsService(
+            QSettings(str(ini_path), QSettings.Format.IniFormat)
+        )
+        settings.set_clean_shutdown(False)
+        settings.sync()
+
+        with patch("src.views.main_window.QMessageBox.information") as mock_info:
+            window = self._make_window(qtbot, tmp_path, settings)
+            qtbot.wait(20)
+            mock_info.assert_called_once()
+            args, _ = mock_info.call_args
+            assert "may not have closed cleanly" in args[2]
+
+        # Same post-construction state as the clean case: the current
+        # session is marked "in progress" either way.
+        assert settings.get_clean_shutdown() is False
+        window.close()
+
+    def test_close_event_marks_shutdown_clean_and_syncs(self, qapp, qtbot, tmp_path):
+        ini_path = tmp_path / "main-window-close.ini"
+        settings = SettingsService(
+            QSettings(str(ini_path), QSettings.Format.IniFormat)
+        )
+        window = self._make_window(qtbot, tmp_path, settings)
+        qtbot.wait(20)
+        assert settings.get_clean_shutdown() is False
+
+        with patch.object(
+            settings, "sync", wraps=settings.sync
+        ) as mock_sync:
+            window.close()
+            mock_sync.assert_called()
+
+        assert settings.get_clean_shutdown() is True
+
+
 class TestAdjustmentPayloadRoundTrip:
     """Regression coverage for _adjustment_values_from_payload.
 
@@ -848,3 +982,313 @@ class TestAdjustmentPayloadRoundTrip:
         assert main_window._tools_panel.get_curve_params() == {
             "points": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
         }
+
+
+class TestCopyPasteEditSettings:
+    """Unit tests for Edit > Copy/Paste Edit Settings (Ctrl+Alt+C/V)."""
+
+    def test_copy_with_no_image_shows_message_and_leaves_clipboard_none(
+        self, main_window
+    ):
+        main_window._image_controller.has_image = MagicMock(return_value=False)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._copy_edit_settings()
+
+        assert main_window._copied_adjustment_state is None
+        mock_status.assert_called_once_with(
+            "No image to copy edit settings from", 2000
+        )
+
+    def test_copy_with_image_captures_adjustment_state(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        main_window._tools_panel._exposure_slider.set_value(1.5)
+        qtbot.wait(100)
+
+        expected_state = main_window._image_controller.get_adjustment_state()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._copy_edit_settings()
+
+        assert main_window._copied_adjustment_state == expected_state
+        mock_status.assert_called_once_with("Copied edit settings", 2000)
+
+    def test_paste_with_no_image_shows_message_and_does_not_restore(
+        self, main_window
+    ):
+        main_window._image_controller.has_image = MagicMock(return_value=False)
+        main_window._copied_adjustment_state = {"exposure": 1.0}
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._paste_edit_settings()
+
+        main_window._image_controller.restore_adjustment_state.assert_not_called()
+        mock_status.assert_called_once_with(
+            "No image to paste edit settings to", 2000
+        )
+
+    def test_paste_with_nothing_copied_shows_message_and_does_not_restore(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        assert main_window._copied_adjustment_state is None
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._paste_edit_settings()
+
+        main_window._image_controller.restore_adjustment_state.assert_not_called()
+        mock_status.assert_called_once_with(
+            "Nothing to paste; copy edit settings first", 2000
+        )
+
+    def test_paste_calls_set_adjustments_and_restore_with_copied_values(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        main_window._tools_panel._exposure_slider.set_value(2.0)
+        qtbot.wait(100)
+        main_window._copy_edit_settings()
+        copied_state = main_window._copied_adjustment_state
+
+        main_window._tools_panel.set_adjustments = MagicMock()
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._paste_edit_settings()
+
+        main_window._tools_panel.set_adjustments.assert_called_once()
+        tools_panel_arg, tools_panel_kwargs = (
+            main_window._tools_panel.set_adjustments.call_args
+        )
+        assert tools_panel_arg[0] == copied_state
+        assert tools_panel_arg[0] is not copied_state
+        assert tools_panel_kwargs == {"emit_signal": False}
+
+        main_window._image_controller.restore_adjustment_state.assert_called_once()
+        (controller_arg,), _ = (
+            main_window._image_controller.restore_adjustment_state.call_args
+        )
+        assert controller_arg == copied_state
+        assert controller_arg is not copied_state
+        assert controller_arg is not tools_panel_arg[0]
+
+        mock_status.assert_called_with("Pasted edit settings", 2000)
+
+    def test_mutating_pasted_dict_does_not_affect_clipboard(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        main_window._tools_panel._exposure_slider.set_value(3.0)
+        qtbot.wait(100)
+        main_window._copy_edit_settings()
+        original_copied_state = copy.deepcopy(main_window._copied_adjustment_state)
+
+        captured = {}
+
+        def _capture_restore(adjustments):
+            captured["state"] = adjustments
+            # Simulate a careless downstream caller mutating what it is given.
+            adjustments["exposure"] = 999.0
+            adjustments["tone_curve"] = "mutated"
+
+        main_window._image_controller.restore_adjustment_state = MagicMock(
+            side_effect=_capture_restore
+        )
+
+        main_window._paste_edit_settings()
+
+        assert captured["state"]["exposure"] == 999.0
+        assert main_window._copied_adjustment_state == original_copied_state
+        assert main_window._copied_adjustment_state["exposure"] != 999.0
+
+    def test_copy_from_image_a_paste_onto_image_b_crosses_images(
+        self, main_window, sample_image_file, tmp_path, qtbot
+    ):
+        other = tmp_path / "other.jpg"
+        Image.new("RGB", (80, 60), color="green").save(other)
+
+        main_window._library_controller.import_images(
+            [sample_image_file, str(other)]
+        )
+        library = main_window._library_view
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(sample_image_file)
+        main_window._tools_panel._highlights_slider.set_value(42.0)
+        qtbot.wait(500)
+
+        main_window._copy_edit_settings()
+        image_a_state = main_window._copied_adjustment_state
+        assert image_a_state["highlights"] == 42.0
+
+        with qtbot.waitSignal(
+            main_window._image_controller.image_load_finished, timeout=3000
+        ):
+            library.image_selected.emit(str(other))
+        qtbot.wait(200)
+
+        # Image B starts from a clean slate.
+        assert main_window._image_controller.get_adjustment_state()["highlights"] == 0.0
+
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+        main_window._paste_edit_settings()
+
+        (restored_state,), _ = (
+            main_window._image_controller.restore_adjustment_state.call_args
+        )
+        assert restored_state["highlights"] == 42.0
+        assert restored_state == image_a_state
+
+
+class TestApplyProfile:
+    """Unit tests for MainWindow._apply_profile (Profile selector slice).
+
+    This is a preset-apply action, not a persistent separate pipeline
+    stage -- see docs/planning/implementation-notes/
+    2026-10-13-profile-selector.md. Mirrors TestCopyPasteEditSettings'
+    style closely, since _apply_profile reuses the exact same
+    set_adjustments/restore_adjustment_state/_adjustment_persist_timer
+    pattern with BUILTIN_PROFILES as the source instead of a clipboard.
+    """
+
+    def test_apply_profile_with_no_image_shows_message_and_does_not_restore(
+        self, main_window
+    ):
+        main_window._image_controller.has_image = MagicMock(return_value=False)
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._apply_profile("Vivid")
+
+        main_window._image_controller.restore_adjustment_state.assert_not_called()
+        mock_status.assert_called_once_with(
+            "No image to apply a profile to", 2000
+        )
+
+    def test_apply_unknown_profile_shows_message_and_does_not_crash(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._apply_profile("Not A Real Profile")
+
+        main_window._image_controller.restore_adjustment_state.assert_not_called()
+        mock_status.assert_called_once_with(
+            "Unknown profile: Not A Real Profile", 2000
+        )
+
+    def test_apply_profile_with_image_calls_set_adjustments_and_restore(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+
+        main_window._tools_panel.set_adjustments = MagicMock(
+            wraps=main_window._tools_panel.set_adjustments
+        )
+        main_window._image_controller.restore_adjustment_state = MagicMock()
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._apply_profile("Vivid")
+
+        expected_state = BUILTIN_PROFILES["Vivid"]
+
+        main_window._tools_panel.set_adjustments.assert_called_once()
+        tools_panel_arg, tools_panel_kwargs = (
+            main_window._tools_panel.set_adjustments.call_args
+        )
+        assert tools_panel_arg[0] == expected_state
+        assert tools_panel_arg[0] is not expected_state
+        assert tools_panel_kwargs == {"emit_signal": False}
+
+        main_window._image_controller.restore_adjustment_state.assert_called_once()
+        (controller_arg,), _ = (
+            main_window._image_controller.restore_adjustment_state.call_args
+        )
+        assert controller_arg == expected_state
+        assert controller_arg is not expected_state
+        assert controller_arg is not tools_panel_arg[0]
+
+        mock_status.assert_called_with("Applied profile: Vivid", 2000)
+
+    def test_apply_profile_actually_sets_slider_values(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+
+        main_window._apply_profile("Monochrome")
+        qtbot.wait(100)
+
+        state = main_window._image_controller.get_adjustment_state()
+        assert state["saturation"] == BUILTIN_PROFILES["Monochrome"]["saturation"]
+        assert state["contrast"] == BUILTIN_PROFILES["Monochrome"]["contrast"]
+
+    def test_mutating_applied_profile_dict_does_not_affect_builtin_profiles(
+        self, main_window, sample_image_file, qtbot
+    ):
+        main_window._image_controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        original_vivid = copy.deepcopy(BUILTIN_PROFILES["Vivid"])
+
+        def _capture_restore(adjustments):
+            adjustments["contrast"] = 999.0
+
+        main_window._image_controller.restore_adjustment_state = MagicMock(
+            side_effect=_capture_restore
+        )
+
+        main_window._apply_profile("Vivid")
+
+        assert BUILTIN_PROFILES["Vivid"] == original_vivid
+
+
+class TestNextPreviousPhoto:
+    """Unit tests for View > Next/Previous Photo (Right/Left arrow keys)."""
+
+    def test_next_photo_calls_filmstrip_select_next(self, main_window):
+        main_window._filmstrip_view.select_next = MagicMock(return_value=True)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._next_photo()
+
+        main_window._filmstrip_view.select_next.assert_called_once_with()
+        mock_status.assert_not_called()
+
+    def test_previous_photo_calls_filmstrip_select_previous(self, main_window):
+        main_window._filmstrip_view.select_previous = MagicMock(return_value=True)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._previous_photo()
+
+        main_window._filmstrip_view.select_previous.assert_called_once_with()
+        mock_status.assert_not_called()
+
+    def test_next_photo_at_last_entry_shows_status_message(self, main_window):
+        main_window._filmstrip_view.select_next = MagicMock(return_value=False)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._next_photo()
+
+        mock_status.assert_called_once_with("Already at the last photo", 2000)
+
+    def test_previous_photo_at_first_entry_shows_status_message(self, main_window):
+        main_window._filmstrip_view.select_previous = MagicMock(return_value=False)
+
+        with patch.object(main_window._status_bar, "showMessage") as mock_status:
+            main_window._previous_photo()
+
+        mock_status.assert_called_once_with("Already at the first photo", 2000)

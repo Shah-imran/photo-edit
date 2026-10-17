@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QFrame,
@@ -99,7 +101,26 @@ class WorkspaceHeader(QFrame):
 
 
 class EditingToolStrip(QFrame):
-    """Visible home for future local-editing tools."""
+    """Visible home for local-editing tools.
+
+    Signals:
+        crop_tool_requested: Emitted when the Crop button is clicked, the
+            UI entry point into the interactive crop overlay (see
+            ``ImageView.enter_crop_mode``/``MainWindow._enter_crop_mode``).
+        mask_tool_requested: Emitted when the Mask button is clicked, the
+            UI entry point into the interactive mask overlay (see
+            ``ImageView.enter_mask_mode``/``MainWindow._enter_mask_mode``).
+        heal_tool_requested: Emitted when the Heal button is clicked, the
+            UI entry point into the interactive healing overlay (see
+            ``ImageView.enter_healing_mode``/``MainWindow._enter_healing_mode``).
+
+    Transform remains a disabled placeholder -- Crop/Mask/Heal are now all
+    wired up (Crop and Mask in prior slices, Heal in this one).
+    """
+
+    crop_tool_requested = pyqtSignal()
+    mask_tool_requested = pyqtSignal()
+    heal_tool_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -117,6 +138,9 @@ class EditingToolStrip(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
+        self._crop_button: Optional[QToolButton] = None
+        self._mask_button: Optional[QToolButton] = None
+        self._heal_button: Optional[QToolButton] = None
         for label, icon_name in (
             ("Crop", "crop"),
             ("Heal", "heal"),
@@ -127,7 +151,27 @@ class EditingToolStrip(QFrame):
             button.setText(label)
             button.setIcon(line_icon(icon_name, "#b8c2cc", 20))
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            button.setEnabled(False)
-            button.setToolTip(f"{label} is planned but not implemented yet")
             button.setAccessibleName(label)
+            if label == "Crop":
+                button.setEnabled(True)
+                button.setToolTip("Crop the image")
+                button.clicked.connect(self.crop_tool_requested)
+                self._crop_button = button
+            elif label == "Mask":
+                button.setEnabled(True)
+                button.setToolTip(
+                    "Add a linear or radial local-adjustment mask"
+                )
+                button.clicked.connect(self.mask_tool_requested)
+                self._mask_button = button
+            elif label == "Heal":
+                button.setEnabled(True)
+                button.setToolTip(
+                    "Remove small blemishes/spots (heal or clone)"
+                )
+                button.clicked.connect(self.heal_tool_requested)
+                self._heal_button = button
+            else:
+                button.setEnabled(False)
+                button.setToolTip(f"{label} is planned but not implemented yet")
             layout.addWidget(button, 1)

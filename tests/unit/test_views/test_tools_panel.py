@@ -4,6 +4,10 @@ Blacks sliders added alongside TonalProcessor."""
 import pytest
 from PyQt6.QtWidgets import QApplication
 
+from unittest.mock import MagicMock
+
+from src.models.builtin_profiles import BUILTIN_PROFILES
+from src.models.wb_presets import WB_PRESETS
 from src.processors.color_grading_processor import default_color_grading_params
 from src.processors.hsl_mixer_processor import default_hsl_params
 from src.views.tools_panel import ToolsPanel
@@ -176,6 +180,141 @@ class TestToolsPanelToneCurve:
             'highlights': 0.0, 'shadows': 0.0, 'whites': 0.0, 'blacks': 0.0
         }
         assert panel.get_color_params() == {'saturation': 0.0, 'vibrance': 0.0}
+
+
+class TestToolsPanelPerChannelCurves:
+    """Tests for the per-channel (R/G/B) Tone Curve wiring (PDF section
+    12, Phase E) -- mirrors ``TestToolsPanelToneCurve``'s own style.
+    """
+
+    def test_default_curve_params_has_no_channel_keys(self, qapp):
+        panel = ToolsPanel()
+        assert panel.get_curve_params() == {'points': [[0.0, 0.0], [1.0, 1.0]]}
+
+    def test_channel_edit_adds_only_that_channels_key(self, qapp):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], channel="red"
+        )
+        assert panel.get_curve_params() == {
+            'points': [[0.0, 0.0], [1.0, 1.0]],
+            'red_points': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+        }
+
+    def test_each_channel_edit_is_independent(self, qapp):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], "red")
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], "green")
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]], "blue")
+
+        assert panel.get_curve_params() == {
+            'points': [[0.0, 0.0], [1.0, 1.0]],
+            'red_points': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+            'green_points': [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]],
+            'blue_points': [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]],
+        }
+
+    def test_channel_edit_emits_curve_channel_changed(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.curve_channel_changed.connect(
+            lambda channel, points: received.append((channel, points))
+        )
+
+        panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], channel="blue"
+        )
+
+        assert received == [("blue", [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]])]
+
+    def test_legacy_curve_changed_only_fires_for_master(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.curve_changed.connect(received.append)
+
+        panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], channel="red"
+        )
+        assert received == []
+
+        panel._on_curve_editor_changed(
+            [[0.0, 0.0], [0.5, 0.3], [1.0, 1.0]], channel="master"
+        )
+        assert received == [[[0.0, 0.0], [0.5, 0.3], [1.0, 1.0]]]
+
+    def test_reset_all_resets_every_channel(self, qapp):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], "master")
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], "red")
+
+        panel.reset_all()
+
+        assert panel.get_curve_params() == {'points': [[0.0, 0.0], [1.0, 1.0]]}
+
+    def test_set_adjustments_restores_all_four_channels(self, qapp):
+        panel = ToolsPanel()
+        panel.set_adjustments(
+            {
+                'tone_curve': [[0.0, 0.0], [0.4, 0.6], [1.0, 1.0]],
+                'tone_curve_red': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+                'tone_curve_green': [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]],
+                'tone_curve_blue': [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]],
+            },
+            emit_signal=False,
+        )
+
+        assert panel.get_curve_params() == {
+            'points': [[0.0, 0.0], [0.4, 0.6], [1.0, 1.0]],
+            'red_points': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+            'green_points': [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]],
+            'blue_points': [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]],
+        }
+        assert panel._curve_editor.get_points('red') == [
+            (0.0, 0.0), (0.5, 0.8), (1.0, 1.0)
+        ]
+
+    def test_set_adjustments_with_missing_channel_keys_defaults_to_identity(
+        self, qapp
+    ):
+        panel = ToolsPanel()
+        panel._on_curve_editor_changed([[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], "green")
+
+        panel.set_adjustments({'exposure': 1.0}, emit_signal=False)
+
+        assert panel.get_curve_params() == {'points': [[0.0, 0.0], [1.0, 1.0]]}
+
+    def test_set_adjustments_emits_curve_channel_changed_for_all_four(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.curve_channel_changed.connect(
+            lambda channel, points: received.append(channel)
+        )
+
+        panel.set_adjustments(
+            {'tone_curve_red': [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]]},
+            emit_signal=True,
+        )
+
+        assert set(received) == {'master', 'red', 'green', 'blue'}
+
+    def test_channel_curve_editor_switch_affects_which_channel_mouse_edits(
+        self, qapp
+    ):
+        panel = ToolsPanel()
+        panel._curve_editor.resize(220, 220 + 26)
+        panel._curve_editor.set_active_channel('red')
+
+        rect = panel._curve_editor._plot_rect()
+        pos = panel._curve_editor._to_widget(0.0, 0.0, rect)
+        # Simulate the editor's own drag-start, which emits
+        # channel_curve_changed("red", ...) -- ToolsPanel is wired to
+        # that signal, not the legacy channel-less one.
+        panel._curve_editor._points[0] = (0.0, 0.3)
+        panel._curve_editor.channel_curve_changed.emit(
+            'red', panel._curve_editor.get_points('red')
+        )
+
+        assert panel.get_curve_params()['red_points'][0] == [0.0, 0.3]
 
 
 class TestToolsPanelWhiteBalance:
@@ -406,3 +545,481 @@ class TestToolsPanelTexture:
         panel.set_adjustments({"texture": 25.0}, emit_signal=False)
         assert panel.get_adjustments()["texture"] == 25.0
         assert received == []
+
+
+class TestToolsPanelClarity:
+    def test_clarity_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._clarity_slider._spin_box.minimum() == -100.0
+        assert panel._clarity_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["clarity"] == 0.0
+        panel._clarity_slider.set_value(-35.0)
+        assert received[-1]["clarity"] == -35.0
+
+    def test_clarity_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"clarity": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["clarity"] == 25.0
+        assert received == []
+
+
+class TestToolsPanelDehaze:
+    def test_dehaze_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._dehaze_slider._spin_box.minimum() == -100.0
+        assert panel._dehaze_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["dehaze"] == 0.0
+        panel._dehaze_slider.set_value(-35.0)
+        assert received[-1]["dehaze"] == -35.0
+
+    def test_dehaze_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"dehaze": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["dehaze"] == 25.0
+        assert received == []
+
+
+class TestToolsPanelVignette:
+    def test_vignette_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._vignette_slider._spin_box.minimum() == -100.0
+        assert panel._vignette_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["vignette"] == 0.0
+        panel._vignette_slider.set_value(-35.0)
+        assert received[-1]["vignette"] == -35.0
+
+    def test_vignette_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"vignette": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["vignette"] == 25.0
+        assert received == []
+
+
+class TestToolsPanelGrain:
+    def test_grain_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._grain_slider._spin_box.minimum() == 0.0
+        assert panel._grain_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["grain"] == 0.0
+        panel._grain_slider.set_value(35.0)
+        assert received[-1]["grain"] == 35.0
+
+    def test_grain_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"grain": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["grain"] == 25.0
+        assert received == []
+
+
+class TestToolsPanelSharpening:
+    def test_sharpening_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._sharpening_slider._spin_box.minimum() == 0.0
+        assert panel._sharpening_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["sharpening"] == 0.0
+        panel._sharpening_slider.set_value(35.0)
+        assert received[-1]["sharpening"] == 35.0
+
+    def test_sharpening_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"sharpening": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["sharpening"] == 25.0
+        assert received == []
+
+    def test_detail_section_exists_and_starts_collapsed(self, qapp):
+        panel = ToolsPanel()
+        assert "Detail" in panel._sections
+        assert panel._sections["Detail"].is_expanded() is False
+
+    def test_reset_detail_resets_only_sharpening(self, qapp):
+        panel = ToolsPanel()
+        panel._sharpening_slider.set_value(60.0)
+        panel._clarity_slider.set_value(40.0)
+        # Detail's reset button is now third-to-last: Optics (after
+        # Detail) and Geometry (after Optics) each own a later one.
+        panel._section_reset_buttons[-3].click()
+        assert panel.get_adjustments()["sharpening"] == 0.0
+        assert panel.get_adjustments()["clarity"] == 40.0
+
+
+class TestToolsPanelLuminanceNR:
+    def test_luminance_nr_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._luminance_nr_slider._spin_box.minimum() == 0.0
+        assert panel._luminance_nr_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["luminance_nr"] == 0.0
+        panel._luminance_nr_slider.set_value(35.0)
+        assert received[-1]["luminance_nr"] == 35.0
+
+    def test_luminance_nr_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"luminance_nr": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["luminance_nr"] == 25.0
+        assert received == []
+
+    def test_luminance_nr_in_detail_section(self, qapp):
+        panel = ToolsPanel()
+        assert "Detail" in panel._sections
+
+    def test_reset_detail_resets_both_sharpening_and_luminance_nr(self, qapp):
+        panel = ToolsPanel()
+        panel._sharpening_slider.set_value(60.0)
+        panel._luminance_nr_slider.set_value(55.0)
+        panel._clarity_slider.set_value(40.0)
+        # Detail's reset button is now third-to-last: Optics (after
+        # Detail) and Geometry (after Optics) each own a later one.
+        panel._section_reset_buttons[-3].click()
+        assert panel.get_adjustments()["sharpening"] == 0.0
+        assert panel.get_adjustments()["luminance_nr"] == 0.0
+        assert panel.get_adjustments()["clarity"] == 40.0
+
+
+class TestToolsPanelColorNR:
+    def test_color_nr_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._color_nr_slider._spin_box.minimum() == 0.0
+        assert panel._color_nr_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["color_nr"] == 0.0
+        panel._color_nr_slider.set_value(35.0)
+        assert received[-1]["color_nr"] == 35.0
+
+    def test_color_nr_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"color_nr": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["color_nr"] == 25.0
+        assert received == []
+
+    def test_color_nr_in_detail_section(self, qapp):
+        panel = ToolsPanel()
+        assert "Detail" in panel._sections
+
+    def test_reset_detail_resets_all_three_detail_sliders(self, qapp):
+        """This completes Phase G's Detail group -- the "Reset Detail"
+        button must reset Sharpening, Luminance NR, and Color NR
+        together, since all three now share the single Detail section."""
+        panel = ToolsPanel()
+        panel._sharpening_slider.set_value(60.0)
+        panel._luminance_nr_slider.set_value(55.0)
+        panel._color_nr_slider.set_value(45.0)
+        panel._clarity_slider.set_value(40.0)
+        # Detail's reset button is now third-to-last: Optics (after
+        # Detail) and Geometry (after Optics) each own a later one.
+        panel._section_reset_buttons[-3].click()
+        assert panel.get_adjustments()["sharpening"] == 0.0
+        assert panel.get_adjustments()["luminance_nr"] == 0.0
+        assert panel.get_adjustments()["color_nr"] == 0.0
+        assert panel.get_adjustments()["clarity"] == 40.0
+
+
+class TestToolsPanelOptics:
+    """Phase H (Optics) -- Remove Chromatic Aberration.
+
+    This mirrors the Sharpening slice's precedent for creating a brand
+    new section (rather than Color NR's "add to an existing section")
+    since Optics did not exist before this slice.
+    """
+
+    def test_optics_section_exists_and_starts_collapsed(self, qapp):
+        panel = ToolsPanel()
+        assert "Optics" in panel._sections
+        assert panel._sections["Optics"].is_expanded() is False
+
+    def test_remove_ca_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._remove_ca_slider._spin_box.minimum() == 0.0
+        assert panel._remove_ca_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["remove_ca"] == 0.0
+        panel._remove_ca_slider.set_value(35.0)
+        assert received[-1]["remove_ca"] == 35.0
+
+    def test_remove_ca_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"remove_ca": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["remove_ca"] == 25.0
+        assert received == []
+
+    def test_defringe_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._defringe_slider._spin_box.minimum() == 0.0
+        assert panel._defringe_slider._spin_box.maximum() == 100.0
+        assert panel.get_adjustments()["defringe"] == 0.0
+        panel._defringe_slider.set_value(35.0)
+        assert received[-1]["defringe"] == 35.0
+
+    def test_defringe_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"defringe": 25.0}, emit_signal=False)
+        assert panel.get_adjustments()["defringe"] == 25.0
+        assert received == []
+
+    def test_reset_optics_resets_remove_ca_and_defringe_together(self, qapp):
+        panel = ToolsPanel()
+        panel._remove_ca_slider.set_value(60.0)
+        panel._defringe_slider.set_value(70.0)
+        panel._clarity_slider.set_value(40.0)
+        # Optics' reset button is now second-to-last since the Geometry
+        # section (added after Optics) owns the final reset button.
+        optics_reset_button = panel._section_reset_buttons[-2]
+        optics_reset_button.click()
+        assert panel.get_adjustments()["remove_ca"] == 0.0
+        assert panel.get_adjustments()["defringe"] == 0.0
+        assert panel.get_adjustments()["clarity"] == 40.0
+
+
+class TestToolsPanelGeometry:
+    """Phase I (Geometry) -- Straighten, plus Distortion/Vertical/
+    Horizontal/Scale/X-Y Offset.
+
+    This mirrors the Optics/Remove CA slice's precedent for creating a
+    brand new section (rather than extending an existing one), since
+    Geometry did not exist before the Straighten slice. Straighten was
+    added first (see docs/planning/implementation-notes/
+    2026-10-12-straighten.md section 1); Distortion/Vertical/Horizontal/
+    Scale/Offset fill in the rest of the slider-based half (see
+    docs/planning/implementation-notes/2026-10-13-geometry-processor.md).
+    Upright modes and "Constrain Crop" remain explicitly out of scope.
+    """
+
+    # (slider attribute, adjustments-dict key, min, max, default)
+    _GEOMETRY_SLIDERS = [
+        ("_straighten_slider", "straighten", -45.0, 45.0, 0.0),
+        ("_distortion_slider", "distortion", -100.0, 100.0, 0.0),
+        ("_vertical_slider", "vertical", -100.0, 100.0, 0.0),
+        ("_horizontal_slider", "horizontal", -100.0, 100.0, 0.0),
+        ("_scale_slider", "scale", 50.0, 150.0, 100.0),
+        ("_offset_x_slider", "offset_x", -50.0, 50.0, 0.0),
+        ("_offset_y_slider", "offset_y", -50.0, 50.0, 0.0),
+    ]
+
+    def test_geometry_section_exists_and_starts_collapsed(self, qapp):
+        panel = ToolsPanel()
+        assert "Geometry" in panel._sections
+        assert panel._sections["Geometry"].is_expanded() is False
+
+    def test_straighten_range_default_and_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert panel._straighten_slider._spin_box.minimum() == -45.0
+        assert panel._straighten_slider._spin_box.maximum() == 45.0
+        assert panel.get_adjustments()["straighten"] == 0.0
+        panel._straighten_slider.set_value(12.5)
+        assert received[-1]["straighten"] == 12.5
+
+    def test_straighten_restore_without_emitting(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel.set_adjustments({"straighten": -20.0}, emit_signal=False)
+        assert panel.get_adjustments()["straighten"] == -20.0
+        assert received == []
+
+    @pytest.mark.parametrize(
+        "slider_attr,key,min_value,max_value,default",
+        _GEOMETRY_SLIDERS,
+    )
+    def test_geometry_slider_range_default_and_signal(
+        self, qapp, slider_attr, key, min_value, max_value, default
+    ):
+        panel = ToolsPanel()
+        slider = getattr(panel, slider_attr)
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        assert slider._spin_box.minimum() == min_value
+        assert slider._spin_box.maximum() == max_value
+        assert panel.get_adjustments()[key] == default
+        new_value = max_value if max_value != default else min_value
+        slider.set_value(new_value)
+        assert received[-1][key] == new_value
+
+    @pytest.mark.parametrize(
+        "slider_attr,key,min_value,max_value,default",
+        _GEOMETRY_SLIDERS,
+    )
+    def test_geometry_slider_restore_without_emitting(
+        self, qapp, slider_attr, key, min_value, max_value, default
+    ):
+        panel = ToolsPanel()
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        new_value = max_value if max_value != default else min_value
+        panel.set_adjustments({key: new_value}, emit_signal=False)
+        assert panel.get_adjustments()[key] == new_value
+        assert received == []
+
+    def test_reset_geometry_resets_straighten_and_all_five_new_sliders(self, qapp):
+        panel = ToolsPanel()
+        panel._straighten_slider.set_value(30.0)
+        panel._distortion_slider.set_value(50.0)
+        panel._vertical_slider.set_value(-40.0)
+        panel._horizontal_slider.set_value(25.0)
+        panel._scale_slider.set_value(130.0)
+        panel._offset_x_slider.set_value(20.0)
+        panel._offset_y_slider.set_value(-15.0)
+        panel._clarity_slider.set_value(40.0)
+        # Geometry's reset button is now the last one, since Geometry is
+        # the final section added after Optics.
+        geometry_reset_button = panel._section_reset_buttons[-1]
+        geometry_reset_button.click()
+        adjustments = panel.get_adjustments()
+        assert adjustments["straighten"] == 0.0
+        assert adjustments["distortion"] == 0.0
+        assert adjustments["vertical"] == 0.0
+        assert adjustments["horizontal"] == 0.0
+        assert adjustments["scale"] == 100.0
+        assert adjustments["offset_x"] == 0.0
+        assert adjustments["offset_y"] == 0.0
+        assert adjustments["clarity"] == 40.0
+
+    def test_geometry_sliders_disabled_by_set_enabled_false(self, qapp):
+        panel = ToolsPanel()
+        panel.set_enabled(False)
+        assert panel._distortion_slider.isEnabled() is False
+        assert panel._vertical_slider.isEnabled() is False
+        assert panel._horizontal_slider.isEnabled() is False
+        assert panel._scale_slider.isEnabled() is False
+        assert panel._offset_x_slider.isEnabled() is False
+        assert panel._offset_y_slider.isEnabled() is False
+
+
+class TestToolsPanelProfileSelector:
+    """Tests for the Profile combo + Apply button (Profile selector slice)."""
+
+    def test_combo_populated_with_builtin_profile_names_in_order(self, qapp):
+        panel = ToolsPanel()
+        combo_items = [
+            panel._profile_combo.itemText(i)
+            for i in range(panel._profile_combo.count())
+        ]
+        assert combo_items == list(BUILTIN_PROFILES.keys())
+        assert combo_items[0] == "Standard"
+
+    def test_selecting_combo_entry_alone_does_not_emit_signal(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.profile_apply_requested.connect(received.append)
+        panel._profile_combo.setCurrentText("Vivid")
+        assert received == []
+
+    def test_clicking_apply_emits_profile_apply_requested_with_selected_name(
+        self, qapp
+    ):
+        panel = ToolsPanel()
+        received = []
+        panel.profile_apply_requested.connect(received.append)
+        panel._profile_combo.setCurrentText("Monochrome")
+        panel._profile_apply_button.click()
+        assert received == ["Monochrome"]
+
+    def test_tools_panel_does_not_itself_apply_profile_values(self, qapp):
+        """ToolsPanel only emits the chosen name; it must never call into
+        ImageController or apply BUILTIN_PROFILES values itself -- that is
+        MainWindow's job."""
+        panel = ToolsPanel()
+        panel.set_adjustments = MagicMock(wraps=panel.set_adjustments)
+        panel._profile_combo.setCurrentText("Landscape")
+        panel._profile_apply_button.click()
+        panel.set_adjustments.assert_not_called()
+
+
+class TestToolsPanelWbPresets:
+    """Tests for the White Balance preset combo + Apply button (WB
+    presets slice, Phase E)."""
+
+    def test_combo_populated_with_wb_preset_names_in_order(self, qapp):
+        panel = ToolsPanel()
+        combo_items = [
+            panel._wb_preset_combo.itemText(i)
+            for i in range(panel._wb_preset_combo.count())
+        ]
+        assert combo_items == list(WB_PRESETS.keys())
+        assert combo_items[0] == "As Shot"
+
+    def test_selecting_combo_entry_alone_does_not_change_sliders(self, qapp):
+        panel = ToolsPanel()
+        panel._wb_preset_combo.setCurrentText("Tungsten")
+        assert panel.get_adjustments()["temperature"] == 0.0
+        assert panel.get_adjustments()["tint"] == 0.0
+
+    def test_clicking_apply_sets_sliders_to_preset_values(self, qapp):
+        panel = ToolsPanel()
+        panel._wb_preset_combo.setCurrentText("Tungsten")
+        panel._wb_preset_apply_button.click()
+        preset = WB_PRESETS["Tungsten"]
+        assert panel.get_adjustments()["temperature"] == preset["temperature"]
+        assert panel.get_adjustments()["tint"] == preset["tint"]
+
+    def test_apply_emits_adjustments_changed_touching_only_wb_keys(self, qapp):
+        panel = ToolsPanel()
+        # Give some other sliders non-default values first, to prove
+        # Apply leaves them untouched.
+        panel._exposure_slider.set_value(1.5)
+        panel._saturation_slider.set_value(-30.0)
+        prior_adjustments = panel.get_adjustments()
+
+        received = []
+        panel.adjustments_changed.connect(received.append)
+        panel._wb_preset_combo.setCurrentText("Fluorescent")
+        panel._wb_preset_apply_button.click()
+
+        assert received, "adjustments_changed was never emitted"
+        final = received[-1]
+        preset = WB_PRESETS["Fluorescent"]
+        assert final["temperature"] == preset["temperature"]
+        assert final["tint"] == preset["tint"]
+        for key, value in prior_adjustments.items():
+            if key in ("temperature", "tint"):
+                continue
+            assert final[key] == value, (
+                f"Applying a WB preset changed unrelated key {key!r}"
+            )
+
+    def test_apply_emits_slider_released(self, qapp):
+        panel = ToolsPanel()
+        received = []
+        panel.slider_released.connect(lambda: received.append(True))
+        panel._wb_preset_combo.setCurrentText("Daylight")
+        panel._wb_preset_apply_button.click()
+        assert received == [True]
+
+    def test_unknown_preset_name_is_a_no_op(self, qapp):
+        panel = ToolsPanel()
+        panel._apply_wb_preset("Not A Real Preset")
+        assert panel.get_adjustments()["temperature"] == 0.0
+        assert panel.get_adjustments()["tint"] == 0.0

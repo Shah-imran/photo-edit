@@ -4,18 +4,23 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QLabel,
     QScrollArea,
     QPushButton,
     QToolButton,
+    QComboBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
+from src.models.builtin_profiles import BUILTIN_PROFILES
+from src.models.wb_presets import WB_PRESETS
 from src.processors.color_grading_processor import default_color_grading_params
 from src.processors.hsl_mixer_processor import default_hsl_params
-from src.utils.curve_math import normalize_points
+from src.utils.curve_math import is_identity_curve, normalize_points
 from src.views.widgets.adjustment_slider import AdjustmentSlider
 from src.views.widgets.color_grading_panel import ColorGradingPanel
+from src.views.widgets.curve_editor import CHANNELS as CURVE_CHANNELS
 from src.views.widgets.curve_editor import CurveEditor
 from src.views.widgets.hsl_mixer_panel import HslMixerPanel
 from src.views.widgets.collapsible_section import CollapsibleSection
@@ -29,20 +34,56 @@ class ToolsPanel(QWidget):
 
     Signals:
         adjustments_changed: Emitted when any (non-curve, non-HSL) adjustment changes
-        curve_changed: Emitted when the tone curve changes (list of [x, y]
-            control points)
+        curve_changed: Emitted when the MASTER tone curve changes (list
+            of [x, y] control points) -- kept to its original payload
+            shape for backward compatibility with existing callers that
+            only ever cared about the one master curve.
+        curve_channel_changed: New in the per-channel curves slice (PDF
+            section 12, Phase E -- see docs/planning/implementation-notes/
+            2026-10-13-per-channel-curves.md). Emitted with
+            ``(channel, points)`` for whichever of the 4 curves
+            ("master"/"red"/"green"/"blue") actually changed, including
+            (redundantly, for "master") every time ``curve_changed``
+            fires. This is the signal ``MainWindow`` wires to
+            ``ImageController.on_curve_changed`` so a per-channel edit is
+            never collapsed into the master curve.
         hsl_changed: Emitted when the HSL Color Mixer changes (24-key flat dict)
         color_grading_changed: Emitted when Color Grading changes (11-key
             flat dict)
         slider_released: Emitted when any slider, the curve editor, the
             HSL mixer, or Color Grading is released (for final processing)
+        profile_apply_requested: Emitted with the selected profile's name
+            when the Profile section's Apply button is clicked. ToolsPanel
+            only emits the chosen name here -- it does not know
+            ``BUILTIN_PROFILES``'s adjustment values beyond populating the
+            combo box, and never calls into ``ImageController`` itself;
+            applying the profile's values is ``MainWindow``'s job, the
+            same separation of concerns every other ToolsPanel signal
+            already follows.
+
+    White-balance presets (``WB_PRESETS`` in ``src/models/wb_presets.py``)
+    are deliberately handled differently from Profile: they only ever
+    touch the existing Temperature/Tint sliders, entirely inside
+    ``ToolsPanel`` (``_apply_wb_preset``), reusing the sliders' own
+    existing ``value_changed``/``slider_released`` signal paths exactly
+    as a real drag-and-release would. No new signal is emitted to
+    ``MainWindow`` for this -- unlike Profile, which replaces the whole
+    adjustment state and therefore needs ``MainWindow`` to call
+    ``ImageController.restore_adjustment_state``, a WB preset is fully
+    expressible as "move these two sliders," which the sliders already
+    know how to propagate on their own.
     """
 
     adjustments_changed = pyqtSignal(dict)
     curve_changed = pyqtSignal(list)
+    curve_channel_changed = pyqtSignal(str, list)
     hsl_changed = pyqtSignal(dict)
     color_grading_changed = pyqtSignal(dict)
     slider_released = pyqtSignal()
+    profile_apply_requested = pyqtSignal(str)
+    crop_tool_requested = pyqtSignal()
+    mask_tool_requested = pyqtSignal()
+    heal_tool_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         """Initialize the tools panel.
@@ -65,9 +106,34 @@ class ToolsPanel(QWidget):
             'tint': 0.0,
             'saturation': 0.0,
             'vibrance': 0.0,
-            'texture': 0.0
+            'texture': 0.0,
+            'clarity': 0.0,
+            'dehaze': 0.0,
+            'vignette': 0.0,
+            'grain': 0.0,
+            'sharpening': 0.0,
+            'luminance_nr': 0.0,
+            'color_nr': 0.0,
+            'remove_ca': 0.0,
+            'defringe': 0.0,
+            'straighten': 0.0,
+            'distortion': 0.0,
+            'vertical': 0.0,
+            'horizontal': 0.0,
+            'scale': 100.0,
+            'offset_x': 0.0,
+            'offset_y': 0.0,
         }
-        self._curve_points: List[Tuple[float, float]] = list(normalize_points(None))
+        # The 4 independent tone curves (master + Red/Green/Blue -- see
+        # docs/planning/implementation-notes/
+        # 2026-10-13-per-channel-curves.md), keyed by channel name
+        # ("master"/"red"/"green"/"blue"). Every pre-existing call site
+        # that used to read/write a single ``self._curve_points`` list
+        # now reads/writes ``self._channel_curve_points["master"]``
+        # instead, keeping its original meaning unchanged.
+        self._channel_curve_points: Dict[str, List[Tuple[float, float]]] = {
+            channel: list(normalize_points(None)) for channel in CURVE_CHANNELS
+        }
         self._hsl_values: Dict[str, float] = default_hsl_params()
         self._color_grading_values: Dict[str, float] = default_color_grading_params()
         self._suppress_adjustment_signal = False
@@ -96,7 +162,8 @@ class ToolsPanel(QWidget):
         histogram_layout.addWidget(self._histogram_readout)
         histogram_section.set_content_widget(histogram_content)
         main_layout.addWidget(histogram_section)
-        main_layout.addWidget(EditingToolStrip())
+        self._editing_tool_strip = EditingToolStrip()
+        main_layout.addWidget(self._editing_tool_strip)
         
         # Scroll area for controls
         scroll_area = QScrollArea()
@@ -116,6 +183,24 @@ class ToolsPanel(QWidget):
         content_layout.setContentsMargins(10, 8, 10, 12)
         content_layout.setSpacing(4)
         
+        # Profile section (above Light, per the roadmap's Profile selector
+        # slice -- see docs/planning/implementation-notes/
+        # 2026-10-13-profile-selector.md). Selecting a combo entry alone
+        # does nothing; the user must click Apply, avoiding a surprising,
+        # silently-destructive UI action from idle browsing.
+        profile_section, profile_content_layout = self._create_section("Profile")
+        profile_row = QWidget()
+        profile_row_layout = QHBoxLayout(profile_row)
+        profile_row_layout.setContentsMargins(0, 0, 0, 0)
+        profile_row_layout.setSpacing(6)
+        self._profile_combo = QComboBox()
+        self._profile_combo.addItems(list(BUILTIN_PROFILES.keys()))
+        profile_row_layout.addWidget(self._profile_combo, 1)
+        self._profile_apply_button = QPushButton("Apply")
+        profile_row_layout.addWidget(self._profile_apply_button)
+        profile_content_layout.addWidget(profile_row)
+        content_layout.addWidget(profile_section)
+
         # Light section
         light_section, light_content_layout = self._create_section("Light")
         
@@ -175,6 +260,17 @@ class ToolsPanel(QWidget):
 
         self._curve_editor = CurveEditor()
         curve_content_layout.addWidget(self._curve_editor)
+        # "Reset Tone Curve" resets only the currently-active channel
+        # (standard curve-editor UX -- Lightroom's own per-channel reset
+        # works the same way); "Reset All Channels" is the secondary
+        # affordance for clearing all 4 curves at once. See
+        # docs/planning/implementation-notes/
+        # 2026-10-13-per-channel-curves.md section 4.
+        curve_section.add_header_widget(
+            self._reset_button_for(
+                "Reset All Channels", self._curve_editor.reset_all_channels
+            )
+        )
         curve_section.add_header_widget(
             self._reset_button_for("Reset Tone Curve", self._curve_editor.reset)
         )
@@ -183,6 +279,23 @@ class ToolsPanel(QWidget):
 
         # Color section
         color_section, color_content_layout = self._create_section("Color")
+
+        # White-balance preset row (Phase E, "Temperature/Tint + WB
+        # presets" -- see docs/planning/implementation-notes/
+        # 2026-10-13-wb-presets.md). Mirrors the Profile section's own
+        # "selecting the combo alone does nothing, only Apply acts"
+        # pattern. Unlike Profile, this only ever touches the
+        # Temperature/Tint sliders below, never any other adjustment.
+        wb_preset_row = QWidget()
+        wb_preset_row_layout = QHBoxLayout(wb_preset_row)
+        wb_preset_row_layout.setContentsMargins(0, 0, 0, 4)
+        wb_preset_row_layout.setSpacing(6)
+        self._wb_preset_combo = QComboBox()
+        self._wb_preset_combo.addItems(list(WB_PRESETS.keys()))
+        wb_preset_row_layout.addWidget(self._wb_preset_combo, 1)
+        self._wb_preset_apply_button = QPushButton("Apply")
+        wb_preset_row_layout.addWidget(self._wb_preset_apply_button)
+        color_content_layout.addWidget(wb_preset_row)
 
         self._temperature_slider = AdjustmentSlider(
             "Temperature", min_value=-100.0, max_value=100.0, default_value=0.0,
@@ -253,12 +366,149 @@ class ToolsPanel(QWidget):
             default_value=0.0, step=1.0, decimals=0
         )
         effects_content_layout.addWidget(self._texture_slider)
+        self._clarity_slider = AdjustmentSlider(
+            "Clarity", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        effects_content_layout.addWidget(self._clarity_slider)
+        self._dehaze_slider = AdjustmentSlider(
+            "Dehaze", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        effects_content_layout.addWidget(self._dehaze_slider)
+        self._vignette_slider = AdjustmentSlider(
+            "Vignette", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        effects_content_layout.addWidget(self._vignette_slider)
+        self._grain_slider = AdjustmentSlider(
+            "Grain", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        effects_content_layout.addWidget(self._grain_slider)
         effects_section.add_header_widget(
             self._reset_button_for(
-                "Reset Effects", lambda: self._reset_sliders(self._texture_slider)
+                "Reset Effects",
+                lambda: self._reset_sliders(
+                    self._texture_slider, self._clarity_slider, self._dehaze_slider,
+                    self._vignette_slider, self._grain_slider,
+                ),
             )
         )
         content_layout.addWidget(effects_section)
+
+        # Detail section
+        detail_section, detail_content_layout = self._create_section("Detail")
+        self._sharpening_slider = AdjustmentSlider(
+            "Sharpening", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        detail_content_layout.addWidget(self._sharpening_slider)
+        self._luminance_nr_slider = AdjustmentSlider(
+            "Luminance NR", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        detail_content_layout.addWidget(self._luminance_nr_slider)
+        self._color_nr_slider = AdjustmentSlider(
+            "Color NR", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        detail_content_layout.addWidget(self._color_nr_slider)
+        detail_section.add_header_widget(
+            self._reset_button_for(
+                "Reset Detail",
+                lambda: self._reset_sliders(
+                    self._sharpening_slider, self._luminance_nr_slider,
+                    self._color_nr_slider,
+                ),
+            )
+        )
+        content_layout.addWidget(detail_section)
+
+        # Optics section (Phase H -- Remove Chromatic Aberration)
+        optics_section, optics_content_layout = self._create_section("Optics")
+        self._remove_ca_slider = AdjustmentSlider(
+            "Remove CA", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        optics_content_layout.addWidget(self._remove_ca_slider)
+        self._defringe_slider = AdjustmentSlider(
+            "Defringe", min_value=0.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        optics_content_layout.addWidget(self._defringe_slider)
+        optics_section.add_header_widget(
+            self._reset_button_for(
+                "Reset Optics",
+                lambda: self._reset_sliders(
+                    self._remove_ca_slider, self._defringe_slider
+                ),
+            )
+        )
+        content_layout.addWidget(optics_section)
+
+        # Geometry section (Phase I -- PDF sections 19-20). Straighten
+        # (small-angle rotation, see docs/planning/implementation-notes/
+        # 2026-10-12-straighten.md) was this section's first slice;
+        # Distortion/Vertical/Horizontal/Scale/X-Y Offset (see
+        # docs/planning/implementation-notes/
+        # 2026-10-13-geometry-processor.md) fill in the rest of the
+        # slider-based half. Upright modes (Auto/Guided/Level/Vertical/
+        # Full) and "Constrain Crop" remain explicitly out of scope --
+        # see that note's section 1 -- since they need vanishing-point
+        # detection or a dedicated guided-line UI, both much larger
+        # efforts than a plain slider.
+        geometry_section, geometry_content_layout = self._create_section("Geometry")
+        self._straighten_slider = AdjustmentSlider(
+            "Straighten", min_value=-45.0, max_value=45.0,
+            default_value=0.0, step=0.1, decimals=1
+        )
+        geometry_content_layout.addWidget(self._straighten_slider)
+        self._distortion_slider = AdjustmentSlider(
+            "Distortion", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._distortion_slider)
+        self._vertical_slider = AdjustmentSlider(
+            "Vertical", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._vertical_slider)
+        self._horizontal_slider = AdjustmentSlider(
+            "Horizontal", min_value=-100.0, max_value=100.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._horizontal_slider)
+        self._scale_slider = AdjustmentSlider(
+            "Scale", min_value=50.0, max_value=150.0,
+            default_value=100.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._scale_slider)
+        self._offset_x_slider = AdjustmentSlider(
+            "X Offset", min_value=-50.0, max_value=50.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._offset_x_slider)
+        self._offset_y_slider = AdjustmentSlider(
+            "Y Offset", min_value=-50.0, max_value=50.0,
+            default_value=0.0, step=1.0, decimals=0
+        )
+        geometry_content_layout.addWidget(self._offset_y_slider)
+        geometry_section.add_header_widget(
+            self._reset_button_for(
+                "Reset Geometry",
+                lambda: self._reset_sliders(
+                    self._straighten_slider,
+                    self._distortion_slider,
+                    self._vertical_slider,
+                    self._horizontal_slider,
+                    self._scale_slider,
+                    self._offset_x_slider,
+                    self._offset_y_slider,
+                ),
+            )
+        )
+        content_layout.addWidget(geometry_section)
 
         # Reset button
         self._reset_button = QPushButton("Reset All")
@@ -297,12 +547,16 @@ class ToolsPanel(QWidget):
         expanded = title in {"Light", "Tone Curve", "Color"}
         section = CollapsibleSection(title, expanded=expanded)
         icon_name = {
+            "Profile": "color",
             "Light": "effects",
             "Tone Curve": "curve",
             "Color": "color",
             "Color Mixer": "mixer",
             "Color Grading": "color",
             "Effects": "effects",
+            "Detail": "mask",
+            "Optics": "transform",
+            "Geometry": "crop",
         }.get(title, "effects")
         section.set_header_icon(line_icon(icon_name))
         section.setProperty("sectionName", title.lower().replace(" ", "_"))
@@ -354,6 +608,12 @@ class ToolsPanel(QWidget):
 
     def _connect_signals(self):
         """Connect slider signals."""
+        self._profile_apply_button.clicked.connect(
+            lambda: self.profile_apply_requested.emit(self._profile_combo.currentText())
+        )
+        self._wb_preset_apply_button.clicked.connect(
+            lambda: self._apply_wb_preset(self._wb_preset_combo.currentText())
+        )
         # Value changed signals (during slider movement)
         self._exposure_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('exposure', v)
@@ -392,6 +652,54 @@ class ToolsPanel(QWidget):
         self._texture_slider.value_changed.connect(
             lambda v: self._on_adjustment_changed('texture', v)
         )
+        self._clarity_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('clarity', v)
+        )
+        self._dehaze_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('dehaze', v)
+        )
+        self._vignette_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('vignette', v)
+        )
+        self._grain_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('grain', v)
+        )
+        self._sharpening_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('sharpening', v)
+        )
+        self._luminance_nr_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('luminance_nr', v)
+        )
+        self._color_nr_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('color_nr', v)
+        )
+        self._remove_ca_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('remove_ca', v)
+        )
+        self._defringe_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('defringe', v)
+        )
+        self._straighten_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('straighten', v)
+        )
+        self._distortion_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('distortion', v)
+        )
+        self._vertical_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('vertical', v)
+        )
+        self._horizontal_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('horizontal', v)
+        )
+        self._scale_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('scale', v)
+        )
+        self._offset_x_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('offset_x', v)
+        )
+        self._offset_y_slider.value_changed.connect(
+            lambda v: self._on_adjustment_changed('offset_y', v)
+        )
 
         # Slider released signals (for final processing)
         self._exposure_slider.slider_released.connect(self._on_slider_released)
@@ -406,8 +714,37 @@ class ToolsPanel(QWidget):
         self._saturation_slider.slider_released.connect(self._on_slider_released)
         self._vibrance_slider.slider_released.connect(self._on_slider_released)
         self._texture_slider.slider_released.connect(self._on_slider_released)
+        self._clarity_slider.slider_released.connect(self._on_slider_released)
+        self._dehaze_slider.slider_released.connect(self._on_slider_released)
+        self._vignette_slider.slider_released.connect(self._on_slider_released)
+        self._grain_slider.slider_released.connect(self._on_slider_released)
+        self._sharpening_slider.slider_released.connect(self._on_slider_released)
+        self._luminance_nr_slider.slider_released.connect(self._on_slider_released)
+        self._color_nr_slider.slider_released.connect(self._on_slider_released)
+        self._remove_ca_slider.slider_released.connect(self._on_slider_released)
+        self._defringe_slider.slider_released.connect(self._on_slider_released)
+        self._straighten_slider.slider_released.connect(self._on_slider_released)
+        self._distortion_slider.slider_released.connect(self._on_slider_released)
+        self._vertical_slider.slider_released.connect(self._on_slider_released)
+        self._horizontal_slider.slider_released.connect(self._on_slider_released)
+        self._scale_slider.slider_released.connect(self._on_slider_released)
+        self._offset_x_slider.slider_released.connect(self._on_slider_released)
+        self._offset_y_slider.slider_released.connect(self._on_slider_released)
 
-        self._curve_editor.curve_changed.connect(self._on_curve_editor_changed)
+        # Connected to the channel-aware signal, not the legacy
+        # ``curve_changed`` (which always reports the active channel's
+        # points but without saying which channel that is) -- see
+        # docs/planning/implementation-notes/
+        # 2026-10-13-per-channel-curves.md section 4. A lambda re-orders
+        # the signal's ``(channel, points)`` into
+        # ``_on_curve_editor_changed(points, channel=...)``'s own
+        # ``(points, channel)`` parameter order, which is kept
+        # ``points``-first so every pre-existing direct call (passing
+        # just a points list, with ``channel`` defaulting to "master")
+        # keeps working unchanged.
+        self._curve_editor.channel_curve_changed.connect(
+            lambda channel, points: self._on_curve_editor_changed(points, channel)
+        )
         self._curve_editor.curve_released.connect(self._on_curve_editor_released)
 
         self._hsl_mixer_panel.values_changed.connect(self._on_hsl_mixer_changed)
@@ -419,16 +756,56 @@ class ToolsPanel(QWidget):
         self._color_grading_panel.slider_released.connect(self.slider_released)
 
         self._reset_button.clicked.connect(self.reset_all)
+        self._editing_tool_strip.crop_tool_requested.connect(self.crop_tool_requested)
+        self._editing_tool_strip.mask_tool_requested.connect(self.mask_tool_requested)
+        self._editing_tool_strip.heal_tool_requested.connect(self.heal_tool_requested)
     
     def _on_slider_released(self, value: float):
         """Handle any slider being released."""
         self.slider_released.emit()
 
-    def _on_curve_editor_changed(self, points: list):
-        """Handle the tone curve changing (continuous, during drag)."""
-        self._curve_points = [tuple(p) for p in points]
-        if not self._suppress_adjustment_signal:
-            self.curve_changed.emit([list(p) for p in self._curve_points])
+    def _apply_wb_preset(self, preset_name: str) -> None:
+        """Apply a named white-balance preset's Temperature/Tint values.
+
+        Entirely self-contained inside ToolsPanel: this only ever
+        drives the existing Temperature/Tint sliders through their own
+        ``set_value``, which triggers their existing ``value_changed``
+        -> ``_on_adjustment_changed`` path exactly as a real drag
+        would (updating ``self._adjustments`` and emitting
+        ``adjustments_changed``), then manually emits ``slider_released``
+        to trigger the same final high-quality render a real
+        slider-release already triggers. No other adjustment is
+        touched, and no new signal is emitted to MainWindow -- unlike
+        Profile, this needs no ImageController wiring at all.
+        """
+        preset = WB_PRESETS.get(preset_name)
+        if preset is None:
+            return
+        self._temperature_slider.set_value(preset["temperature"])
+        self._tint_slider.set_value(preset["tint"])
+        self.slider_released.emit()
+
+    def _on_curve_editor_changed(self, points: list, channel: str = "master"):
+        """Handle one of the 4 tone curves changing (continuous, during
+        drag).
+
+        ``channel`` defaults to ``"master"`` so existing callers that
+        invoke this directly with just a points list keep editing the
+        master curve exactly as before. The real wiring (see
+        ``_connect_signals``) connects ``CurveEditor.
+        channel_curve_changed`` here instead, which always passes an
+        explicit channel for whichever curve the user is actually
+        editing.
+        """
+        if channel not in self._channel_curve_points:
+            channel = "master"
+        self._channel_curve_points[channel] = [tuple(p) for p in points]
+        if self._suppress_adjustment_signal:
+            return
+        emitted_points = [list(p) for p in self._channel_curve_points[channel]]
+        if channel == "master":
+            self.curve_changed.emit(emitted_points)
+        self.curve_channel_changed.emit(channel, emitted_points)
 
     def _on_curve_editor_released(self):
         """Handle the tone curve gesture being committed."""
@@ -513,14 +890,34 @@ class ToolsPanel(QWidget):
             'tint': self._adjustments['tint'],
         }
 
+    _CURVE_CHANNEL_PARAM_KEYS = {
+        "red": "red_points",
+        "green": "green_points",
+        "blue": "blue_points",
+    }
+
     def get_curve_params(self) -> Dict[str, Any]:
         """Get the tone curve parameters.
 
         Returns:
-            Dictionary with a single ``"points"`` key (list of ``[x, y]``
-            control points).
+            Dictionary with a ``"points"`` key (the master curve's list
+            of ``[x, y]`` control points -- always present, exactly as
+            before this method grew per-channel awareness), optionally
+            joined by ``"red_points"``/``"green_points"``/``"blue_points"``
+            for whichever per-channel curves are currently non-identity
+            (an untouched channel is omitted, matching
+            ``ImageController._curve_params``'s own falsy-skip
+            convention -- see docs/planning/implementation-notes/
+            2026-10-13-per-channel-curves.md section 4).
         """
-        return {'points': [list(p) for p in self._curve_points]}
+        params: Dict[str, Any] = {
+            'points': [list(p) for p in self._channel_curve_points['master']]
+        }
+        for channel, key in self._CURVE_CHANNEL_PARAM_KEYS.items():
+            channel_points = self._channel_curve_points[channel]
+            if not is_identity_curve(channel_points):
+                params[key] = [list(p) for p in channel_points]
+        return params
 
     def update_curve_histogram(self, counts: Optional[Sequence[int]]) -> None:
         """Set the histogram backdrop drawn behind the tone curve."""
@@ -564,8 +961,29 @@ class ToolsPanel(QWidget):
             'saturation': float(adjustments.get('saturation', 0.0)),
             'vibrance': float(adjustments.get('vibrance', 0.0)),
             'texture': float(adjustments.get('texture', 0.0)),
+            'clarity': float(adjustments.get('clarity', 0.0)),
+            'dehaze': float(adjustments.get('dehaze', 0.0)),
+            'vignette': float(adjustments.get('vignette', 0.0)),
+            'grain': float(adjustments.get('grain', 0.0)),
+            'sharpening': float(adjustments.get('sharpening', 0.0)),
+            'luminance_nr': float(adjustments.get('luminance_nr', 0.0)),
+            'color_nr': float(adjustments.get('color_nr', 0.0)),
+            'remove_ca': float(adjustments.get('remove_ca', 0.0)),
+            'defringe': float(adjustments.get('defringe', 0.0)),
+            'straighten': float(adjustments.get('straighten', 0.0)),
+            'distortion': float(adjustments.get('distortion', 0.0)),
+            'vertical': float(adjustments.get('vertical', 0.0)),
+            'horizontal': float(adjustments.get('horizontal', 0.0)),
+            'scale': float(adjustments.get('scale', 100.0)),
+            'offset_x': float(adjustments.get('offset_x', 0.0)),
+            'offset_y': float(adjustments.get('offset_y', 0.0)),
         }
-        curve_points = normalize_points(adjustments.get('tone_curve'))
+        curve_points_by_channel = {
+            'master': normalize_points(adjustments.get('tone_curve')),
+            'red': normalize_points(adjustments.get('tone_curve_red')),
+            'green': normalize_points(adjustments.get('tone_curve_green')),
+            'blue': normalize_points(adjustments.get('tone_curve_blue')),
+        }
         hsl_values = default_hsl_params()
         raw_hsl = adjustments.get('hsl')
         if raw_hsl:
@@ -598,18 +1016,42 @@ class ToolsPanel(QWidget):
             self._saturation_slider.set_value(merged['saturation'])
             self._vibrance_slider.set_value(merged['vibrance'])
             self._texture_slider.set_value(merged['texture'])
-            self._curve_editor.set_points(curve_points)
+            self._clarity_slider.set_value(merged['clarity'])
+            self._dehaze_slider.set_value(merged['dehaze'])
+            self._vignette_slider.set_value(merged['vignette'])
+            self._grain_slider.set_value(merged['grain'])
+            self._sharpening_slider.set_value(merged['sharpening'])
+            self._luminance_nr_slider.set_value(merged['luminance_nr'])
+            self._color_nr_slider.set_value(merged['color_nr'])
+            self._remove_ca_slider.set_value(merged['remove_ca'])
+            self._defringe_slider.set_value(merged['defringe'])
+            self._straighten_slider.set_value(merged['straighten'])
+            self._distortion_slider.set_value(merged['distortion'])
+            self._vertical_slider.set_value(merged['vertical'])
+            self._horizontal_slider.set_value(merged['horizontal'])
+            self._scale_slider.set_value(merged['scale'])
+            self._offset_x_slider.set_value(merged['offset_x'])
+            self._offset_y_slider.set_value(merged['offset_y'])
+            self._curve_editor.set_all_points(curve_points_by_channel)
             self._hsl_mixer_panel.set_values(hsl_values)
             self._color_grading_panel.set_values(color_grading_values)
         finally:
             self._suppress_adjustment_signal = False
         self._adjustments = merged
-        self._curve_points = list(curve_points)
+        self._channel_curve_points = {
+            channel: list(points) for channel, points in curve_points_by_channel.items()
+        }
         self._hsl_values = hsl_values
         self._color_grading_values = color_grading_values
         if emit_signal:
             self.adjustments_changed.emit(self._adjustments.copy())
-            self.curve_changed.emit([list(p) for p in self._curve_points])
+            for channel in CURVE_CHANNELS:
+                emitted_points = [
+                    list(p) for p in self._channel_curve_points[channel]
+                ]
+                if channel == 'master':
+                    self.curve_changed.emit(emitted_points)
+                self.curve_channel_changed.emit(channel, emitted_points)
             self.hsl_changed.emit(dict(self._hsl_values))
             self.color_grading_changed.emit(dict(self._color_grading_values))
 
@@ -634,6 +1076,22 @@ class ToolsPanel(QWidget):
         self._hsl_mixer_panel.setEnabled(enabled)
         self._color_grading_panel.setEnabled(enabled)
         self._texture_slider.setEnabled(enabled)
+        self._clarity_slider.setEnabled(enabled)
+        self._dehaze_slider.setEnabled(enabled)
+        self._vignette_slider.setEnabled(enabled)
+        self._grain_slider.setEnabled(enabled)
+        self._sharpening_slider.setEnabled(enabled)
+        self._luminance_nr_slider.setEnabled(enabled)
+        self._color_nr_slider.setEnabled(enabled)
+        self._remove_ca_slider.setEnabled(enabled)
+        self._defringe_slider.setEnabled(enabled)
+        self._straighten_slider.setEnabled(enabled)
+        self._distortion_slider.setEnabled(enabled)
+        self._vertical_slider.setEnabled(enabled)
+        self._horizontal_slider.setEnabled(enabled)
+        self._scale_slider.setEnabled(enabled)
+        self._offset_x_slider.setEnabled(enabled)
+        self._offset_y_slider.setEnabled(enabled)
         self._reset_button.setEnabled(enabled)
         for button in self._section_reset_buttons:
             button.setEnabled(enabled)

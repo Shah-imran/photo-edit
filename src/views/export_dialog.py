@@ -1,5 +1,6 @@
 """Export dialog for saving images."""
 
+from pathlib import Path
 from typing import Optional
 from PyQt6.QtWidgets import (
     QDialog,
@@ -18,10 +19,60 @@ from PyQt6.QtWidgets import (
     QMessageBox
 )
 from PyQt6.QtCore import Qt
-from PIL import Image
 
 from src.services.export_service import ExportService
 from src.services.settings_service import SettingsService
+
+
+def confirm_overwrite_if_needed(
+    parent, path: str, settings_service: Optional[SettingsService]
+) -> bool:
+    """Ask before overwriting an existing export file, if required.
+
+    Standalone module-level version of the logic ``ExportDialog`` uses
+    internally, so other callers (e.g. ``MainWindow``'s "Export with
+    Previous" action) can reuse it without duplicating the logic or
+    depending on an ``ExportDialog`` instance.
+
+    Args:
+        parent: Widget to parent the confirmation ``QMessageBox`` to.
+        path: Destination export path.
+        settings_service: Optional ``SettingsService`` used to read/update
+            the "confirm before overwrite" preference. When ``None``, no
+            confirmation is required.
+
+    Returns:
+        ``True`` if the export should proceed, ``False`` if it should be
+        aborted.
+    """
+    if settings_service is None:
+        return True
+    if not Path(path).exists():
+        return True
+    if not settings_service.get_confirm_export_overwrite():
+        return True
+
+    msg_box = QMessageBox(parent)
+    msg_box.setIcon(QMessageBox.Icon.Question)
+    msg_box.setWindowTitle("Overwrite File?")
+    msg_box.setText(
+        f"The file:\n{path}\nalready exists. Do you want to overwrite it?"
+    )
+    checkbox = QCheckBox("Don't ask me again")
+    msg_box.setCheckBox(checkbox)
+    msg_box.setStandardButtons(
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    )
+    msg_box.setDefaultButton(QMessageBox.StandardButton.No)
+    result = msg_box.exec()
+
+    if result != QMessageBox.StandardButton.Yes:
+        return False
+
+    if checkbox.isChecked():
+        settings_service.set_confirm_export_overwrite(False)
+
+    return True
 
 
 class ExportDialog(QDialog):
@@ -29,15 +80,19 @@ class ExportDialog(QDialog):
 
     def __init__(
         self,
-        image: Image.Image,
+        image,
         default_path: str = "",
         parent=None,
         settings_service: Optional[SettingsService] = None,
     ):
         """Initialize the export dialog.
-        
+
         Args:
-            image: PIL Image to export
+            image: ``LinearImage`` (float32 numpy array, shape ``(H, W, 3)``)
+                to export -- the same type ``ExportService.export_image``
+                and ``ImageController.get_export_image`` already use. This
+                dialog never holds a PIL Image; it only reads pixel
+                dimensions from ``image.shape``.
             default_path: Default file path. When empty and a
                 ``settings_service`` is provided, the last-used export
                 directory is used as the dialog's starting location.
@@ -47,6 +102,11 @@ class ExportDialog(QDialog):
         """
         super().__init__(parent)
         self._image = image
+        # Pixel dimensions read once from the array's shape (H, W, C) --
+        # NOT PIL's .width/.height, which this array does not have. See
+        # docs/planning/implementation-notes/2026-10-13-export-dialog-dimension-crash-fix.md.
+        self._image_width = int(image.shape[1])
+        self._image_height = int(image.shape[0])
         self._default_path = default_path
         self._export_service = ExportService()
         self._settings_service = settings_service
@@ -56,6 +116,7 @@ class ExportDialog(QDialog):
         self.setModal(True)
         
         self._setup_ui()
+        self._apply_last_export_options()
 
     def _setup_ui(self):
         """Set up the dialog UI."""
@@ -116,14 +177,14 @@ class ExportDialog(QDialog):
         custom_layout = QHBoxLayout()
         self._width_spin = QSpinBox()
         self._width_spin.setRange(1, 20000)
-        self._width_spin.setValue(self._image.width)
+        self._width_spin.setValue(self._image_width)
         custom_layout.addWidget(self._width_spin)
         
         custom_layout.addWidget(QLabel("x"))
         
         self._height_spin = QSpinBox()
         self._height_spin.setRange(1, 20000)
-        self._height_spin.setValue(self._image.height)
+        self._height_spin.setValue(self._image_height)
         custom_layout.addWidget(self._height_spin)
         
         custom_layout.addWidget(QLabel("px"))
@@ -138,7 +199,7 @@ class ExportDialog(QDialog):
         
         # Image info
         info_label = QLabel(
-            f"Original size: {self._image.width} x {self._image.height} px"
+            f"Original size: {self._image_width} x {self._image_height} px"
         )
         info_label.setStyleSheet("color: #808080;")
         layout.addWidget(info_label)
@@ -160,6 +221,43 @@ class ExportDialog(QDialog):
         
         # Connect preset changes
         self._resize_combo.currentIndexChanged.connect(self._on_resize_preset_changed)
+
+    def _apply_last_export_options(self):
+        """Pre-populate widgets from the last-used export options, if any.
+
+        Called after ``_setup_ui()`` so the signal connections it makes
+        (format combo -> ``_on_format_changed``, etc.) are already wired;
+        ``QComboBox.setCurrentIndex`` emits ``currentIndexChanged`` itself
+        when the index actually changes, so ``_on_format_changed`` fires
+        automatically here and no explicit call is needed.
+        """
+        if self._settings_service is None:
+            return
+        options = self._settings_service.get_last_export_options()
+        if not options:
+            return
+
+        format_name = options.get("format")
+        if format_name:
+            for i in range(self._format_combo.count()):
+                data = self._format_combo.itemData(i)
+                if data and data.get("name") == format_name:
+                    self._format_combo.setCurrentIndex(i)
+                    break
+
+        quality = options.get("quality")
+        if isinstance(quality, int):
+            self._quality_slider.setValue(quality)
+
+        width = options.get("width")
+        height = options.get("height")
+        if width is not None and height is not None:
+            self._width_spin.setValue(width)
+            self._height_spin.setValue(height)
+
+        preserve_aspect = options.get("preserve_aspect")
+        if preserve_aspect is not None:
+            self._preserve_aspect.setChecked(bool(preserve_aspect))
 
     def _browse_file(self):
         """Open file browser for export location."""
@@ -210,8 +308,8 @@ class ExportDialog(QDialog):
             self._height_spin.setValue(size[1])
         else:
             # Original size
-            self._width_spin.setValue(self._image.width)
-            self._height_spin.setValue(self._image.height)
+            self._width_spin.setValue(self._image_width)
+            self._height_spin.setValue(self._image_height)
 
     def _do_export(self):
         """Execute the export."""
@@ -229,11 +327,14 @@ class ExportDialog(QDialog):
         width = self._width_spin.value()
         height = self._height_spin.value()
         resize = None
-        if width != self._image.width or height != self._image.height:
+        if width != self._image_width or height != self._image_height:
             resize = (width, height)
         
         preserve_aspect = self._preserve_aspect.isChecked()
-        
+
+        if not confirm_overwrite_if_needed(self, path, self._settings_service):
+            return
+
         # Export
         success = self._export_service.export_image(
             self._image,
@@ -243,8 +344,16 @@ class ExportDialog(QDialog):
             resize=resize,
             preserve_aspect=preserve_aspect
         )
-        
+
         if success:
+            if self._settings_service is not None:
+                self._settings_service.set_last_export_options({
+                    "format": format_name,
+                    "quality": quality,
+                    "width": resize[0] if resize else None,
+                    "height": resize[1] if resize else None,
+                    "preserve_aspect": preserve_aspect,
+                })
             QMessageBox.information(self, "Export Complete", f"Image exported to:\n{path}")
             self.accept()
         else:

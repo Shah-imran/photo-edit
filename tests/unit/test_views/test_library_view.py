@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from PIL import Image
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QSizePolicy
+from PyQt6.QtWidgets import QApplication, QSizePolicy, QToolButton
 
 from src.views.library_view import LibraryView
 
@@ -309,6 +309,92 @@ class TestLibraryView:
 
         view.set_library_section_expanded(True)
         assert view.is_library_section_expanded() is True
+
+    def test_set_collections_renders_rows_with_counts(self, view, qtbot):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
+        view.set_collections(
+            [
+                {"id": "c1", "name": "Travel", "count": 3},
+                {"id": "c2", "name": "Family", "count": 0},
+            ]
+        )
+
+        assert set(view._collection_rows.keys()) == {"c1", "c2"}
+        assert view._collection_row_counts["c1"].text() == "3"
+        assert view._collection_row_counts["c2"].text() == "0"
+
+    def test_set_collections_clears_previous_rows_on_rebuild(self, view):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
+        view.set_collections([{"id": "c1", "name": "Travel", "count": 0}])
+        view.set_collections([{"id": "c2", "name": "Family", "count": 0}])
+
+        assert set(view._collection_rows.keys()) == {"c2"}
+
+    def test_clicking_collection_row_emits_collection_selected_with_prefix(
+        self, view, qtbot
+    ):
+        view.set_libraries(
+            [{"id": "one", "name": "Library 1"}],
+            current_library_id="one",
+        )
+        view.set_collections([{"id": "c1", "name": "Travel", "count": 0}])
+        button = view._collection_rows["c1"].findChild(QToolButton)
+
+        with qtbot.waitSignal(view.collection_selected, timeout=1000) as catcher:
+            button.click()
+
+        assert catcher.args == ["collection:c1"]
+
+    def test_new_collection_button_prompts_and_emits_requested_name(
+        self, view, qtbot
+    ):
+        from unittest.mock import patch
+
+        from PyQt6.QtWidgets import QInputDialog
+
+        with patch.object(
+            QInputDialog, "getText", staticmethod(lambda *a, **k: ("Travel", True))
+        ):
+            with qtbot.waitSignal(view.create_collection_requested, timeout=1000) as catcher:
+                view._new_collection_button.click()
+
+        assert catcher.args == ["Travel"]
+
+    def test_new_collection_button_cancel_emits_nothing(self, view, qtbot):
+        from unittest.mock import patch
+
+        from PyQt6.QtWidgets import QInputDialog
+
+        received = []
+        view.create_collection_requested.connect(lambda *args: received.append(args))
+
+        with patch.object(
+            QInputDialog, "getText", staticmethod(lambda *a, **k: ("Travel", False))
+        ):
+            view._new_collection_button.click()
+
+        assert received == []
+
+    def test_new_collection_button_rejects_blank_name(self, view, qtbot):
+        from unittest.mock import patch
+
+        from PyQt6.QtWidgets import QInputDialog
+
+        received = []
+        view.create_collection_requested.connect(lambda *args: received.append(args))
+
+        with patch.object(
+            QInputDialog, "getText", staticmethod(lambda *a, **k: ("   ", True))
+        ):
+            view._new_collection_button.click()
+
+        assert received == []
 
     def test_import_folder(self, view, tmp_path):
         for i in range(3):

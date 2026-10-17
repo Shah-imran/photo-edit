@@ -49,6 +49,16 @@ class LibraryEntry:
     thumbnail_cache_key: Optional[str] = None
     adjustment_state: Optional[dict] = None
     favorite: bool = False
+    rating: int = 0
+    flag: str = "none"
+    keywords: list[str] = field(default_factory=list)
+    collection_ids: list[str] = field(default_factory=list)
+    #: User-editable "when this photo was actually taken" timestamp --
+    #: separate from ``added_at`` ("when imported into this library").
+    #: Defaults to ``added_at`` at import time (no real EXIF
+    #: DateTimeOriginal reading exists in this codebase yet -- see
+    #: docs/planning/implementation-notes/2026-10-13-edit-date-time.md).
+    captured_at: str = ""
 
     @property
     def normalized_path(self) -> str:
@@ -65,20 +75,57 @@ class LibraryEntry:
             "thumbnail_cache_key": self.thumbnail_cache_key,
             "adjustment_state": self.adjustment_state,
             "favorite": self.favorite,
+            "rating": self.rating,
+            "flag": self.flag,
+            "keywords": self.keywords,
+            "collection_ids": self.collection_ids,
+            "captured_at": self.captured_at,
         }
 
     @classmethod
     def from_dict(cls, payload: dict) -> "LibraryEntry":
+        added_at = str(payload.get("added_at", _utc_now_iso()))
         return cls(
             path=str(payload.get("path", "")),
             filename=str(payload.get("filename", "")),
-            added_at=str(payload.get("added_at", _utc_now_iso())),
+            added_at=added_at,
             last_seen_mtime_ns=_optional_int(payload.get("last_seen_mtime_ns")),
             last_seen_size=_optional_int(payload.get("last_seen_size")),
             status=str(payload.get("status", "missing")),
             thumbnail_cache_key=_optional_str(payload.get("thumbnail_cache_key")),
             adjustment_state=_optional_dict(payload.get("adjustment_state")),
             favorite=bool(payload.get("favorite", False)),
+            rating=_clamp_rating(payload.get("rating", 0)),
+            flag=_normalize_flag(payload.get("flag", "none")),
+            keywords=_normalize_keywords(payload.get("keywords", [])),
+            collection_ids=_normalize_collection_ids(payload.get("collection_ids", [])),
+            # Old catalog files predating this slice lack "captured_at"
+            # entirely; falls back to added_at (see _normalize_captured_at).
+            captured_at=_normalize_captured_at(payload.get("captured_at"), added_at),
+        )
+
+
+@dataclass
+class CollectionRecord:
+    """A user-created, flat (non-nested) collection scoped to one library.
+
+    See docs/planning/implementation-notes/2026-10-13-collections.md --
+    collections are a new top-level entity, not a per-entry scalar field,
+    and deliberately do not cross library boundaries (no "id" is ever
+    looked up outside the library that owns it).
+    """
+
+    id: str
+    name: str
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "name": self.name}
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "CollectionRecord":
+        return cls(
+            id=str(payload.get("id", uuid.uuid4().hex)),
+            name=str(payload.get("name", "Collection")),
         )
 
 
@@ -91,6 +138,7 @@ class LibraryRecord:
     created_at: str
     updated_at: str
     entries: list[LibraryEntry] = field(default_factory=list)
+    collections: list[CollectionRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -99,6 +147,7 @@ class LibraryRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "entries": [entry.to_dict() for entry in self.entries],
+            "collections": [collection.to_dict() for collection in self.collections],
         }
 
     @classmethod
@@ -112,6 +161,11 @@ class LibraryRecord:
                 LibraryEntry.from_dict(entry)
                 for entry in payload.get("entries", [])
                 if isinstance(entry, dict)
+            ],
+            collections=[
+                CollectionRecord.from_dict(item)
+                for item in payload.get("collections", [])
+                if isinstance(item, dict)
             ],
         )
 
@@ -151,6 +205,119 @@ def _optional_dict(value) -> Optional[dict]:
     if not isinstance(value, dict):
         return None
     return dict(value)
+
+
+def _clamp_rating(value) -> int:
+    """Coerce a persisted/incoming rating to an integer in 0..5.
+
+    Defensive against corrupt or out-of-range catalog data (and against
+    older catalog files that predate this field entirely, which already
+    default to 0 via ``payload.get("rating", 0)`` at the call site).
+    """
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(5, rating))
+
+
+def _normalize_flag(value) -> str:
+    """Coerce a persisted/incoming pick/reject flag to "none"/"pick"/"reject".
+
+    Defensive against corrupt or old-format catalog data (a missing key,
+    ``None``, or any other garbage value, all coerce to "none") the same
+    way ``_clamp_rating`` defends against out-of-range/non-numeric rating
+    values -- never raises.
+    """
+    if value in ("pick", "reject"):
+        return value
+    return "none"
+
+
+def _normalize_keywords(value) -> list[str]:
+    """Coerce a persisted/incoming keyword list to a clean ``list[str]``.
+
+    Defensive against corrupt or old-format catalog data the same way
+    ``_optional_dict``/``_clamp_rating``/``_normalize_flag`` defend their
+    own fields -- never raises. A non-list ``value`` (missing key, ``None``,
+    a stray string/int/dict) normalizes to ``[]``. Otherwise, each item is
+    coerced to ``str``, stripped of surrounding whitespace, and empty
+    strings are dropped. Duplicates are removed case-insensitively (so
+    "Sunset" and "sunset" collapse to one entry) while preserving the
+    first-seen casing/spelling and insertion order.
+    """
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    return cleaned
+
+
+def _normalize_collection_ids(value) -> list[str]:
+    """Coerce a persisted/incoming ``collection_ids`` list to a clean
+    ``list[str]``.
+
+    Mirrors ``_normalize_keywords``'s defensive "coerce, never raise"
+    style: a non-list ``value`` normalizes to ``[]``, each item is
+    coerced to ``str`` and stripped, empty strings are dropped, and
+    duplicates are removed while preserving insertion order. Unlike
+    keywords, dedup here is a plain exact-string dedup (ids are opaque
+    tokens, not user-facing text), not case-insensitive.
+
+    This does *not* check that each id names a collection that still
+    exists in the library -- that cross-check (and the pruning of
+    dangling references when a collection is deleted) is
+    ``LibraryCatalogService.delete_collection``'s job, not this
+    load-time coercion's.
+    """
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned
+
+
+def _normalize_captured_at(value, fallback: str) -> str:
+    """Coerce a persisted/incoming "captured at" timestamp to a sane
+    ISO-8601 string, never raising on malformed input.
+
+    Unlike ``_clamp_rating``/``_normalize_flag`` (which fall back to one
+    fixed literal for every entry, ``0``/``"none"``), ``captured_at`` has
+    no single universal default -- each entry's own sensible fallback is
+    "whatever its ``added_at`` currently is" (import time), which the
+    caller passes in as ``fallback`` rather than this helper inventing a
+    value of its own. A missing key, ``None``, a non-string value, or a
+    string that does not parse as ISO-8601 (``datetime.fromisoformat``)
+    all fall back to ``fallback`` rather than raising or storing garbage.
+    A well-formed ISO-8601 string is returned unchanged (not
+    re-formatted), so a user-supplied value with, e.g., no timezone
+    offset round-trips exactly as typed -- this app does not impose
+    timezone handling beyond whatever convention ``fallback`` (usually
+    ``added_at``, itself UTC) already implies. See
+    docs/planning/implementation-notes/2026-10-13-edit-date-time.md.
+    """
+    if isinstance(value, str) and value.strip():
+        try:
+            datetime.fromisoformat(value.strip())
+        except ValueError:
+            return fallback
+        return value.strip()
+    return fallback
 
 
 class LibraryCatalogService:
@@ -257,6 +424,46 @@ class LibraryCatalogService:
             self._save_catalog()
         return list(library.entries)
 
+    def remove_entry(self, library_id: str, path: str) -> bool:
+        """Remove one entry from a library's catalog.
+
+        Purely a catalog-removal primitive -- never touches the
+        filesystem. ``LibraryController.remove_entry``/``remove_entries``
+        are the ones that (optionally) delete the underlying file from
+        disk, AFTER this method has removed the catalog entry; this
+        service stays a pure JSON-catalog abstraction, the same way
+        ``import_images``/``_refresh_entry`` only ever READ a file's
+        ``stat()`` here, never delete anything. See
+        docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+
+        A removed entry's ``collection_ids`` live on the entry itself
+        (not on a separate per-collection membership list), so deleting
+        the entry already drops every collection reference to it --
+        unlike ``delete_collection`` (which deletes the shared
+        ``CollectionRecord`` out from under potentially many entries and
+        so must loop every entry to strip the dangling id), there is no
+        separate cleanup pass needed here.
+
+        No-op (returns ``False``) on an unknown library or path, never
+        raises -- mirrors ``add_entry_to_collection``'s defensive style,
+        the most recent precedent for a method whose one real caller
+        (``LibraryController``) wants a plain boolean rather than a
+        ``KeyError`` to catch.
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return False
+        normalized = _normalize_path(path)
+        remaining = [
+            entry for entry in library.entries if entry.normalized_path != normalized
+        ]
+        if len(remaining) == len(library.entries):
+            return False
+        library.entries = remaining
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return True
+
     def clear_library_entries(self, library_id: str) -> None:
         library = self._require_library(library_id)
         if not library.entries:
@@ -332,6 +539,232 @@ class LibraryCatalogService:
         library.updated_at = _utc_now_iso()
         self._save_catalog()
         return entry
+
+    def set_entry_rating(
+        self, library_id: str, path: str, rating: int
+    ) -> LibraryEntry:
+        """Persist a 0-5 star rating for an entry.
+
+        Out-of-range values are clamped rather than rejected -- friendlier
+        for a library-metadata setter than raising, and consistent with how
+        a corrupt/out-of-range persisted value is handled on read (see
+        ``_clamp_rating``).
+        """
+        library = self._require_library(library_id)
+        entry = self._require_entry(library, path)
+        rating = _clamp_rating(rating)
+        if entry.rating == rating:
+            return entry
+        entry.rating = rating
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def set_entry_flag(
+        self, library_id: str, path: str, flag: str
+    ) -> LibraryEntry:
+        """Persist a pick/reject flag ("none"/"pick"/"reject") for an entry.
+
+        Anything other than exactly "pick" or "reject" normalizes to
+        "none" rather than raising -- mirrors ``set_entry_rating``'s clamp
+        style for the same reasons (see ``_normalize_flag``).
+        """
+        library = self._require_library(library_id)
+        entry = self._require_entry(library, path)
+        flag = _normalize_flag(flag)
+        if entry.flag == flag:
+            return entry
+        entry.flag = flag
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def set_entry_keywords(
+        self, library_id: str, path: str, keywords: list[str]
+    ) -> LibraryEntry:
+        """Persist a list of free-text keywords for an entry.
+
+        Normalizes (strips/drops empties/case-insensitively dedupes while
+        preserving first-seen casing and order) rather than raising on
+        malformed input -- mirrors ``set_entry_rating``/``set_entry_flag``'s
+        clamp/normalize style for the same reasons (see
+        ``_normalize_keywords``).
+        """
+        library = self._require_library(library_id)
+        entry = self._require_entry(library, path)
+        keywords = _normalize_keywords(keywords)
+        if entry.keywords == keywords:
+            return entry
+        entry.keywords = keywords
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def set_entry_captured_at(
+        self, library_id: str, path: str, captured_at: str
+    ) -> Optional[LibraryEntry]:
+        """Persist a user-editable "captured at" timestamp for an entry.
+
+        Unlike ``set_entry_rating``/``set_entry_flag`` (which raise
+        ``KeyError`` via ``_require_library``/``_require_entry`` on an
+        unknown library/path, relying on their one real caller --
+        ``LibraryController`` -- to guard against that first), this
+        follows the more defensive style ``add_entry_to_collection`` uses:
+        an unknown library or path is a no-op returning ``None`` rather
+        than raising, which is the explicit contract this method is
+        documented to have. ``captured_at`` is normalized via
+        ``_normalize_captured_at`` (never raises on a malformed string --
+        falls back to the entry's own current ``captured_at``, itself
+        never empty once an entry exists) before the no-op-if-unchanged/
+        bump-`updated_at`/save sequence every other per-entry setter in
+        this service already uses.
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        try:
+            entry = self._require_entry(library, path)
+        except KeyError:
+            return None
+        normalized = _normalize_captured_at(captured_at, entry.captured_at)
+        if entry.captured_at == normalized:
+            return entry
+        entry.captured_at = normalized
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def list_collections(self, library_id: str) -> list[CollectionRecord]:
+        """Return the flat list of collections for one library.
+
+        Never raises on an unknown ``library_id`` -- returns ``[]``
+        instead, matching the "defensive setter" style the rest of this
+        service already uses for bad input (unlike ``_require_library``'s
+        internal callers, which legitimately want a ``KeyError``).
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return []
+        return list(library.collections)
+
+    def create_collection(self, library_id: str, name: str) -> Optional[CollectionRecord]:
+        """Create a new, empty collection in one library.
+
+        An empty/whitespace-only ``name`` is defensively rejected (returns
+        ``None``, no catalog mutation) rather than silently creating an
+        unnamed collection -- there is no sensible auto-generated default
+        the way there is for a new library's name. Duplicate names ARE
+        allowed (no uniqueness check): two collections can share a
+        display name, distinguished only by id, the same way nothing in
+        this codebase stops two libraries from sharing a name either.
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        clean_name = name.strip() if isinstance(name, str) else ""
+        if not clean_name:
+            return None
+        record = CollectionRecord(id=uuid.uuid4().hex, name=clean_name)
+        library.collections.append(record)
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return record
+
+    def rename_collection(
+        self, library_id: str, collection_id: str, new_name: str
+    ) -> Optional[CollectionRecord]:
+        """Rename an existing collection. No-op (returns ``None``) on an
+        unknown library/collection id or an empty/whitespace-only name."""
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        collection = self._find_collection(library, collection_id)
+        if collection is None:
+            return None
+        clean_name = new_name.strip() if isinstance(new_name, str) else ""
+        if not clean_name or collection.name == clean_name:
+            return collection
+        collection.name = clean_name
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return collection
+
+    def delete_collection(self, library_id: str, collection_id: str) -> bool:
+        """Delete a collection and strip its id out of every entry's
+        ``collection_ids`` so no dangling reference survives the delete.
+
+        Returns ``True`` if a collection was actually removed, ``False``
+        on an unknown library/collection id (never raises).
+        """
+        library = self.get_library(library_id)
+        if library is None:
+            return False
+        collection = self._find_collection(library, collection_id)
+        if collection is None:
+            return False
+        library.collections = [
+            existing for existing in library.collections if existing.id != collection_id
+        ]
+        for entry in library.entries:
+            if collection_id in entry.collection_ids:
+                entry.collection_ids = [
+                    cid for cid in entry.collection_ids if cid != collection_id
+                ]
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return True
+
+    def add_entry_to_collection(
+        self, library_id: str, path: str, collection_id: str
+    ) -> Optional[LibraryEntry]:
+        """Add one entry to one collection. No-op on an unknown library,
+        collection, or path (returns ``None``, never raises); also a no-op
+        (no save) if the entry already belongs to that collection."""
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        if self._find_collection(library, collection_id) is None:
+            return None
+        try:
+            entry = self._require_entry(library, path)
+        except KeyError:
+            return None
+        if collection_id in entry.collection_ids:
+            return entry
+        entry.collection_ids = [*entry.collection_ids, collection_id]
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def remove_entry_from_collection(
+        self, library_id: str, path: str, collection_id: str
+    ) -> Optional[LibraryEntry]:
+        """Remove one entry from one collection. No-op on an unknown
+        library or path (returns ``None``, never raises); also a no-op (no
+        save) if the entry was not in that collection to begin with."""
+        library = self.get_library(library_id)
+        if library is None:
+            return None
+        try:
+            entry = self._require_entry(library, path)
+        except KeyError:
+            return None
+        if collection_id not in entry.collection_ids:
+            return entry
+        entry.collection_ids = [
+            cid for cid in entry.collection_ids if cid != collection_id
+        ]
+        library.updated_at = _utc_now_iso()
+        self._save_catalog()
+        return entry
+
+    def _find_collection(
+        self, library: LibraryRecord, collection_id: str
+    ) -> Optional[CollectionRecord]:
+        for collection in library.collections:
+            if collection.id == collection_id:
+                return collection
+        return None
 
     def referenced_cache_keys(self) -> set[str]:
         keys: set[str] = set()
@@ -430,6 +863,13 @@ class LibraryCatalogService:
             last_seen_mtime_ns=mtime_ns,
             last_seen_size=size,
             status=status,
+            # No real EXIF DateTimeOriginal reading exists in this codebase
+            # (image_service.py only reads EXIF orientation for transpose,
+            # not capture-time metadata) -- deliberately deferred, not
+            # built here. Defaults to added_at, overridable by the user at
+            # any time via set_entry_captured_at(). See
+            # docs/planning/implementation-notes/2026-10-13-edit-date-time.md.
+            captured_at=added_at,
         )
 
     def _refresh_entry(self, entry: LibraryEntry) -> bool:

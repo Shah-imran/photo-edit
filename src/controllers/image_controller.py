@@ -22,9 +22,29 @@ from src.processors.color_grading_processor import (
     default_color_grading_params,
 )
 from src.processors.texture_processor import TextureProcessor
+from src.processors.clarity_processor import ClarityProcessor
+from src.processors.dehaze_processor import DehazeProcessor
+from src.processors.vignette_processor import VignetteProcessor
+from src.processors.grain_processor import GrainProcessor
+from src.processors.sharpening_processor import SharpeningProcessor
+from src.processors.luminance_noise_reduction_processor import (
+    LuminanceNoiseReductionProcessor,
+)
+from src.processors.color_noise_reduction_processor import (
+    ColorNoiseReductionProcessor,
+)
+from src.processors.remove_chromatic_aberration_processor import (
+    RemoveChromaticAberrationProcessor,
+)
+from src.processors.defringe_processor import DefringeProcessor
+from src.processors.geometry_processor import GeometryProcessor
+from src.processors.straighten_processor import StraightenProcessor
+from src.processors.crop_processor import CropProcessor
+from src.processors.mask_processor import MaskProcessor
+from src.processors.healing_processor import HealingProcessor
 from src.commands.adjustment_commands import (
+    AdjustmentStateCommand,
     CombinedAdjustmentCommand,
-    ImageStateChangeCommand,
 )
 from src.processing.display_frame import DisplayFrame
 from src.processing.processing_worker import ProcessingWorker
@@ -32,6 +52,11 @@ from src.utils.curve_math import DEFAULT_CURVE_POINTS, is_identity_curve, normal
 from src.utils.debouncer import ThrottledDebouncer
 from src.utils.image_extensions import open_image_file_dialog_filter
 logger = logging.getLogger(__name__)
+
+# Private "no override passed" sentinel for get_export_image's mask_override
+# parameter -- distinct from both None and {} ("no mask"), which are both
+# legitimate override VALUES a caller may want to pass explicitly.
+_UNSET = object()
 
 
 def _elapsed_ms(start: float) -> float:
@@ -85,6 +110,14 @@ class ImageController(QObject):
     image_load_started = pyqtSignal(str)
     image_preview_ready = pyqtSignal(str)
     image_load_finished = pyqtSignal(str, bool)
+    # Emitted after apply_history_state() re-applies a full (image,
+    # adjustment-state) snapshot -- on undo, redo, and also on an ordinary
+    # adjustment commit (both paths push an AdjustmentStateCommand; see
+    # docs/planning/implementation-notes/2026-10-13-state-aware-undo-redo.md).
+    # Carries the same dict shape as get_adjustment_state(). MainWindow
+    # listens to this to resync the ToolsPanel sliders/curve/HSL/Color
+    # Grading widgets and re-persist to the library catalog.
+    adjustment_state_restored = pyqtSignal(dict)
     _worker_image_set_requested = pyqtSignal(object)
     _ADJUSTMENT_DEFAULTS = {
         "exposure": 0.0,
@@ -99,12 +132,43 @@ class ImageController(QObject):
         "saturation": 0.0,
         "vibrance": 0.0,
         "texture": 0.0,
+        "clarity": 0.0,
+        "dehaze": 0.0,
+        "vignette": 0.0,
+        "grain": 0.0,
+        "sharpening": 0.0,
+        "luminance_nr": 0.0,
+        "color_nr": 0.0,
+        "remove_ca": 0.0,
+        "defringe": 0.0,
+        "straighten": 0.0,
+        "distortion": 0.0,
+        "vertical": 0.0,
+        "horizontal": 0.0,
+        "scale": 100.0,
+        "offset_x": 0.0,
+        "offset_y": 0.0,
     }
     # Tone curve control points are not floats, so they are kept out of
     # _ADJUSTMENT_DEFAULTS (which _normalize_adjustment_state float-casts
     # every value of) and threaded as a separate, parallel parameter --
     # see docs/planning/implementation-notes/2026-09-29-tone-curve.md.
     _CURVE_DEFAULT_POINTS = DEFAULT_CURVE_POINTS
+    # Per-channel curves (PDF section 12, Phase E -- see
+    # docs/planning/implementation-notes/2026-10-13-per-channel-curves.md):
+    # the master curve's own "points" key, above, is joined by 3 more
+    # OPTIONAL keys inside the same ``_curve_params`` dict, one per
+    # Red/Green/Blue channel. Like "points" itself, each is only present
+    # in ``_curve_params`` when that one channel's curve is non-identity
+    # (the same falsy-skip convention every ``_xxx_params`` field uses),
+    # so ``CurveProcessor.process(**self._curve_params)`` only builds a
+    # LUT for a channel that actually needs one.
+    _CURVE_CHANNEL_KEYS = {
+        "master": "points",
+        "red": "red_points",
+        "green": "green_points",
+        "blue": "blue_points",
+    }
     # The HSL Color Mixer's 24 keys are plain floats, but are kept out of
     # the top-level get_adjustment_state()/_ADJUSTMENT_DEFAULTS contract
     # (nested under one "hsl" key instead) so persistence/exact-dict tests
@@ -115,6 +179,74 @@ class ImageController(QObject):
     # -- nested under one "color_grading" key -- see
     # docs/planning/implementation-notes/2026-09-30-color-grading.md.
     _COLOR_GRADING_DEFAULTS = default_color_grading_params()
+    # Crop's 4 keys are also non-flat (nested under one "crop" key, same
+    # reasoning as tone_curve/hsl/color_grading above), but unlike those,
+    # its identity/"no crop" default is the full-frame rectangle, not all
+    # zeros -- see docs/planning/implementation-notes/
+    # 2026-10-13-crop-processor.md section 4.
+    _CROP_DEFAULTS = {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+    # Geometry's 6 keys are flat floats, same as texture/dehaze/etc., and
+    # ARE part of the top-level get_adjustment_state()/_ADJUSTMENT_DEFAULTS
+    # contract (unlike crop/mask/heal_spots, no separate nested key) --
+    # but "scale"'s own identity value is 100.0, not 0.0, so this subset
+    # is pulled out here for the several spots that need to check "is
+    # geometry at its identity" without assuming every key defaults to
+    # zero. See docs/planning/implementation-notes/
+    # 2026-10-13-geometry-processor.md section 2.
+    _GEOMETRY_DEFAULTS = {
+        "distortion": 0.0,
+        "vertical": 0.0,
+        "horizontal": 0.0,
+        "scale": 100.0,
+        "offset_x": 0.0,
+        "offset_y": 0.0,
+    }
+    # The mask's one slot (state key "mask") has no meaningful "neutral"
+    # geometry the way crop's full-frame rectangle is a real, applyable
+    # identity -- there is no gradient/ellipse that is simultaneously
+    # valid and a no-op. So, unlike crop, "no mask" is represented
+    # externally as None, not an empty-but-complete dict -- see
+    # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
+    # Internally, self._mask_params still follows crop's own {}-sentinel
+    # convention (see __init__ below); only the externally-visible
+    # get_adjustment_state()["mask"] / on_mask_changed(mask) contract uses
+    # None.
+    _MASK_LINEAR_DEFAULTS = {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+    _MASK_RADIAL_DEFAULTS = {
+        "cx": 0.5,
+        "cy": 0.5,
+        "rx": 0.25,
+        "ry": 0.25,
+        "feather": 0.5,
+    }
+    # The one, small, fixed local-adjustment subset a mask supports (see
+    # docs/planning/implementation-notes/2026-10-13-mask-processor.md for
+    # the full list of deferred parameters). Ranges match each
+    # underlying processor's own real valid range.
+    _MASK_ADJUSTMENT_RANGES = {
+        "exposure": (-5.0, 5.0),
+        "contrast": (-100.0, 100.0),
+        "saturation": (-100.0, 100.0),
+        "clarity": (-100.0, 100.0),
+    }
+    _MASK_TYPES = ("linear", "radial")
+    # Healing's spots are a LIST (state key "heal_spots"), not a dict --
+    # unlike every other key so far, multi-spot healing is naturally a
+    # list of independent spots rather than a single slot. "[]" is the
+    # meaningful, falsy "no spots" default, following the same
+    # falsy-skip convention every other processor in this codebase
+    # already uses. See docs/planning/implementation-notes/
+    # 2026-10-13-healing-processor.md.
+    _HEALING_MODES = ("heal", "clone")
+    _HEALING_SPOT_DEFAULTS = {
+        "dst_x": 0.5,
+        "dst_y": 0.5,
+        "src_x": 0.5,
+        "src_y": 0.5,
+        "radius": 0.05,
+        "feather": 0.3,
+        "opacity": 1.0,
+    }
 
     def __init__(
         self,
@@ -155,6 +287,20 @@ class ImageController(QObject):
         self._hsl_processor = HslMixerProcessor()
         self._color_grading_processor = ColorGradingProcessor()
         self._texture_processor = TextureProcessor()
+        self._clarity_processor = ClarityProcessor()
+        self._dehaze_processor = DehazeProcessor()
+        self._vignette_processor = VignetteProcessor()
+        self._grain_processor = GrainProcessor()
+        self._sharpening_processor = SharpeningProcessor()
+        self._luminance_nr_processor = LuminanceNoiseReductionProcessor()
+        self._color_nr_processor = ColorNoiseReductionProcessor()
+        self._remove_ca_processor = RemoveChromaticAberrationProcessor()
+        self._defringe_processor = DefringeProcessor()
+        self._geometry_processor = GeometryProcessor()
+        self._straighten_processor = StraightenProcessor()
+        self._crop_processor = CropProcessor()
+        self._mask_processor = MaskProcessor()
+        self._healing_processor = HealingProcessor()
 
         # Current adjustment values
         self._exposure_params: Dict[str, float] = {}
@@ -165,7 +311,48 @@ class ImageController(QObject):
         self._hsl_params: Dict[str, float] = {}
         self._color_grading_params: Dict[str, float] = {}
         self._texture_params: Dict[str, float] = {}
-        
+        self._clarity_params: Dict[str, float] = {}
+        self._dehaze_params: Dict[str, float] = {}
+        self._vignette_params: Dict[str, float] = {}
+        self._grain_params: Dict[str, float] = {}
+        self._sharpening_params: Dict[str, float] = {}
+        self._luminance_nr_params: Dict[str, float] = {}
+        self._color_nr_params: Dict[str, float] = {}
+        self._remove_ca_params: Dict[str, float] = {}
+        self._defringe_params: Dict[str, float] = {}
+        self._geometry_params: Dict[str, float] = {}
+        self._straighten_params: Dict[str, float] = {}
+        # Unlike every other _xxx_params field, Crop's natural "no crop"
+        # default ({"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}, the full
+        # frame) is a non-empty dict, so it cannot double as its own
+        # falsy "not yet touched" sentinel the way the other fields'
+        # all-zero defaults do. _crop_params is therefore kept at {}
+        # (falsy, matching the skip-if-empty convention used everywhere
+        # else) whenever there is no actual crop, and only populated
+        # with the real {"x0": ..., ...} values when a non-identity crop
+        # is set -- see docs/planning/implementation-notes/
+        # 2026-10-13-crop-processor.md section 4.
+        self._crop_params: Dict[str, float] = {}
+        # Mask's single slot follows the exact same internal falsy/{}
+        # "not yet touched" sentinel convention as _crop_params (see
+        # above) -- {} means "no mask", a populated dict means an active
+        # one. Unlike crop, this needs no identity-collapsing step: the
+        # normalizer itself (_normalize_mask_state) returns {} directly
+        # for "no mask" (None, or an unrecognized/missing "type"), since
+        # there is no other "neutral" mask geometry to collapse from. See
+        # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
+        self._mask_params: Dict[str, Any] = {}
+        # Healing follows the exact same internal falsy/{} "not yet
+        # touched" sentinel convention as _mask_params above, but wraps
+        # its list value in a single-key dict ({"heal_spots": [...]}),
+        # mirroring tone curve's own {"points": [...]} wrapping
+        # convention (both are the one non-scalar-float VALUE kept
+        # inside an otherwise-scalar _xxx_params dict) rather than
+        # storing the bare list directly -- this is also exactly the
+        # shape HealingProcessor.process's own ``heal_spots`` kwarg
+        # expects when the dict is spread with **self._healing_params.
+        self._healing_params: Dict[str, Any] = {}
+
         # Background processing
         self._processing_worker: Optional[ProcessingWorker] = None
         self._final_processing_worker: Optional[ProcessingWorker] = None
@@ -175,6 +362,7 @@ class ImageController(QObject):
         self._latest_load_request_id: int = -1
         self._pending_final_request_id: int = -1
         self._pending_history_previous_image = None
+        self._pending_history_previous_state: Optional[Dict[str, Any]] = None
         self._load_parent_widget: Optional[QWidget] = None
         self._load_threads: list[QThread] = []
         self._load_workers: list[_ImageLoadWorker] = []
@@ -196,12 +384,36 @@ class ImageController(QObject):
         self._connect_signals()
 
     def _setup_async_processing(self) -> None:
-        """Set up asynchronous processing components."""
+        """Set up asynchronous processing components.
+
+        When a ``SettingsService`` is present and has stored proxy-size
+        preferences (see Preferences > Performance), they are passed to
+        both proxy-generating workers here, at construction time. This is
+        NOT live-reloaded: changing the preference while PhotoEdit is
+        running has no effect on the already-running workers (invalidating
+        in-flight caches/proxy state is out of scope for this slice) --
+        the new size takes effect on the next app launch. See
+        docs/planning/implementation-notes/2026-10-13-preferences-ui.md.
+        """
+        proxy_max_size = None
+        interactive_proxy_max_size = None
+        if self._settings_service is not None:
+            proxy_max_size = self._settings_service.get_proxy_max_size()
+            interactive_proxy_max_size = (
+                self._settings_service.get_interactive_proxy_max_size()
+            )
+
         # Create and start processing worker
-        self._processing_worker = ProcessingWorker()
+        self._processing_worker = ProcessingWorker(
+            proxy_max_size=proxy_max_size,
+            interactive_proxy_max_size=interactive_proxy_max_size,
+        )
         self._processing_worker.preview_ready.connect(self._on_preview_ready)
         self._processing_worker.error_occurred.connect(self._on_processing_error)
-        self._final_processing_worker = ProcessingWorker()
+        self._final_processing_worker = ProcessingWorker(
+            proxy_max_size=proxy_max_size,
+            interactive_proxy_max_size=interactive_proxy_max_size,
+        )
         self._final_processing_worker.processing_complete.connect(
             self._on_processing_complete
         )
@@ -382,6 +594,29 @@ class ImageController(QObject):
         if worker in self._load_workers:
             self._load_workers.remove(worker)
 
+    def clear_image(self) -> None:
+        """Reset to the "no image loaded" state.
+
+        Used when the currently-open image's library entry is removed
+        or deleted from disk (see ``MainWindow._on_remove_entry_requested``/
+        ``_on_remove_entries_requested``) -- there is no sensible image
+        left to keep showing once its own catalog entry (and, for
+        "Delete from Disk", the file itself) is gone. Rather than
+        inventing a new empty-state UI, this reuses the exact state the
+        app is already in right after startup with an empty library,
+        before any ``load_image``/``load_image_async`` call has ever
+        been made: ``ImageModel.clear()`` resets ``image_model`` to its
+        pre-load defaults and ``ImageView.clear()`` resets the canvas to
+        its own default "No image loaded" placeholder. Also clears
+        undo/redo history, since there is no image left for it to apply
+        to -- mirrors ``_apply_loaded_image``'s own history-clearing on
+        every image switch. See
+        docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+        """
+        self._image_model.clear()
+        self._image_view.clear()
+        self._history_service.clear_history()
+
     def _apply_loaded_image(self, file_path: str, image) -> None:
         """Apply a decoded image to model/view state on the UI thread."""
         self._image_model.file_path = file_path
@@ -398,8 +633,23 @@ class ImageController(QObject):
         self._hsl_params = {}
         self._color_grading_params = {}
         self._texture_params = {}
+        self._clarity_params = {}
+        self._dehaze_params = {}
+        self._vignette_params = {}
+        self._grain_params = {}
+        self._sharpening_params = {}
+        self._luminance_nr_params = {}
+        self._color_nr_params = {}
+        self._remove_ca_params = {}
+        self._defringe_params = {}
+        self._geometry_params = {}
+        self._straighten_params = {}
+        self._crop_params = {}
+        self._mask_params = {}
+        self._healing_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
+        self._pending_history_previous_state = None
         self._final_render_timer.stop()
 
         # Set image in processing worker for proxy generation
@@ -464,7 +714,12 @@ class ImageController(QObject):
         """
         return self._image_model.get_current_image()
 
-    def get_export_image(self):
+    def get_export_image(
+        self,
+        apply_crop: bool = True,
+        mask_override: Any = _UNSET,
+        heal_spots_override: Any = _UNSET,
+    ):
         """Get the full-resolution image for export.
 
         Recomputes directly from the original image and the currently
@@ -476,6 +731,34 @@ class ImageController(QObject):
         triggered before it settles back to a full-resolution render.
         This always reprocesses the true original at full size, so it is
         correct regardless of that timing.
+
+        Args:
+            apply_crop: When False, skips the final ``CropProcessor`` call,
+                returning the full, uncropped-but-otherwise-fully-adjusted
+                image. Used by the interactive crop overlay (slice 2 of the
+                Crop tool), which needs to display the full frame under the
+                drag handles even when a crop was previously committed, so
+                the user can see and adjust the whole image while editing.
+                Defaults to True, matching every existing call site.
+            mask_override: When passed (including explicitly ``{}``/``None``
+                for "no mask"), used IN PLACE OF ``self._mask_params`` for
+                this one recompute only -- ``self._mask_params`` itself is
+                left completely untouched. This is what lets
+                :meth:`preview_mask` show an in-progress, uncommitted mask
+                candidate (geometry mid-drag, a slider mid-tick) without
+                mutating any committed engine state or touching history.
+                Left at the private ``_UNSET`` sentinel by every other call
+                site, which keeps today's "use whatever mask is actually
+                committed" behavior.
+            heal_spots_override: Mirrors ``mask_override``'s exact pattern,
+                for the healing tool UI's own live-preview mechanism
+                (:meth:`preview_heal_spots`). When passed (including
+                explicitly ``[]``), a LIST of heal-spot dicts used IN
+                PLACE OF ``self._healing_params`` for this one recompute
+                only -- ``self._healing_params`` itself is left completely
+                untouched. Left at the private ``_UNSET`` sentinel by
+                every other call site. See docs/planning/
+                implementation-notes/2026-10-13-healing-tool-ui.md.
 
         Returns:
             Full-resolution ``LinearImage`` with current adjustments
@@ -489,6 +772,17 @@ class ImageController(QObject):
             return None
 
         result = original.copy()
+        # Healing runs FIRST, before every other adjustment (including
+        # Exposure) -- it is a repair operation on the as-shot pixels, not
+        # a creative adjustment. See docs/planning/implementation-notes/
+        # 2026-10-13-healing-processor.md.
+        healing_params = (
+            self._healing_params
+            if heal_spots_override is _UNSET
+            else ({"heal_spots": heal_spots_override} if heal_spots_override else {})
+        )
+        if healing_params:
+            result = self._healing_processor.process(result, **healing_params)
         if self._exposure_params:
             result = self._exposure_processor.process(result, **self._exposure_params)
         if self._tonal_params:
@@ -507,6 +801,62 @@ class ImageController(QObject):
             )
         if self._texture_params:
             result = self._texture_processor.process(result, **self._texture_params)
+        if self._clarity_params:
+            result = self._clarity_processor.process(result, **self._clarity_params)
+        if self._dehaze_params:
+            result = self._dehaze_processor.process(result, **self._dehaze_params)
+        if self._vignette_params:
+            result = self._vignette_processor.process(result, **self._vignette_params)
+        if self._grain_params:
+            result = self._grain_processor.process(result, **self._grain_params)
+        if self._sharpening_params:
+            result = self._sharpening_processor.process(
+                result, **self._sharpening_params
+            )
+        if self._luminance_nr_params:
+            result = self._luminance_nr_processor.process(
+                result, **self._luminance_nr_params
+            )
+        if self._color_nr_params:
+            result = self._color_nr_processor.process(
+                result, **self._color_nr_params
+            )
+        if self._remove_ca_params:
+            result = self._remove_ca_processor.process(
+                result, **self._remove_ca_params
+            )
+        if self._defringe_params:
+            result = self._defringe_processor.process(
+                result, **self._defringe_params
+            )
+        # Geometry (Distortion/Vertical/Horizontal/Scale/Offset) runs
+        # immediately BEFORE Straighten -- it corrects as-shot lens/
+        # perspective distortion, which should be undone before the
+        # user's own final small-angle Straighten tweak is applied on
+        # top of the now-rectified frame. See docs/planning/
+        # implementation-notes/2026-10-13-geometry-processor.md section 2.
+        if self._geometry_params:
+            result = self._geometry_processor.process(
+                result, **self._geometry_params
+            )
+        if self._straighten_params:
+            result = self._straighten_processor.process(
+                result, **self._straighten_params
+            )
+        # Mask is applied after every other adjustment (including
+        # Straighten) and strictly BEFORE Crop -- it blends pixel values
+        # only, never changes shape, so its geometry is always expressed
+        # in the full, pre-crop frame's own normalized coordinates. See
+        # docs/planning/implementation-notes/2026-10-13-mask-processor.md.
+        mask_params = self._mask_params if mask_override is _UNSET else mask_override
+        if mask_params:
+            result = self._mask_processor.process(result, mask=mask_params)
+        # Crop is applied strictly LAST, after every other processor
+        # (including Straighten and Mask) -- see CropProcessor's module
+        # docstring and docs/planning/implementation-notes/
+        # 2026-10-13-crop-processor.md section 1 for why.
+        if apply_crop and self._crop_params:
+            result = self._crop_processor.process(result, **self._crop_params)
         return result
 
     def refresh_view(self) -> None:
@@ -523,14 +873,31 @@ class ImageController(QObject):
     def get_adjustment_state(self) -> Dict[str, Any]:
         """Return the current normalized adjustment payload.
 
-        Includes three non-flat keys alongside the eleven float keys:
+        Includes four non-flat keys alongside the flat float keys:
         ``"tone_curve"`` (a JSON-plain list of ``[x, y]`` control points --
         see docs/planning/implementation-notes/2026-09-29-tone-curve.md
-        section 4), ``"hsl"`` (a flat 24-key dict for the Color Mixer --
+        section 4; joined by ``"tone_curve_red"``/``"tone_curve_green"``/
+        ``"tone_curve_blue"``, the same JSON-plain shape, one per
+        per-channel curve -- see docs/planning/implementation-notes/
+        2026-10-13-per-channel-curves.md section 4), ``"hsl"`` (a flat
+        24-key dict for the Color Mixer --
         see docs/planning/implementation-notes/2026-09-30-hsl-color-mixer.md
-        section 4), and ``"color_grading"`` (a flat 11-key dict -- see
+        section 4), ``"color_grading"`` (a flat 11-key dict -- see
         docs/planning/implementation-notes/2026-09-30-color-grading.md
-        section 4).
+        section 4), and ``"crop"`` (a 4-key ``{"x0", "y0", "x1", "y1"}``
+        dict of normalized fractions, defaulting to the full-frame
+        rectangle -- see docs/planning/implementation-notes/
+        2026-10-13-crop-processor.md section 4), and ``"mask"`` (the
+        single active local-adjustment mask -- ``None`` when absent, or
+        a dict shaped per
+        docs/planning/implementation-notes/2026-10-13-mask-processor.md
+        section 4; unlike every other non-flat key, its "no mask"
+        default is ``None``, not an empty/identity dict, since there is
+        no neutral mask geometry), and ``"heal_spots"`` (a list of
+        independent clone/heal spot dicts, ``[]`` by default -- see
+        docs/planning/implementation-notes/2026-10-13-healing-processor.md
+        section 4; always a list, never ``None``, following the same
+        falsy-skip convention every other processor uses).
         """
         state: Dict[str, Any] = self._ADJUSTMENT_DEFAULTS.copy()
         state.update(self._exposure_params)
@@ -539,19 +906,74 @@ class ImageController(QObject):
         state.update(self._color_params)
         curve_points = self._curve_params.get("points", self._CURVE_DEFAULT_POINTS)
         state["tone_curve"] = [list(point) for point in curve_points]
+        red_curve_points = self._curve_params.get(
+            "red_points", self._CURVE_DEFAULT_POINTS
+        )
+        state["tone_curve_red"] = [list(point) for point in red_curve_points]
+        green_curve_points = self._curve_params.get(
+            "green_points", self._CURVE_DEFAULT_POINTS
+        )
+        state["tone_curve_green"] = [list(point) for point in green_curve_points]
+        blue_curve_points = self._curve_params.get(
+            "blue_points", self._CURVE_DEFAULT_POINTS
+        )
+        state["tone_curve_blue"] = [list(point) for point in blue_curve_points]
         state["hsl"] = {**self._HSL_DEFAULTS, **self._hsl_params}
         state["color_grading"] = {
             **self._COLOR_GRADING_DEFAULTS,
             **self._color_grading_params,
         }
         state.update(self._texture_params)
+        state.update(self._clarity_params)
+        state.update(self._dehaze_params)
+        state.update(self._vignette_params)
+        state.update(self._grain_params)
+        state.update(self._sharpening_params)
+        state.update(self._luminance_nr_params)
+        state.update(self._color_nr_params)
+        state.update(self._remove_ca_params)
+        state.update(self._defringe_params)
+        state.update(self._geometry_params)
+        state.update(self._straighten_params)
+        state["crop"] = {**self._CROP_DEFAULTS, **self._crop_params}
+        state["mask"] = self._mask_params.copy() if self._mask_params else None
+        state["heal_spots"] = [
+            dict(spot) for spot in self._healing_params.get("heal_spots", [])
+        ]
         return state
 
-    def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
-        """Apply a saved adjustment payload without creating undo history."""
+    def _apply_state_params(
+        self, adjustments: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Set every internal ``_xxx_params`` field from a full
+        adjustment-state dict (the same shape ``get_adjustment_state()``
+        returns), normalizing defensively.
+
+        Pure bookkeeping -- does not touch ``image_model``, history, or
+        pending processing state; callers (``restore_adjustment_state`` and
+        ``apply_history_state``) handle those themselves, since their needs
+        differ.
+
+        Returns:
+            A dict with the normalized pieces actually applied --
+            ``"normalized"`` (the flat float dict), ``"curve_points"``,
+            ``"hsl_values"``, ``"color_grading_values"``, ``"crop_values"``
+            and ``"mask_values"`` -- so callers that need to reason about
+            "are there any non-default changes" (as
+            ``restore_adjustment_state`` does) don't have to recompute them.
+        """
         normalized = self._normalize_adjustment_state(adjustments)
         curve_points = normalize_points(
             adjustments.get("tone_curve") if adjustments else None
+        )
+        red_curve_points = normalize_points(
+            adjustments.get("tone_curve_red") if adjustments else None
+        )
+        green_curve_points = normalize_points(
+            adjustments.get("tone_curve_green") if adjustments else None
+        )
+        blue_curve_points = normalize_points(
+            adjustments.get("tone_curve_blue") if adjustments else None
         )
         hsl_values = self._normalize_hsl_state(
             adjustments.get("hsl") if adjustments else None
@@ -559,20 +981,15 @@ class ImageController(QObject):
         color_grading_values = self._normalize_color_grading_state(
             adjustments.get("color_grading") if adjustments else None
         )
-        self._history_service.clear_history()
-        self._pending_history_previous_image = None
-        self._pending_final_request_id = -1
-        self._final_render_timer.stop()
-        if self._debouncer is not None:
-            self._debouncer.cancel()
-        if self._processing_worker is not None and hasattr(
-            self._processing_worker, "cancel_pending"
-        ):
-            self._processing_worker.cancel_pending()
-        if self._final_processing_worker is not None and hasattr(
-            self._final_processing_worker, "cancel_pending"
-        ):
-            self._final_processing_worker.cancel_pending()
+        crop_values = self._normalize_crop_state(
+            adjustments.get("crop") if adjustments else None
+        )
+        mask_values = self._normalize_mask_state(
+            adjustments.get("mask") if adjustments else None
+        )
+        heal_spots_values = self._normalize_heal_spots_state(
+            adjustments.get("heal_spots") if adjustments else None
+        )
 
         self._exposure_params = {
             "exposure": normalized["exposure"],
@@ -593,24 +1010,112 @@ class ImageController(QObject):
             "saturation": normalized["saturation"],
             "vibrance": normalized["vibrance"],
         }
-        self._curve_params = (
-            {"points": curve_points} if not is_identity_curve(curve_points) else {}
-        )
+        curve_params: Dict[str, Any] = {}
+        if not is_identity_curve(curve_points):
+            curve_params["points"] = curve_points
+        if not is_identity_curve(red_curve_points):
+            curve_params["red_points"] = red_curve_points
+        if not is_identity_curve(green_curve_points):
+            curve_params["green_points"] = green_curve_points
+        if not is_identity_curve(blue_curve_points):
+            curve_params["blue_points"] = blue_curve_points
+        self._curve_params = curve_params
         self._hsl_params = hsl_values
         self._color_grading_params = color_grading_values
         self._texture_params = {"texture": normalized["texture"]}
+        self._clarity_params = {"clarity": normalized["clarity"]}
+        self._dehaze_params = {"dehaze": normalized["dehaze"]}
+        self._vignette_params = {"vignette": normalized["vignette"]}
+        self._grain_params = {"grain": normalized["grain"]}
+        self._sharpening_params = {"sharpening": normalized["sharpening"]}
+        self._luminance_nr_params = {"luminance_nr": normalized["luminance_nr"]}
+        self._color_nr_params = {"color_nr": normalized["color_nr"]}
+        self._remove_ca_params = {"remove_ca": normalized["remove_ca"]}
+        self._defringe_params = {"defringe": normalized["defringe"]}
+        self._geometry_params = {
+            "distortion": normalized["distortion"],
+            "vertical": normalized["vertical"],
+            "horizontal": normalized["horizontal"],
+            "scale": normalized["scale"],
+            "offset_x": normalized["offset_x"],
+            "offset_y": normalized["offset_y"],
+        }
+        self._straighten_params = {"straighten": normalized["straighten"]}
+        self._crop_params = (
+            {} if self._is_identity_crop(crop_values) else crop_values
+        )
+        self._mask_params = mask_values
+        self._healing_params = (
+            {"heal_spots": heal_spots_values} if heal_spots_values else {}
+        )
+
+        return {
+            "normalized": normalized,
+            "curve_points": curve_points,
+            "red_curve_points": red_curve_points,
+            "green_curve_points": green_curve_points,
+            "blue_curve_points": blue_curve_points,
+            "hsl_values": hsl_values,
+            "color_grading_values": color_grading_values,
+            "crop_values": crop_values,
+            "mask_values": mask_values,
+            "heal_spots_values": heal_spots_values,
+        }
+
+    def restore_adjustment_state(self, adjustments: Optional[Dict[str, Any]]) -> None:
+        """Apply a saved adjustment payload without creating undo history."""
+        self._history_service.clear_history()
+        self._pending_history_previous_image = None
+        self._pending_history_previous_state = None
+        self._pending_final_request_id = -1
+        self._final_render_timer.stop()
+        if self._debouncer is not None:
+            self._debouncer.cancel()
+        if self._processing_worker is not None and hasattr(
+            self._processing_worker, "cancel_pending"
+        ):
+            self._processing_worker.cancel_pending()
+        if self._final_processing_worker is not None and hasattr(
+            self._final_processing_worker, "cancel_pending"
+        ):
+            self._final_processing_worker.cancel_pending()
+
+        applied = self._apply_state_params(adjustments)
+        normalized = applied["normalized"]
+        curve_points = applied["curve_points"]
+        red_curve_points = applied["red_curve_points"]
+        green_curve_points = applied["green_curve_points"]
+        blue_curve_points = applied["blue_curve_points"]
+        hsl_values = applied["hsl_values"]
+        color_grading_values = applied["color_grading_values"]
+        crop_values = applied["crop_values"]
+        mask_values = applied["mask_values"]
+        heal_spots_values = applied["heal_spots_values"]
 
         if not self.has_image():
             return
 
         has_changes = (
-            any(value != 0.0 for value in normalized.values())
+            # Compared against each key's own default (not a bare 0.0)
+            # because "scale" (Geometry) defaults to 100.0, not 0.0 --
+            # see docs/planning/implementation-notes/
+            # 2026-10-13-geometry-processor.md section 2.
+            any(
+                normalized[key] != default
+                for key, default in self._ADJUSTMENT_DEFAULTS.items()
+            )
             or not is_identity_curve(curve_points)
+            or not is_identity_curve(red_curve_points)
+            or not is_identity_curve(green_curve_points)
+            or not is_identity_curve(blue_curve_points)
             or any(value != 0.0 for value in hsl_values.values())
             or any(
                 color_grading_values.get(key, 0.0) != default
                 for key, default in self._COLOR_GRADING_DEFAULTS.items()
             )
+            or not self._is_identity_crop(crop_values)
+            or bool(mask_values)
+            or bool(heal_spots_values)
         )
         if not has_changes:
             self._image_model.reset_to_original()
@@ -622,6 +1127,8 @@ class ImageController(QObject):
             return
 
         result = original.copy()
+        if self._healing_params:
+            result = self._healing_processor.process(result, **self._healing_params)
         result = self._exposure_processor.process(result, **self._exposure_params)
         result = self._tonal_processor.process(result, **self._tonal_params)
         result = self._wb_processor.process(result, **self._wb_params)
@@ -633,6 +1140,35 @@ class ImageController(QObject):
             result, **self._color_grading_params
         )
         result = self._texture_processor.process(result, **self._texture_params)
+        result = self._clarity_processor.process(result, **self._clarity_params)
+        result = self._dehaze_processor.process(result, **self._dehaze_params)
+        result = self._vignette_processor.process(result, **self._vignette_params)
+        result = self._grain_processor.process(result, **self._grain_params)
+        result = self._sharpening_processor.process(
+            result, **self._sharpening_params
+        )
+        result = self._luminance_nr_processor.process(
+            result, **self._luminance_nr_params
+        )
+        result = self._color_nr_processor.process(
+            result, **self._color_nr_params
+        )
+        result = self._remove_ca_processor.process(
+            result, **self._remove_ca_params
+        )
+        result = self._defringe_processor.process(
+            result, **self._defringe_params
+        )
+        result = self._geometry_processor.process(
+            result, **self._geometry_params
+        )
+        result = self._straighten_processor.process(
+            result, **self._straighten_params
+        )
+        if self._mask_params:
+            result = self._mask_processor.process(result, mask=self._mask_params)
+        if self._crop_params:
+            result = self._crop_processor.process(result, **self._crop_params)
         self._image_model.current_image = result
         self.refresh_view()
 
@@ -648,8 +1184,23 @@ class ImageController(QObject):
         self._hsl_params = {}
         self._color_grading_params = {}
         self._texture_params = {}
+        self._clarity_params = {}
+        self._dehaze_params = {}
+        self._vignette_params = {}
+        self._grain_params = {}
+        self._sharpening_params = {}
+        self._luminance_nr_params = {}
+        self._color_nr_params = {}
+        self._remove_ca_params = {}
+        self._defringe_params = {}
+        self._geometry_params = {}
+        self._straighten_params = {}
+        self._crop_params = {}
+        self._mask_params = {}
+        self._healing_params = {}
         self._pending_final_request_id = -1
         self._pending_history_previous_image = None
+        self._pending_history_previous_state = None
         self._final_render_timer.stop()
 
         # Cancel any pending processing
@@ -682,6 +1233,39 @@ class ImageController(QObject):
         if result:
             self.refresh_view()
         return result
+
+    def apply_history_state(self, image, state: Dict[str, Any]) -> None:
+        """Re-apply a full (image, adjustment-state) snapshot during
+        undo/redo (and on an ordinary adjustment commit, via the same
+        ``AdjustmentStateCommand``).
+
+        Unlike :meth:`restore_adjustment_state` (used for switching images,
+        Paste Edit Settings, Profile apply, preset import -- all of which
+        clear history and may recompute from the original image), this
+        method keeps history intact, reuses an ALREADY-RENDERED image
+        buffer (no reprocessing -- undo/redo must stay cheap), and is the
+        only place that emits :attr:`adjustment_state_restored` so the UI
+        and persisted catalog state resync.
+
+        Deliberately does not call :meth:`refresh_view` itself: ``undo()``/
+        ``redo()`` above already repaint the canvas once the command has
+        run, and the normal (non-undo) commit path that also calls this
+        method via ``AdjustmentStateCommand.execute()`` relies on there
+        being no extra repaint here (see
+        ``_commit_rendered_adjustment``/``_on_processing_complete``, and the
+        "pending final render does not refresh full-res view" test). A
+        caller that needs the view repainted immediately must call
+        :meth:`refresh_view` itself afterward.
+
+        Intended to be called ONLY by ``AdjustmentStateCommand``'s
+        ``execute()``/``undo()`` (src/commands/adjustment_commands.py) --
+        it is not part of the normal live-editing flow, which is why it is
+        not prefixed with an underscore despite being an internal API: a
+        different module needs to call it.
+        """
+        self._image_model.current_image = image
+        self._apply_state_params(state)
+        self.adjustment_state_restored.emit(self.get_adjustment_state())
 
     def can_undo(self) -> bool:
         """Check if undo is available.
@@ -723,6 +1307,26 @@ class ImageController(QObject):
         """
         return self._image_view.get_zoom_factor()
 
+    def _capture_pending_history_state(self) -> None:
+        """Snapshot the image + full adjustment state at the start of an
+        edit gesture, once, so undo/redo can restore both atomically later.
+
+        Called from every entry point that begins a new edit gesture
+        (``apply_adjustments``, ``on_adjustments_changed``,
+        ``on_curve_changed``, ``on_hsl_changed``,
+        ``on_color_grading_changed``) -- always BEFORE that method's own
+        param-storing code runs, so ``get_adjustment_state()`` here
+        reflects the state as it was immediately before this gesture.
+        """
+        if self._pending_history_previous_image is None:
+            current = self._image_model.get_current_image()
+            if current is not None:
+                # LinearImage instances are treated as immutable in the
+                # pipeline. Keep the reference instead of copying a full-res
+                # buffer on the UI thread.
+                self._pending_history_previous_image = current
+                self._pending_history_previous_state = self.get_adjustment_state()
+
     def apply_adjustments(
         self,
         exposure_params: Dict[str, float] = None,
@@ -733,6 +1337,20 @@ class ImageController(QObject):
         hsl_params: Dict[str, float] = None,
         color_grading_params: Dict[str, float] = None,
         texture_params: Dict[str, float] = None,
+        clarity_params: Dict[str, float] = None,
+        dehaze_params: Dict[str, float] = None,
+        vignette_params: Dict[str, float] = None,
+        grain_params: Dict[str, float] = None,
+        sharpening_params: Dict[str, float] = None,
+        luminance_nr_params: Dict[str, float] = None,
+        color_nr_params: Dict[str, float] = None,
+        remove_ca_params: Dict[str, float] = None,
+        defringe_params: Dict[str, float] = None,
+        geometry_params: Dict[str, float] = None,
+        straighten_params: Dict[str, float] = None,
+        crop_params: Dict[str, float] = None,
+        mask_params: Dict[str, Any] = None,
+        healing_params: Dict[str, Any] = None,
         add_to_history: bool = False
     ) -> None:
         """Apply adjustments to the image (synchronous).
@@ -741,7 +1359,11 @@ class ImageController(QObject):
             exposure_params: Exposure adjustment parameters
             tonal_params: Highlights/Shadows/Whites/Blacks parameters
             color_params: Color adjustment parameters
-            curve_params: Tone curve parameters (``{"points": [...]}`)
+            curve_params: Tone curve parameters -- ``{"points": [...]}``
+                for the master curve, optionally joined by
+                ``"red_points"``/``"green_points"``/``"blue_points"`` for
+                the 3 per-channel curves (any channel omitted defaults
+                to identity)
             wb_params: White balance (Temperature/Tint) parameters
             hsl_params: HSL Color Mixer parameters (24-key flat dict)
             color_grading_params: Color Grading parameters (11-key flat dict)
@@ -753,13 +1375,7 @@ class ImageController(QObject):
         self._final_render_timer.stop()
         self._pending_final_request_id = -1
 
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                # LinearImage instances are treated as immutable in the
-                # pipeline. Keep the reference instead of copying a full-res
-                # buffer on the UI thread.
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         # Store current params
         if exposure_params:
@@ -778,6 +1394,49 @@ class ImageController(QObject):
             self._color_grading_params = color_grading_params
         if texture_params:
             self._texture_params = texture_params
+        if clarity_params:
+            self._clarity_params = clarity_params
+        if dehaze_params:
+            self._dehaze_params = dehaze_params
+        if vignette_params:
+            self._vignette_params = vignette_params
+        if grain_params:
+            self._grain_params = grain_params
+        if sharpening_params:
+            self._sharpening_params = sharpening_params
+        if luminance_nr_params:
+            self._luminance_nr_params = luminance_nr_params
+        if color_nr_params:
+            self._color_nr_params = color_nr_params
+        if remove_ca_params:
+            self._remove_ca_params = remove_ca_params
+        if defringe_params:
+            self._defringe_params = defringe_params
+        if geometry_params:
+            self._geometry_params = geometry_params
+        if straighten_params:
+            self._straighten_params = straighten_params
+        if crop_params is not None:
+            # Like curve_params (and unlike every other _xxx_params
+            # field), {} is a legitimate, meaningful value here -- it is
+            # Crop's own "identity/no crop" sentinel (see _CROP_DEFAULTS'
+            # docstring) -- so the guard checks "is not None", not
+            # truthiness, to allow a caller to explicitly reset it.
+            self._crop_params = crop_params
+        if mask_params is not None:
+            # Like crop_params, {} is a legitimate, meaningful value here
+            # -- it is mask's own internal "no mask" sentinel (see
+            # _MASK_TYPES' usage in _normalize_mask_state) -- so the guard
+            # checks "is not None", not truthiness, to allow a caller
+            # (including on_mask_changed) to explicitly clear it.
+            self._mask_params = mask_params
+        if healing_params is not None:
+            # Like crop_params/mask_params, {} is a legitimate, meaningful
+            # value here -- it is healing's own internal "no spots"
+            # sentinel -- so the guard checks "is not None", not
+            # truthiness, to allow a caller (including
+            # on_heal_spots_changed) to explicitly clear it.
+            self._healing_params = healing_params
 
         if self._use_threading and self._processing_worker is not None:
             if add_to_history:
@@ -792,6 +1451,20 @@ class ImageController(QObject):
                         hsl_params=self._hsl_params,
                         color_grading_params=self._color_grading_params,
                         texture_params=self._texture_params,
+                        clarity_params=self._clarity_params,
+                        dehaze_params=self._dehaze_params,
+                        vignette_params=self._vignette_params,
+                        grain_params=self._grain_params,
+                        sharpening_params=self._sharpening_params,
+                        luminance_nr_params=self._luminance_nr_params,
+                        color_nr_params=self._color_nr_params,
+                        remove_ca_params=self._remove_ca_params,
+                        defringe_params=self._defringe_params,
+                        geometry_params=self._geometry_params,
+                        straighten_params=self._straighten_params,
+                        crop_params=self._crop_params,
+                        mask_params=self._mask_params,
+                        healing_params=self._healing_params,
                     )
                 )
             else:
@@ -806,13 +1479,35 @@ class ImageController(QObject):
                         hsl_params=self._hsl_params,
                         color_grading_params=self._color_grading_params,
                         texture_params=self._texture_params,
+                        clarity_params=self._clarity_params,
+                        dehaze_params=self._dehaze_params,
+                        vignette_params=self._vignette_params,
+                        grain_params=self._grain_params,
+                        sharpening_params=self._sharpening_params,
+                        luminance_nr_params=self._luminance_nr_params,
+                        color_nr_params=self._color_nr_params,
+                        remove_ca_params=self._remove_ca_params,
+                        defringe_params=self._defringe_params,
+                        geometry_params=self._geometry_params,
+                        straighten_params=self._straighten_params,
+                        crop_params=self._crop_params,
+                        mask_params=self._mask_params,
+                        healing_params=self._healing_params,
                         interactive_preview=True,
                     )
                 )
             return
 
         if add_to_history:
-            # Create and execute command for undo/redo
+            # Reuse CombinedAdjustmentCommand's existing pixel-computation
+            # chain to compute the new image, but run it directly (NOT via
+            # history_service.execute_command) so it never itself lands on
+            # the undo/redo stack -- only the state-aware
+            # AdjustmentStateCommand built below does. This avoids
+            # double-computing pixels (the expensive part) while still
+            # getting a state-aware command onto the real stack. See
+            # docs/planning/implementation-notes/
+            # 2026-10-13-state-aware-undo-redo.md.
             command = CombinedAdjustmentCommand(
                 self._image_model,
                 exposure_params=self._exposure_params,
@@ -823,8 +1518,36 @@ class ImageController(QObject):
                 hsl_params=self._hsl_params,
                 color_grading_params=self._color_grading_params,
                 texture_params=self._texture_params,
+                clarity_params=self._clarity_params,
+                dehaze_params=self._dehaze_params,
+                vignette_params=self._vignette_params,
+                grain_params=self._grain_params,
+                sharpening_params=self._sharpening_params,
+                luminance_nr_params=self._luminance_nr_params,
+                color_nr_params=self._color_nr_params,
+                remove_ca_params=self._remove_ca_params,
+                defringe_params=self._defringe_params,
+                geometry_params=self._geometry_params,
+                straighten_params=self._straighten_params,
+                crop_params=self._crop_params,
+                mask_params=self._mask_params,
+                healing_params=self._healing_params,
             )
-            self._history_service.execute_command(command)
+            command.execute()
+
+            previous_image = self._pending_history_previous_image
+            previous_state = self._pending_history_previous_state
+            self._pending_history_previous_image = None
+            self._pending_history_previous_state = None
+            if previous_image is not None and previous_state is not None:
+                state_command = AdjustmentStateCommand(
+                    controller=self,
+                    previous_image=previous_image,
+                    previous_state=previous_state,
+                    new_image=self._image_model.current_image,
+                    new_state=self.get_adjustment_state(),
+                )
+                self._history_service.execute_command(state_command)
         else:
             # Apply directly without history (for live preview)
             original = self._image_model.get_original_image()
@@ -832,6 +1555,14 @@ class ImageController(QObject):
                 return
 
             result = original.copy()
+
+            # Healing runs FIRST, before every other adjustment -- see
+            # docs/planning/implementation-notes/
+            # 2026-10-13-healing-processor.md.
+            if self._healing_params:
+                result = self._healing_processor.process(
+                    result, **self._healing_params
+                )
 
             # Apply exposure adjustments
             if self._exposure_params:
@@ -865,6 +1596,63 @@ class ImageController(QObject):
             if self._texture_params:
                 result = self._texture_processor.process(result, **self._texture_params)
 
+            if self._clarity_params:
+                result = self._clarity_processor.process(result, **self._clarity_params)
+
+            if self._dehaze_params:
+                result = self._dehaze_processor.process(result, **self._dehaze_params)
+
+            if self._vignette_params:
+                result = self._vignette_processor.process(result, **self._vignette_params)
+
+            if self._grain_params:
+                result = self._grain_processor.process(result, **self._grain_params)
+
+            if self._sharpening_params:
+                result = self._sharpening_processor.process(
+                    result, **self._sharpening_params
+                )
+
+            if self._luminance_nr_params:
+                result = self._luminance_nr_processor.process(
+                    result, **self._luminance_nr_params
+                )
+
+            if self._color_nr_params:
+                result = self._color_nr_processor.process(
+                    result, **self._color_nr_params
+                )
+
+            if self._remove_ca_params:
+                result = self._remove_ca_processor.process(
+                    result, **self._remove_ca_params
+                )
+
+            if self._defringe_params:
+                result = self._defringe_processor.process(
+                    result, **self._defringe_params
+                )
+
+            if self._geometry_params:
+                result = self._geometry_processor.process(
+                    result, **self._geometry_params
+                )
+
+            if self._straighten_params:
+                result = self._straighten_processor.process(
+                    result, **self._straighten_params
+                )
+
+            if self._mask_params:
+                result = self._mask_processor.process(
+                    result, **self._mask_params
+                )
+
+            if self._crop_params:
+                result = self._crop_processor.process(
+                    result, **self._crop_params
+                )
+
             self._image_model.current_image = result
 
         self.refresh_view()
@@ -889,10 +1677,7 @@ class ImageController(QObject):
         # to restore. Without this, dragging a slider through the normal
         # UI path and releasing it would compute the final image correctly
         # but silently never add it to history.
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         cancel_start = perf_counter()
         self._final_render_timer.stop()
@@ -923,6 +1708,34 @@ class ImageController(QObject):
             'vibrance': adjustments.get('vibrance', 0.0)
         }
         texture_params = {"texture": adjustments.get("texture", 0.0)}
+        clarity_params = {"clarity": adjustments.get("clarity", 0.0)}
+        dehaze_params = {"dehaze": adjustments.get("dehaze", 0.0)}
+        vignette_params = {"vignette": adjustments.get("vignette", 0.0)}
+        grain_params = {"grain": adjustments.get("grain", 0.0)}
+        sharpening_params = {"sharpening": adjustments.get("sharpening", 0.0)}
+        luminance_nr_params = {
+            "luminance_nr": adjustments.get("luminance_nr", 0.0)
+        }
+        color_nr_params = {
+            "color_nr": adjustments.get("color_nr", 0.0)
+        }
+        remove_ca_params = {
+            "remove_ca": adjustments.get("remove_ca", 0.0)
+        }
+        defringe_params = {
+            "defringe": adjustments.get("defringe", 0.0)
+        }
+        geometry_params = {
+            "distortion": adjustments.get("distortion", 0.0),
+            "vertical": adjustments.get("vertical", 0.0),
+            "horizontal": adjustments.get("horizontal", 0.0),
+            "scale": adjustments.get("scale", 100.0),
+            "offset_x": adjustments.get("offset_x", 0.0),
+            "offset_y": adjustments.get("offset_y", 0.0),
+        }
+        straighten_params = {
+            "straighten": adjustments.get("straighten", 0.0)
+        }
 
         # Store params
         self._exposure_params = exposure_params
@@ -930,6 +1743,17 @@ class ImageController(QObject):
         self._wb_params = wb_params
         self._color_params = color_params
         self._texture_params = texture_params
+        self._clarity_params = clarity_params
+        self._dehaze_params = dehaze_params
+        self._vignette_params = vignette_params
+        self._grain_params = grain_params
+        self._sharpening_params = sharpening_params
+        self._luminance_nr_params = luminance_nr_params
+        self._color_nr_params = color_nr_params
+        self._remove_ca_params = remove_ca_params
+        self._defringe_params = defringe_params
+        self._geometry_params = geometry_params
+        self._straighten_params = straighten_params
 
         if self._use_threading and self._debouncer is not None:
             # Use throttled + debounced async processing. The curve and
@@ -946,6 +1770,20 @@ class ImageController(QObject):
                 'hsl': self._hsl_params,
                 'color_grading': self._color_grading_params,
                 'texture': self._texture_params,
+                'clarity': self._clarity_params,
+                'dehaze': self._dehaze_params,
+                'vignette': self._vignette_params,
+                'grain': self._grain_params,
+                'sharpening': self._sharpening_params,
+                'luminance_nr': self._luminance_nr_params,
+                'color_nr': self._color_nr_params,
+                'remove_ca': self._remove_ca_params,
+                'defringe': self._defringe_params,
+                'geometry': self._geometry_params,
+                'straighten': self._straighten_params,
+                'crop': self._crop_params,
+                'mask': self._mask_params,
+                'healing': self._healing_params,
             })
             mode = "debounced-threaded"
         else:
@@ -959,6 +1797,14 @@ class ImageController(QObject):
                 self._hsl_params,
                 self._color_grading_params,
                 self._texture_params,
+                self._clarity_params,
+                self._dehaze_params,
+                self._vignette_params,
+                self._grain_params,
+                self._sharpening_params,
+                self._luminance_nr_params,
+                self._color_nr_params,
+                self._remove_ca_params,
                 add_to_history=False,
             )
             mode = "sync-fallback"
@@ -977,20 +1823,28 @@ class ImageController(QObject):
             color_params.get("vibrance"),
         )
 
-    def on_curve_changed(self, points: List[Any]) -> None:
+    def on_curve_changed(self, points: List[Any], channel: str = "master") -> None:
         """Handle tone curve changes from the tools panel.
 
         Mirrors :meth:`on_adjustments_changed` but for the tone curve,
         which travels on its own signal/parameter (see
         docs/planning/implementation-notes/2026-09-29-tone-curve.md).
+
+        Args:
+            points: The changed channel's new control points.
+            channel: Which of the 4 curves changed -- ``"master"``
+                (default, for backward compatibility with every existing
+                caller that only ever edited the one master curve),
+                ``"red"``, ``"green"``, or ``"blue"``. Only this one
+                channel's entry in ``self._curve_params`` is touched;
+                every other channel's curve is left exactly as it was.
+                See docs/planning/implementation-notes/
+                2026-10-13-per-channel-curves.md section 4.
         """
         if not self.has_image():
             return
 
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         self._final_render_timer.stop()
         self._pending_final_request_id = -1
@@ -1000,11 +1854,13 @@ class ImageController(QObject):
             self._final_processing_worker.cancel_pending()
 
         normalized_points = normalize_points(points)
-        self._curve_params = (
-            {"points": normalized_points}
-            if not is_identity_curve(normalized_points)
-            else {}
-        )
+        key = self._CURVE_CHANNEL_KEYS.get(channel, "points")
+        updated_curve_params = dict(self._curve_params)
+        if is_identity_curve(normalized_points):
+            updated_curve_params.pop(key, None)
+        else:
+            updated_curve_params[key] = normalized_points
+        self._curve_params = updated_curve_params
 
         if self._use_threading and self._debouncer is not None:
             self._debouncer.call({
@@ -1016,6 +1872,20 @@ class ImageController(QObject):
                 'hsl': self._hsl_params,
                 'color_grading': self._color_grading_params,
                 'texture': self._texture_params,
+                'clarity': self._clarity_params,
+                'dehaze': self._dehaze_params,
+                'vignette': self._vignette_params,
+                'grain': self._grain_params,
+                'sharpening': self._sharpening_params,
+                'luminance_nr': self._luminance_nr_params,
+                'color_nr': self._color_nr_params,
+                'remove_ca': self._remove_ca_params,
+                'defringe': self._defringe_params,
+                'geometry': self._geometry_params,
+                'straighten': self._straighten_params,
+                'crop': self._crop_params,
+                'mask': self._mask_params,
+                'healing': self._healing_params,
             })
         else:
             self.apply_adjustments(
@@ -1040,10 +1910,7 @@ class ImageController(QObject):
         if not self.has_image():
             return
 
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         self._final_render_timer.stop()
         self._pending_final_request_id = -1
@@ -1064,6 +1931,20 @@ class ImageController(QObject):
                 'hsl': self._hsl_params,
                 'color_grading': self._color_grading_params,
                 'texture': self._texture_params,
+                'clarity': self._clarity_params,
+                'dehaze': self._dehaze_params,
+                'vignette': self._vignette_params,
+                'grain': self._grain_params,
+                'sharpening': self._sharpening_params,
+                'luminance_nr': self._luminance_nr_params,
+                'color_nr': self._color_nr_params,
+                'remove_ca': self._remove_ca_params,
+                'defringe': self._defringe_params,
+                'geometry': self._geometry_params,
+                'straighten': self._straighten_params,
+                'crop': self._crop_params,
+                'mask': self._mask_params,
+                'healing': self._healing_params,
             })
         else:
             self.apply_adjustments(
@@ -1088,10 +1969,7 @@ class ImageController(QObject):
         if not self.has_image():
             return
 
-        if self._pending_history_previous_image is None:
-            current = self._image_model.get_current_image()
-            if current is not None:
-                self._pending_history_previous_image = current
+        self._capture_pending_history_state()
 
         self._final_render_timer.stop()
         self._pending_final_request_id = -1
@@ -1112,6 +1990,20 @@ class ImageController(QObject):
                 'hsl': self._hsl_params,
                 'color_grading': self._color_grading_params,
                 'texture': self._texture_params,
+                'clarity': self._clarity_params,
+                'dehaze': self._dehaze_params,
+                'vignette': self._vignette_params,
+                'grain': self._grain_params,
+                'sharpening': self._sharpening_params,
+                'luminance_nr': self._luminance_nr_params,
+                'color_nr': self._color_nr_params,
+                'remove_ca': self._remove_ca_params,
+                'defringe': self._defringe_params,
+                'geometry': self._geometry_params,
+                'straighten': self._straighten_params,
+                'crop': self._crop_params,
+                'mask': self._mask_params,
+                'healing': self._healing_params,
             })
         else:
             self.apply_adjustments(
@@ -1123,6 +2015,203 @@ class ImageController(QObject):
                 self._hsl_params,
                 self._color_grading_params,
                 add_to_history=False,
+            )
+
+    def on_crop_changed(self, crop: Dict[str, float]) -> None:
+        """Handle a crop-rectangle change.
+
+        Set programmatically for now -- slice 2 (a later, separate
+        change) wires this to interactive drag-handle UI; this method is
+        this slice's entire "UI surface" and is meant to be called
+        directly, not through any slider/mouse interaction yet. Mirrors
+        :meth:`on_curve_changed`/:meth:`on_hsl_changed`'s pattern: it
+        captures the pre-gesture state via
+        :meth:`_capture_pending_history_state`, normalizes/clamps the
+        incoming rectangle the same defensive way
+        :class:`~src.processors.crop_processor.CropProcessor` itself
+        does (never trusting the caller), and stores the result.
+
+        Unlike a slider drag, a crop change from the later UI slice will
+        most likely be a single discrete "Apply" action rather than a
+        continuous stream of in-flight values -- there is no interactive
+        preview/debounce dance here. The new rectangle is routed
+        directly through :meth:`apply_adjustments` with
+        ``add_to_history=True``, so it participates fully in the
+        state-aware undo/redo system (see
+        docs/planning/implementation-notes/
+        2026-10-13-state-aware-undo-redo.md) in a single step.
+        """
+        if not self.has_image():
+            return
+
+        self._capture_pending_history_state()
+
+        normalized = self._normalize_crop_state(crop)
+        crop_params = {} if self._is_identity_crop(normalized) else normalized
+
+        self.apply_adjustments(crop_params=crop_params, add_to_history=True)
+
+    def on_mask_changed(self, mask: Optional[Dict[str, Any]]) -> None:
+        """Set (or clear, with ``None``) the single active local-adjustment
+        mask.
+
+        Set programmatically for now -- a later, separate slice wires
+        this to interactive drag UI (a draggable gradient line for
+        linear, a draggable ellipse for radial, reusing ``CropOverlay``'s
+        established coordinate-math approach) plus a small panel of the
+        mask's own Exposure/Contrast/Saturation/Clarity sliders. Mirrors
+        :meth:`on_crop_changed`'s pattern exactly: captures the
+        pre-gesture state via :meth:`_capture_pending_history_state`,
+        normalizes/validates the incoming dict defensively (never
+        trusting the caller -- the dict may come from an old catalog
+        entry, a malformed imported preset, or interactive UI input in
+        the later slice), and commits via
+        ``apply_adjustments(..., add_to_history=True)`` as a single
+        discrete step, participating fully in the state-aware undo/redo
+        system (see docs/planning/implementation-notes/
+        2026-10-13-state-aware-undo-redo.md).
+
+        Args:
+            mask: ``None`` to clear the active mask, or a dict shaped per
+                the module-level state contract (see
+                docs/planning/implementation-notes/
+                2026-10-13-mask-processor.md section 4). An unrecognized
+                ``"type"`` (or a missing one) is treated the same as
+                ``None``.
+        """
+        if not self.has_image():
+            return
+
+        self._capture_pending_history_state()
+
+        normalized = self._normalize_mask_state(mask)
+
+        self.apply_adjustments(mask_params=normalized, add_to_history=True)
+
+    def on_heal_spots_changed(self, heal_spots: list) -> None:
+        """Set the complete list of heal spots (replaces, not appends).
+
+        Set programmatically for now -- a later, separate slice wires
+        this to the interactive click-to-heal UI (placing spots with the
+        mouse, dragging a second point to pick the source). Mirrors
+        :meth:`on_crop_changed`/:meth:`on_mask_changed`'s pattern exactly:
+        captures the pre-gesture state via
+        :meth:`_capture_pending_history_state`, normalizes/validates
+        every spot in the incoming list defensively (never trusting the
+        caller -- the list may come from an old catalog entry, a
+        malformed imported preset, or interactive UI input in the later
+        slice), and commits via ``apply_adjustments(...,
+        add_to_history=True)`` as a single discrete step, participating
+        fully in the state-aware undo/redo system (see
+        docs/planning/implementation-notes/
+        2026-10-13-state-aware-undo-redo.md).
+
+        The caller (the later UI slice) is responsible for assembling
+        the full list -- e.g. appending a newly-placed spot to the
+        existing list (read via ``get_adjustment_state()["heal_spots"]``),
+        or removing one -- before calling this. This method always
+        REPLACES the whole list; it does not provide add/remove
+        primitives of its own.
+
+        Args:
+            heal_spots: The complete list of heal-spot dicts (see
+                docs/planning/implementation-notes/
+                2026-10-13-healing-processor.md section 4 for the shape).
+                ``[]`` clears every spot. Malformed entries (a non-dict,
+                or an unrecognized/missing ``"mode"``) are skipped rather
+                than crashing; every other field is defensively clamped.
+        """
+        if not self.has_image():
+            return
+
+        self._capture_pending_history_state()
+
+        normalized = self._normalize_heal_spots_state(heal_spots)
+        healing_params = {"heal_spots": normalized} if normalized else {}
+
+        self.apply_adjustments(healing_params=healing_params, add_to_history=True)
+
+    def preview_mask(self, mask: Optional[Dict[str, Any]]) -> None:
+        """Display an in-progress, UNCOMMITTED mask candidate, live.
+
+        This is the mask-tool-UI slice's live-preview mechanism, used
+        while a mask's geometry is being dragged or its 4 local-adjustment
+        sliders are being moved, BEFORE the user clicks Apply. See
+        docs/planning/implementation-notes/2026-10-13-mask-tool-ui.md
+        section 3.5 for the full design rationale (reusing
+        ``get_export_image``'s own ``mask_override`` parameter rather than
+        ``on_mask_changed``/``apply_adjustments``) -- in short:
+
+        - It recomputes a FULL preview image, correctly, via
+          ``get_export_image(mask_override=normalized)``, the same
+          always-synchronous-and-correct recompute path export already
+          uses (unaffected by ``self._use_threading`` or the documented
+          gap where the non-threaded ``apply_adjustments`` live-preview
+          fallback branch skips the mask processor entirely).
+        - It does NOT touch ``self._mask_params`` (the committed mask),
+          ``self._image_model.current_image``, or the history stack in
+          any way -- a call here can never be mistaken for, or leave a
+          stray trace in, a real edit. Calling this any number of times
+          (every drag frame, every slider tick) is always safe.
+        - It displays the result via ``ImageView.set_image`` directly
+          (mirroring ``_enter_crop_mode``'s own use of that call for a
+          non-"current adjustment state" preview image).
+
+        Args:
+            mask: ``None``, or a (possibly still-rough/mid-drag) mask dict
+                shaped per the module-level state contract. Defensively
+                normalized/clamped exactly like ``on_mask_changed`` does,
+                so a mid-drag geometry value briefly outside ``[0, 1]``
+                can never reach the processor un-clamped.
+        """
+        if not self.has_image():
+            return
+        normalized = self._normalize_mask_state(mask)
+        preview = self.get_export_image(mask_override=normalized)
+        if preview is not None:
+            self._image_view.set_image(
+                preview, emit_loaded=False, preserve_view_scale=True
+            )
+
+    def preview_heal_spots(self, heal_spots: list) -> None:
+        """Display an in-progress, UNCOMMITTED heal-spot list, live.
+
+        This is the healing-tool-UI slice's live-preview mechanism, used
+        while spots are being placed/removed on the overlay, BEFORE the
+        user clicks Apply. Mirrors :meth:`preview_mask`'s exact pattern
+        and rationale (see docs/planning/implementation-notes/
+        2026-10-13-mask-tool-ui.md section 3.5 and
+        2026-10-13-healing-tool-ui.md) -- in short:
+
+        - It recomputes a FULL preview image via
+          ``get_export_image(heal_spots_override=normalized)``, the same
+          always-synchronous-and-correct recompute path export already
+          uses (unaffected by ``self._use_threading`` or the documented
+          gap where the non-threaded ``apply_adjustments`` live-preview
+          fallback branch doesn't reach every processor).
+        - It does NOT touch ``self._healing_params`` (the committed heal
+          spots), ``self._image_model.current_image``, or the history
+          stack in any way -- a call here can never be mistaken for, or
+          leave a stray trace in, a real edit. Safe to call any number of
+          times (every drag frame).
+        - It displays the result via ``ImageView.set_image`` directly,
+          exactly like ``preview_mask``.
+
+        Args:
+            heal_spots: The in-progress, possibly still mid-drag, list of
+                heal-spot dicts. Defensively normalized/clamped via
+                :meth:`_normalize_heal_spots_state`, exactly like
+                ``on_heal_spots_changed`` does, so a mid-drag value
+                briefly outside ``[0, 1]`` can never reach the processor
+                un-clamped.
+        """
+        if not self.has_image():
+            return
+        normalized = self._normalize_heal_spots_state(heal_spots)
+        preview = self.get_export_image(heal_spots_override=normalized)
+        if preview is not None:
+            self._image_view.set_image(
+                preview, emit_loaded=False, preserve_view_scale=True
             )
 
     def _on_throttled_adjustment(self, params: dict) -> None:
@@ -1141,6 +2230,20 @@ class ImageController(QObject):
         hsl_params = params.get('hsl', {})
         color_grading_params = params.get('color_grading', {})
         texture_params = params.get('texture', {})
+        clarity_params = params.get('clarity', {})
+        dehaze_params = params.get('dehaze', {})
+        vignette_params = params.get('vignette', {})
+        grain_params = params.get('grain', {})
+        sharpening_params = params.get('sharpening', {})
+        luminance_nr_params = params.get('luminance_nr', {})
+        color_nr_params = params.get('color_nr', {})
+        remove_ca_params = params.get('remove_ca', {})
+        defringe_params = params.get('defringe', {})
+        geometry_params = params.get('geometry', {})
+        straighten_params = params.get('straighten', {})
+        crop_params = params.get('crop', {})
+        mask_params = params.get('mask', {})
+        healing_params = params.get('healing', {})
         self._latest_request_id = self._processing_worker.submit_preview_request(
             exposure_params=exposure_params,
             tonal_params=tonal_params,
@@ -1150,6 +2253,20 @@ class ImageController(QObject):
             hsl_params=hsl_params,
             color_grading_params=color_grading_params,
             texture_params=texture_params,
+            clarity_params=clarity_params,
+            dehaze_params=dehaze_params,
+            vignette_params=vignette_params,
+            grain_params=grain_params,
+            sharpening_params=sharpening_params,
+            luminance_nr_params=luminance_nr_params,
+            color_nr_params=color_nr_params,
+            remove_ca_params=remove_ca_params,
+            defringe_params=defringe_params,
+            geometry_params=geometry_params,
+            straighten_params=straighten_params,
+            crop_params=crop_params,
+            mask_params=mask_params,
+            healing_params=healing_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1179,6 +2296,20 @@ class ImageController(QObject):
         hsl_params = params.get('hsl', {})
         color_grading_params = params.get('color_grading', {})
         texture_params = params.get('texture', {})
+        clarity_params = params.get('clarity', {})
+        dehaze_params = params.get('dehaze', {})
+        vignette_params = params.get('vignette', {})
+        grain_params = params.get('grain', {})
+        sharpening_params = params.get('sharpening', {})
+        luminance_nr_params = params.get('luminance_nr', {})
+        color_nr_params = params.get('color_nr', {})
+        remove_ca_params = params.get('remove_ca', {})
+        defringe_params = params.get('defringe', {})
+        geometry_params = params.get('geometry', {})
+        straighten_params = params.get('straighten', {})
+        crop_params = params.get('crop', {})
+        mask_params = params.get('mask', {})
+        healing_params = params.get('healing', {})
 
         # Keep pause updates on the cheap interactive tier. Quality previews are
         # presented on release so larger frames cannot interrupt active drags.
@@ -1191,6 +2322,20 @@ class ImageController(QObject):
             hsl_params=hsl_params,
             color_grading_params=color_grading_params,
             texture_params=texture_params,
+            clarity_params=clarity_params,
+            dehaze_params=dehaze_params,
+            vignette_params=vignette_params,
+            grain_params=grain_params,
+            sharpening_params=sharpening_params,
+            luminance_nr_params=luminance_nr_params,
+            color_nr_params=color_nr_params,
+            remove_ca_params=remove_ca_params,
+            defringe_params=defringe_params,
+            geometry_params=geometry_params,
+            straighten_params=straighten_params,
+            crop_params=crop_params,
+            mask_params=mask_params,
+            healing_params=healing_params,
             interactive_preview=True,
         )
         logger.info(
@@ -1299,6 +2444,20 @@ class ImageController(QObject):
                 hsl_params=self._hsl_params,
                 color_grading_params=self._color_grading_params,
                 texture_params=self._texture_params,
+                clarity_params=self._clarity_params,
+                dehaze_params=self._dehaze_params,
+                vignette_params=self._vignette_params,
+                grain_params=self._grain_params,
+                sharpening_params=self._sharpening_params,
+                luminance_nr_params=self._luminance_nr_params,
+                color_nr_params=self._color_nr_params,
+                remove_ca_params=self._remove_ca_params,
+                defringe_params=self._defringe_params,
+                geometry_params=self._geometry_params,
+                straighten_params=self._straighten_params,
+                crop_params=self._crop_params,
+                mask_params=self._mask_params,
+                healing_params=self._healing_params,
                 interactive_preview=False,
             )
 
@@ -1331,7 +2490,27 @@ class ImageController(QObject):
                 for key, default in self._COLOR_GRADING_DEFAULTS.items()
             ) or
             any(v != 0 for v in self._texture_params.values()) or
-            not is_identity_curve(self._curve_params.get("points"))
+            any(v != 0 for v in self._clarity_params.values()) or
+            any(v != 0 for v in self._dehaze_params.values()) or
+            any(v != 0 for v in self._vignette_params.values()) or
+            any(v != 0 for v in self._grain_params.values()) or
+            any(v != 0 for v in self._sharpening_params.values()) or
+            any(v != 0 for v in self._luminance_nr_params.values()) or
+            any(v != 0 for v in self._color_nr_params.values()) or
+            any(v != 0 for v in self._remove_ca_params.values()) or
+            any(v != 0 for v in self._defringe_params.values()) or
+            any(
+                self._geometry_params.get(key, default) != default
+                for key, default in self._GEOMETRY_DEFAULTS.items()
+            ) or
+            any(v != 0 for v in self._straighten_params.values()) or
+            not is_identity_curve(self._curve_params.get("points")) or
+            not is_identity_curve(self._curve_params.get("red_points")) or
+            not is_identity_curve(self._curve_params.get("green_points")) or
+            not is_identity_curve(self._curve_params.get("blue_points")) or
+            bool(self._crop_params) or
+            bool(self._mask_params) or
+            bool(self._healing_params)
         )
 
     def _submit_delayed_final_render(self) -> None:
@@ -1343,6 +2522,7 @@ class ImageController(QObject):
 
         if not self._has_pending_adjustment_changes():
             self._pending_history_previous_image = None
+            self._pending_history_previous_state = None
             return
 
         self._pending_final_request_id = final_worker.submit_final_request(
@@ -1354,6 +2534,20 @@ class ImageController(QObject):
             hsl_params=self._hsl_params,
             color_grading_params=self._color_grading_params,
             texture_params=self._texture_params,
+            clarity_params=self._clarity_params,
+            dehaze_params=self._dehaze_params,
+            vignette_params=self._vignette_params,
+            grain_params=self._grain_params,
+            sharpening_params=self._sharpening_params,
+            luminance_nr_params=self._luminance_nr_params,
+            color_nr_params=self._color_nr_params,
+            remove_ca_params=self._remove_ca_params,
+            defringe_params=self._defringe_params,
+            geometry_params=self._geometry_params,
+            straighten_params=self._straighten_params,
+            crop_params=self._crop_params,
+            mask_params=self._mask_params,
+            healing_params=self._healing_params,
         )
         logger.info(
             "PERF controller.submit_full request=%s schedule_ms=%.2f",
@@ -1365,19 +2559,27 @@ class ImageController(QObject):
         """Add a completed worker render to history without reprocessing."""
         start = perf_counter()
         previous = self._pending_history_previous_image
+        previous_state = self._pending_history_previous_state
         self._pending_history_previous_image = None
+        self._pending_history_previous_state = None
         self._pending_final_request_id = -1
 
-        if previous is None:
+        if previous is None or previous_state is None:
             return
 
         if not self._has_pending_adjustment_changes():
             return
 
-        command = ImageStateChangeCommand(
-            self._image_model,
+        # By this point self._xxx_params already reflect the committed
+        # edit (set earlier in apply_adjustments/on_adjustments_changed/
+        # on_curve_changed/on_hsl_changed/on_color_grading_changed), so
+        # get_adjustment_state() here is the post-edit "new" state.
+        command = AdjustmentStateCommand(
+            controller=self,
             previous_image=previous,
+            previous_state=previous_state,
             new_image=rendered_image,
+            new_state=self.get_adjustment_state(),
         )
         self._history_service.execute_command(command)
         logger.info(
@@ -1388,14 +2590,32 @@ class ImageController(QObject):
 
     def commit_adjustments(self) -> None:
         """Commit current adjustments to history.
-        
+
         Call this when user finishes adjusting (e.g., releases slider).
+
+        This is a third history-push site beyond the two the original
+        state-aware undo/redo design called out (the threaded
+        ``_commit_rendered_adjustment`` path and the synchronous fallback
+        inside ``apply_adjustments``) -- it is ``on_slider_released``'s own
+        synchronous fallback for non-threaded callers/tests. It is
+        converted to push a state-aware ``AdjustmentStateCommand`` the same
+        way, for the same reason: without this, undo through this path
+        would still only swap the pixel buffer. See
+        docs/planning/implementation-notes/
+        2026-10-13-state-aware-undo-redo.md.
         """
         if not self.has_image():
             return
 
         # Only commit if there are actual changes
         if self._has_pending_adjustment_changes():
+            # Idempotent: a no-op if on_adjustments_changed/on_curve_changed/
+            # on_hsl_changed/on_color_grading_changed already captured the
+            # pre-gesture snapshot (the normal case); captures it here
+            # otherwise, so a direct call to commit_adjustments() still
+            # gets a correct "previous" pair.
+            self._capture_pending_history_state()
+
             command = CombinedAdjustmentCommand(
                 self._image_model,
                 exposure_params=self._exposure_params.copy(),
@@ -1406,8 +2626,36 @@ class ImageController(QObject):
                 hsl_params=self._hsl_params.copy(),
                 color_grading_params=self._color_grading_params.copy(),
                 texture_params=self._texture_params.copy(),
+                clarity_params=self._clarity_params.copy(),
+                dehaze_params=self._dehaze_params.copy(),
+                vignette_params=self._vignette_params.copy(),
+                grain_params=self._grain_params.copy(),
+                sharpening_params=self._sharpening_params.copy(),
+                luminance_nr_params=self._luminance_nr_params.copy(),
+                color_nr_params=self._color_nr_params.copy(),
+                remove_ca_params=self._remove_ca_params.copy(),
+                defringe_params=self._defringe_params.copy(),
+                geometry_params=self._geometry_params.copy(),
+                straighten_params=self._straighten_params.copy(),
+                crop_params=self._crop_params.copy(),
+                mask_params=self._mask_params.copy(),
+                healing_params=self._healing_params.copy(),
             )
-            self._history_service.execute_command(command)
+            command.execute()
+
+            previous_image = self._pending_history_previous_image
+            previous_state = self._pending_history_previous_state
+            self._pending_history_previous_image = None
+            self._pending_history_previous_state = None
+            if previous_image is not None and previous_state is not None:
+                state_command = AdjustmentStateCommand(
+                    controller=self,
+                    previous_image=previous_image,
+                    previous_state=previous_state,
+                    new_image=self._image_model.current_image,
+                    new_state=self.get_adjustment_state(),
+                )
+                self._history_service.execute_command(state_command)
 
     def _normalize_adjustment_state(
         self,
@@ -1429,6 +2677,171 @@ class ImageController(QObject):
     ) -> Dict[str, float]:
         """Return a complete 11-key Color Grading payload, defaulted to identity."""
         return self._normalize_floats(raw_color_grading, self._COLOR_GRADING_DEFAULTS)
+
+    def _normalize_crop_state(
+        self,
+        raw_crop: Optional[Dict[str, float]],
+    ) -> Dict[str, float]:
+        """Return a complete 4-key ``{"x0", "y0", "x1", "y1"}`` crop
+        rectangle, defaulted to the full frame and defensively clamped.
+
+        Unlike :meth:`_normalize_floats` (reused by the other three
+        non-flat categories), this cannot just float-coerce each key
+        against a default: the 4 values are mutually constrained (each
+        in ``[0.0, 1.0]``, and ``x1``/``y1`` must not be below
+        ``x0``/``y0``). The exact same clamp/swap logic
+        :class:`~src.processors.crop_processor.CropProcessor` itself
+        applies is mirrored here so a malformed/out-of-range persisted
+        rectangle (an old catalog entry, a malformed imported preset) is
+        never trusted blindly, consistent with how the processor treats
+        its own input.
+        """
+        normalized = self._normalize_floats(raw_crop, self._CROP_DEFAULTS)
+        x0, y0, x1, y1 = (
+            normalized["x0"],
+            normalized["y0"],
+            normalized["x1"],
+            normalized["y1"],
+        )
+        x0 = max(0.0, min(1.0, x0))
+        x1 = max(0.0, min(1.0, x1))
+        y0 = max(0.0, min(1.0, y0))
+        y1 = max(0.0, min(1.0, y1))
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        return {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+
+    @staticmethod
+    def _is_identity_crop(crop_values: Dict[str, float]) -> bool:
+        """True if ``crop_values`` is the full-frame (no-op) rectangle."""
+        return (
+            crop_values.get("x0", 0.0) <= 0.0
+            and crop_values.get("y0", 0.0) <= 0.0
+            and crop_values.get("x1", 1.0) >= 1.0
+            and crop_values.get("y1", 1.0) >= 1.0
+        )
+
+    def _normalize_mask_state(
+        self,
+        raw_mask: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Return the internal mask-params dict: ``{}`` ("no mask") for
+        ``None``/malformed input or an unrecognized/missing ``"type"``,
+        otherwise a fully-populated, defensively-clamped dict.
+
+        Mirrors :meth:`_normalize_crop_state`'s "never trust the caller"
+        reasoning (the dict may come from an old catalog entry, a
+        malformed imported preset, or interactive UI input in a later
+        slice) but, unlike crop, there is no separate "collapse to the
+        identity sentinel" step: an unrecognized/missing ``"type"`` IS
+        the identity signal here, so it returns ``{}`` directly. See
+        docs/planning/implementation-notes/2026-10-13-mask-processor.md
+        section 4 for the full state-shape contract.
+        """
+        if not raw_mask or not isinstance(raw_mask, dict):
+            return {}
+        mask_type = raw_mask.get("type")
+        if mask_type not in self._MASK_TYPES:
+            return {}
+
+        result: Dict[str, Any] = {
+            "type": mask_type,
+            "invert": bool(raw_mask.get("invert", False)),
+        }
+
+        if mask_type == "linear":
+            for key, default in self._MASK_LINEAR_DEFAULTS.items():
+                value = self._safe_float(raw_mask.get(key, default), default)
+                result[key] = max(0.0, min(1.0, value))
+        else:  # "radial"
+            for key, default in self._MASK_RADIAL_DEFAULTS.items():
+                value = self._safe_float(raw_mask.get(key, default), default)
+                if key in ("cx", "cy"):
+                    value = max(0.0, min(1.0, value))
+                elif key in ("rx", "ry"):
+                    value = max(1e-4, min(1.0, value))
+                else:  # "feather"
+                    value = max(0.0, min(1.0, value))
+                result[key] = value
+
+        for key, (low, high) in self._MASK_ADJUSTMENT_RANGES.items():
+            value = self._safe_float(raw_mask.get(key, 0.0), 0.0)
+            result[key] = max(low, min(high, value))
+
+        return result
+
+    def _normalize_heal_spots_state(
+        self,
+        raw_heal_spots: Optional[list],
+    ) -> list:
+        """Return a fully-clamped list of heal-spot dicts, skipping any
+        malformed entry.
+
+        Unlike :meth:`_normalize_mask_state` (a single dict, or ``{}``
+        for "no mask"), healing's state is naturally a LIST of
+        independent spots -- ``[]``/``None``/non-list input all return
+        ``[]`` directly (the meaningful "no spots" default). Each
+        remaining entry is validated the same "never trust the caller"
+        way every other normalizer in this class already is: a non-dict
+        entry or one with an unrecognized/missing ``"mode"`` is skipped
+        entirely (there is no sensible default mode to substitute),
+        while every other field is defensively clamped rather than
+        rejected. Mirrors
+        :meth:`~src.processors.healing_processor.HealingProcessor._normalize_spot`'s
+        own clamping exactly, since both layers apply the same
+        "never trust the caller" discipline independently (the same
+        established precedent as crop/mask's own processor+controller
+        double-validation). See docs/planning/implementation-notes/
+        2026-10-13-healing-processor.md section 4.
+        """
+        if not raw_heal_spots or not isinstance(raw_heal_spots, list):
+            return []
+
+        normalized: list = []
+        for raw_spot in raw_heal_spots:
+            if not isinstance(raw_spot, dict):
+                continue
+            mode = raw_spot.get("mode")
+            if mode not in self._HEALING_MODES:
+                continue
+
+            spot: Dict[str, Any] = {"mode": mode}
+            for key in ("dst_x", "dst_y", "src_x", "src_y"):
+                default = self._HEALING_SPOT_DEFAULTS[key]
+                value = self._safe_float(raw_spot.get(key, default), default)
+                spot[key] = max(0.0, min(1.0, value))
+
+            radius_default = self._HEALING_SPOT_DEFAULTS["radius"]
+            radius = self._safe_float(
+                raw_spot.get("radius", radius_default), radius_default
+            )
+            spot["radius"] = max(1e-4, min(1.0, radius))
+
+            feather_default = self._HEALING_SPOT_DEFAULTS["feather"]
+            feather = self._safe_float(
+                raw_spot.get("feather", feather_default), feather_default
+            )
+            spot["feather"] = max(0.0, min(1.0, feather))
+
+            opacity_default = self._HEALING_SPOT_DEFAULTS["opacity"]
+            opacity = self._safe_float(
+                raw_spot.get("opacity", opacity_default), opacity_default
+            )
+            spot["opacity"] = max(0.0, min(1.0, opacity))
+
+            normalized.append(spot)
+
+        return normalized
+
+    @staticmethod
+    def _safe_float(value: Any, default: float) -> float:
+        """Coerce ``value`` to a float, tolerating bad types/values."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _normalize_floats(

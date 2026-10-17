@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
@@ -121,6 +122,7 @@ class LibraryController(QObject):
     libraries_changed = pyqtSignal(object, str)
     entries_rebuilt = pyqtSignal(str, object)
     entry_thumbnail_updated = pyqtSignal(str, object)
+    collections_changed = pyqtSignal(object)
     thumbnail_batch_started = pyqtSignal(int)
     thumbnail_batch_progress = pyqtSignal(int, int)
     thumbnail_batch_finished = pyqtSignal()
@@ -161,6 +163,7 @@ class LibraryController(QObject):
     def initialize(self) -> None:
         self._current_library_id = self._catalog_service.get_current_library_id()
         self._emit_libraries()
+        self._emit_collections()
         self._rebuild_entries_for_current_library()
 
     def select_library(self, library_id: str) -> None:
@@ -169,12 +172,14 @@ class LibraryController(QObject):
         self._catalog_service.set_current_library(library_id)
         self._current_library_id = library_id
         self._emit_libraries()
+        self._emit_collections()
         self._rebuild_entries_for_current_library()
 
     def create_library(self, name: str) -> None:
         library = self._catalog_service.create_library(name)
         self._current_library_id = library.id
         self._emit_libraries()
+        self._emit_collections()
         self._rebuild_entries_for_current_library()
 
     def remove_library(self, library_id: str) -> None:
@@ -182,7 +187,87 @@ class LibraryController(QObject):
         self._cleanup_orphaned_cache_async(self._catalog_service.referenced_cache_keys())
         self._current_library_id = self._catalog_service.get_current_library_id()
         self._emit_libraries()
+        self._emit_collections()
         self._rebuild_entries_for_current_library()
+
+    def remove_entry(self, file_path: str, delete_from_disk: bool = False) -> bool:
+        """Remove one entry from the current library's catalog, and,
+        when ``delete_from_disk`` is True, also delete the underlying
+        file from disk.
+
+        Mirrors Lightroom's own "Remove Photo" dialog's two destructive
+        choices ("Remove from Library" vs "Delete from Disk" --
+        confirmed by the caller, usually ``MainWindow``, BEFORE this is
+        ever invoked; this method does no confirming of its own). The
+        catalog removal itself (``LibraryCatalogService.remove_entry``)
+        is a pure JSON-catalog operation that never touches the
+        filesystem -- the actual file deletion happens HERE, at the
+        controller layer, right after, so filesystem-touching
+        responsibility stays out of the catalog service entirely. A
+        disk-deletion failure (permission error, locked file, file
+        already gone) is logged and swallowed rather than raised: the
+        catalog entry has already been removed by the time disk
+        deletion is attempted, and the user's primary request (take
+        this photo out of my library) has already been satisfied, so a
+        secondary filesystem problem should not undo that or crash the
+        app -- it is surfaced only via the log, not blocked on.
+
+        Returns ``True`` if the catalog entry was actually removed
+        (whatever happened to the file), ``False`` on an unknown path
+        or no current library (never raises).
+        """
+        if not self._current_library_id or not file_path:
+            return False
+        removed = self._catalog_service.remove_entry(self._current_library_id, file_path)
+        if not removed:
+            return False
+        if delete_from_disk:
+            self._delete_file_from_disk(file_path)
+        self._emit_libraries()
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+        return True
+
+    def remove_entries(self, file_paths: list[str], delete_from_disk: bool = False) -> None:
+        """Batch counterpart of ``remove_entry`` -- removes every given
+        path from the current library (optionally deleting each file
+        from disk too), refreshing views only ONCE at the end instead of
+        once per path, matching ``set_entries_rating``/
+        ``set_entries_favorite``'s established batch pattern."""
+        if not self._current_library_id or not file_paths:
+            return
+        any_removed = False
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            removed = self._catalog_service.remove_entry(
+                self._current_library_id, file_path
+            )
+            if removed and delete_from_disk:
+                self._delete_file_from_disk(file_path)
+            any_removed = any_removed or removed
+        if not any_removed:
+            return
+        self._emit_libraries()
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
+    def _delete_file_from_disk(self, file_path: str) -> None:
+        """Permanently delete one file from disk (plain ``unlink`` --
+        no OS trash/recycle-bin integration; see
+        docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md
+        for why that's a deliberate, simpler v1 choice, not an
+        oversight). ``missing_ok=True`` makes an already-gone file a
+        silent no-op rather than an error. Any other ``OSError``
+        (permission denied, file locked by another process, etc.) is
+        logged and swallowed -- never raised -- since by the time this
+        runs the catalog entry removal this is paired with has already
+        succeeded and should not be undone by a secondary disk failure.
+        """
+        try:
+            Path(file_path).unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to delete file from disk: %s", file_path)
 
     def import_images(self, file_paths: list[str]) -> None:
         if not self._current_library_id or not file_paths:
@@ -269,6 +354,236 @@ class LibraryController(QObject):
         self._emit_libraries()
         self._rebuild_entries_for_current_library()
 
+    def set_entry_rating(self, file_path: str, rating: int) -> None:
+        """Update the 0-5 star rating for the current library and refresh its views."""
+        if not self._current_library_id or not file_path:
+            return
+        self._catalog_service.set_entry_rating(
+            self._current_library_id, file_path, rating
+        )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entry_flag(self, file_path: str, flag: str) -> None:
+        """Update the pick/reject flag for the current library and refresh its views."""
+        if not self._current_library_id or not file_path:
+            return
+        self._catalog_service.set_entry_flag(
+            self._current_library_id, file_path, flag
+        )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entry_captured_at(self, file_path: str, captured_at: str) -> None:
+        """Update the user-editable "captured at" timestamp for the
+        current library and refresh its views."""
+        if not self._current_library_id or not file_path:
+            return
+        self._catalog_service.set_entry_captured_at(
+            self._current_library_id, file_path, captured_at
+        )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entry_keywords(self, file_path: str, keywords: list[str]) -> None:
+        """Update the keyword list for the current library and refresh its views."""
+        if not self._current_library_id or not file_path:
+            return
+        self._catalog_service.set_entry_keywords(
+            self._current_library_id, file_path, keywords
+        )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entries_favorite(self, file_paths: list[str], favorite: bool) -> None:
+        """Batch counterpart of ``set_entry_favorite`` -- sets every given
+        path to the SAME favorite value (not a per-path toggle), looping
+        the catalog-service call per path but refreshing views only ONCE
+        at the end, instead of once per path. See docs/planning/
+        implementation-notes/2026-10-13-multi-select-batch-actions.md for
+        why this exists as a dedicated method rather than the caller
+        looping ``set_entry_favorite`` itself."""
+        if not self._current_library_id or not file_paths:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.set_entry_favorite(
+                self._current_library_id, file_path, favorite
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entries_rating(self, file_paths: list[str], rating: int) -> None:
+        """Batch counterpart of ``set_entry_rating`` -- sets every given
+        path to the SAME rating (not a merge/offset of each path's
+        existing rating), refreshing views only once."""
+        if not self._current_library_id or not file_paths:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.set_entry_rating(
+                self._current_library_id, file_path, rating
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entries_flag(self, file_paths: list[str], flag: str) -> None:
+        """Batch counterpart of ``set_entry_flag`` -- sets every given path
+        to the SAME flag, refreshing views only once."""
+        if not self._current_library_id or not file_paths:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.set_entry_flag(
+                self._current_library_id, file_path, flag
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def set_entries_captured_at(self, file_paths: list[str], captured_at: str) -> None:
+        """Batch counterpart of ``set_entry_captured_at`` -- sets every
+        given path to the SAME captured-at value (not an offset/shift),
+        refreshing views only once. Useful for a batch of scanned film
+        photos with no EXIF date at all. See docs/planning/
+        implementation-notes/2026-10-13-edit-date-time.md."""
+        if not self._current_library_id or not file_paths:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.set_entry_captured_at(
+                self._current_library_id, file_path, captured_at
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def add_entries_keywords(self, file_paths: list[str], keywords: list[str]) -> None:
+        """Batch, ADD-ONLY counterpart of ``set_entry_keywords``.
+
+        Unlike Favorite/Rating/Flag (scalar, "set" semantics), keywords
+        are additive here: each path's EXISTING keywords are preserved and
+        the new keywords are appended (then normalized/deduped by
+        ``LibraryCatalogService.set_entry_keywords`` exactly as a single-
+        image edit already is), rather than replacing each path's keyword
+        list wholesale -- a destructive batch replace across many images
+        whose individual current keywords the user hasn't seen is a
+        correctness trap. Single-image "Edit Keywords..." is unaffected
+        and remains a full replace, since the user can see that one
+        image's current keywords while editing them."""
+        if not self._current_library_id or not file_paths or not keywords:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            try:
+                entry = self._catalog_service.get_entry(
+                    self._current_library_id, file_path
+                )
+            except KeyError:
+                continue
+            merged = [*entry.keywords, *keywords]
+            self._catalog_service.set_entry_keywords(
+                self._current_library_id, file_path, merged
+            )
+        self._emit_libraries()
+        self._rebuild_entries_for_current_library()
+
+    def add_entries_to_collection(self, file_paths: list[str], collection_id: str) -> None:
+        """Batch counterpart of ``add_entry_to_collection`` -- adds every
+        given path to one collection, refreshing views only once."""
+        if not self._current_library_id or not file_paths or not collection_id:
+            return
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            self._catalog_service.add_entry_to_collection(
+                self._current_library_id, file_path, collection_id
+            )
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
+    def create_collection(self, name: str) -> None:
+        """Create a new collection in the current library and refresh views."""
+        if not self._current_library_id:
+            return
+        self._catalog_service.create_collection(self._current_library_id, name)
+        self._emit_collections()
+
+    def rename_collection(self, collection_id: str, name: str) -> None:
+        """Rename a collection in the current library and refresh views."""
+        if not self._current_library_id or not collection_id:
+            return
+        self._catalog_service.rename_collection(
+            self._current_library_id, collection_id, name
+        )
+        self._emit_collections()
+
+    def delete_collection(self, collection_id: str) -> None:
+        """Delete a collection from the current library and refresh views.
+
+        Also triggers an entries refresh, since every entry that
+        belonged to the deleted collection just had that id stripped out
+        of its ``collection_ids`` by the catalog service.
+        """
+        if not self._current_library_id or not collection_id:
+            return
+        self._catalog_service.delete_collection(self._current_library_id, collection_id)
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
+    def add_entry_to_collection(self, file_path: str, collection_id: str) -> None:
+        """Add an image to a collection in the current library and refresh views."""
+        if not self._current_library_id or not file_path or not collection_id:
+            return
+        self._catalog_service.add_entry_to_collection(
+            self._current_library_id, file_path, collection_id
+        )
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
+    def remove_entry_from_collection(self, file_path: str, collection_id: str) -> None:
+        """Remove an image from a collection in the current library and refresh views."""
+        if not self._current_library_id or not file_path or not collection_id:
+            return
+        self._catalog_service.remove_entry_from_collection(
+            self._current_library_id, file_path, collection_id
+        )
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
+    def set_entry_collection_membership(
+        self, file_path: str, collection_id: str, is_member: bool
+    ) -> None:
+        """Add or remove one image from one collection, by the target
+        membership state -- the single slot the context menu's checkable
+        "Add to Collection" submenu connects to (one call either adds or
+        removes, instead of the caller picking which of
+        ``add_entry_to_collection``/``remove_entry_from_collection`` to
+        call)."""
+        if is_member:
+            self.add_entry_to_collection(file_path, collection_id)
+        else:
+            self.remove_entry_from_collection(file_path, collection_id)
+
+    def create_collection_with_entry(self, file_path: str, name: str) -> None:
+        """Create a new collection and immediately add one image to it --
+        backs the context menu's "New Collection..." entry, where the
+        collection doesn't exist yet to pass an id back to the view for a
+        separate add_entry_to_collection call."""
+        if not self._current_library_id or not file_path:
+            return
+        record = self._catalog_service.create_collection(self._current_library_id, name)
+        if record is None:
+            return
+        self._catalog_service.add_entry_to_collection(
+            self._current_library_id, file_path, record.id
+        )
+        self._emit_collections()
+        self._rebuild_entries_for_current_library()
+
     def referenced_adjustment_preview_cache_keys(self) -> set[str]:
         return self._catalog_service.referenced_adjustment_preview_cache_keys()
 
@@ -287,6 +602,30 @@ class LibraryController(QObject):
             for library in self._catalog_service.list_libraries()
         ]
         self.libraries_changed.emit(libraries, self._current_library_id)
+
+    def _emit_collections(self) -> None:
+        """Emit the current library's flat collection list (name + image
+        count per collection), separate from ``libraries_changed``'s
+        per-library aggregate counts since this list is dynamic/
+        user-created rather than a fixed set of counters."""
+        if not self._current_library_id:
+            self.collections_changed.emit([])
+            return
+        library = self._catalog_service.get_library(self._current_library_id)
+        if library is None:
+            self.collections_changed.emit([])
+            return
+        collections = [
+            {
+                "id": collection.id,
+                "name": collection.name,
+                "count": sum(
+                    1 for entry in library.entries if collection.id in entry.collection_ids
+                ),
+            }
+            for collection in library.collections
+        ]
+        self.collections_changed.emit(collections)
 
     def _rebuild_entries_for_current_library(self) -> None:
         self.cancel_thumbnail_batch()
@@ -320,6 +659,11 @@ class LibraryController(QObject):
             "placeholder": "missing" if entry.status != "available" else "loading",
             "added_at": entry.added_at,
             "favorite": entry.favorite,
+            "rating": entry.rating,
+            "flag": entry.flag,
+            "keywords": entry.keywords,
+            "collection_ids": entry.collection_ids,
+            "captured_at": entry.captured_at,
         }
 
         if entry.status != "available":
@@ -385,12 +729,30 @@ class LibraryController(QObject):
         thumbnail,
         cache_key: str,
     ) -> None:
-        self._catalog_service.set_entry_thumbnail_cache_key(
-            library_id,
-            file_path,
-            cache_key,
-        )
-        entry = self._catalog_service.refresh_entry_status(library_id, file_path)
+        # The entry this background-generated thumbnail belongs to may
+        # have been removed from the catalog (Remove Photo/Delete from
+        # Disk, or a whole-library clear/remove) while the thumbnail
+        # batch worker was still mid-flight for it -- cancel_thumbnail_
+        # batch() stops the worker from STARTING further tasks, but
+        # can't unqueue a cross-thread signal for a task that already
+        # finished. Treat "entry no longer exists" as a no-op rather
+        # than letting the KeyError from set_entry_thumbnail_cache_key/
+        # refresh_entry_status propagate into the Qt event loop. See
+        # docs/planning/implementation-notes/2026-10-13-remove-delete-photo.md.
+        try:
+            self._catalog_service.set_entry_thumbnail_cache_key(
+                library_id,
+                file_path,
+                cache_key,
+            )
+            entry = self._catalog_service.refresh_entry_status(library_id, file_path)
+        except KeyError:
+            logger.debug(
+                "Skipping stale thumbnail result for removed entry %s in %s",
+                file_path,
+                library_id,
+            )
+            return
         payload = {
             "path": entry.path,
             "filename": entry.filename,
@@ -401,6 +763,11 @@ class LibraryController(QObject):
             "placeholder": None,
             "added_at": entry.added_at,
             "favorite": entry.favorite,
+            "rating": entry.rating,
+            "flag": entry.flag,
+            "keywords": entry.keywords,
+            "collection_ids": entry.collection_ids,
+            "captured_at": entry.captured_at,
         }
         if library_id == self._current_library_id:
             self.entry_thumbnail_updated.emit(file_path, payload)

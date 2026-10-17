@@ -1,5 +1,7 @@
 """Main window for PhotoEdit application."""
 
+import copy
+import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -25,11 +27,24 @@ from PyQt6.QtGui import QKeySequence, QAction
 
 logger = logging.getLogger(__name__)
 
+# Preset file envelope: see docs/planning/implementation-notes/
+# 2026-10-13-import-export-presets.md section 3 for the full format
+# rationale. ``PRESET_FILE_VERSION`` is bumped only if the envelope shape
+# itself ever changes incompatibly; it is not tied to the app version.
+PRESET_FILE_VERSION = 1
+PRESET_FILE_FILTER = "PhotoEdit Preset (*.json)"
+
+from src.models.builtin_profiles import BUILTIN_PROFILES
 from src.views.image_view import ImageView
 from src.views.tools_panel import ToolsPanel
-from src.views.export_dialog import ExportDialog
+from src.services.export_service import ExportService
+from src.views.export_dialog import ExportDialog, confirm_overwrite_if_needed
+from src.views.preferences_dialog import PreferencesDialog
 from src.views.library_view import LibraryView
 from src.views.theme import apply_theme
+from src.views.widgets.crop_toolbar import CropToolbar
+from src.views.widgets.healing_toolbar import HealingToolbar
+from src.views.widgets.mask_toolbar import MaskToolbar
 from src.views.widgets.filmstrip_view import FilmstripView
 from src.views.widgets.image_toolbar import ImageToolBar
 from src.views.widgets.workspace_header import WorkspaceHeader
@@ -75,6 +90,25 @@ class MainWindow(QMainWindow):
         
         # One settings service shared by the window and its consumers.
         self._settings_service = settings_service or SettingsService()
+
+        # Crash-recovery notice bookkeeping (see docs/planning/
+        # implementation-notes/2026-10-13-crash-recovery-notice.md).
+        # Read the PREVIOUS session's clean-shutdown flag before doing
+        # anything else, then immediately mark the CURRENT session as
+        # "in progress" (not yet cleanly closed). Order matters: if the
+        # read happened after the write, it would always see the
+        # just-written False and never detect a real crash. ``sync()``
+        # is called right away so this False reaches disk promptly --
+        # QSettings does not guarantee an immediate flush to the backing
+        # store on every setValue() (it may buffer, depending on
+        # platform/backend), and this flag's entire purpose is to
+        # survive a crash that happens moments later, so relying on
+        # whatever implicit flush QSettings gets around to on its own
+        # would defeat the feature.
+        self._last_shutdown_was_clean = self._settings_service.get_clean_shutdown()
+        self._settings_service.set_clean_shutdown(False)
+        self._settings_service.sync()
+
         self._catalog_service = (
             catalog_service if catalog_service is not None else LibraryCatalogService()
         )
@@ -94,6 +128,15 @@ class MainWindow(QMainWindow):
         self._tools_panel = ToolsPanel()
         self._library_view = LibraryView(show_thumbnail_grid=False)
         self._image_toolbar = ImageToolBar()
+        self._crop_toolbar = CropToolbar()
+        self._crop_toolbar.hide()
+        self._pre_crop_mode_adjustment_state: Optional[dict] = None
+        self._mask_toolbar = MaskToolbar()
+        self._mask_toolbar.hide()
+        self._mask_overlay_signal_connected = False
+        self._healing_toolbar = HealingToolbar()
+        self._healing_toolbar.hide()
+        self._healing_overlay_signal_connected = False
         self._filmstrip_view = FilmstripView()
         self._workspace_header = WorkspaceHeader()
         self._library_controller = LibraryController(
@@ -108,6 +151,12 @@ class MainWindow(QMainWindow):
         self._pending_adjustment_payload: Optional[dict] = None
         self._pending_zoom_factor: Optional[float] = None
         self._current_image_library_id: Optional[str] = None
+        # Single-slot, in-memory, session-only clipboard for Copy/Paste Edit
+        # Settings -- matches Lightroom's own single-slot behavior for this
+        # feature (not its separate multi-preset system). Never persisted to
+        # disk; cleared when the app closes. See
+        # docs/planning/implementation-notes/2026-10-13-copy-paste-edit-settings.md.
+        self._copied_adjustment_state: Optional[dict] = None
         self._adjustment_persist_timer = QTimer(self)
         self._adjustment_persist_timer.setSingleShot(True)
         self._adjustment_persist_timer.setInterval(400)
@@ -127,6 +176,36 @@ class MainWindow(QMainWindow):
         self._library_controller.initialize()
         self._restore_last_session_image()
 
+        # Defer the recovery notice until after the window is actually
+        # shown. __init__ runs before show(); a QMessageBox popping up
+        # mid-construction, before anything is visible, would be
+        # confusing. QTimer.singleShot(0, ...) queues the call on the Qt
+        # event loop instead of firing it synchronously here, so it runs
+        # once the loop starts processing events -- which, per
+        # src/main.py's window.show() then app.exec() sequence (and per
+        # qtbot.waitExposed in tests, which also pumps the event loop),
+        # is always after the window is visible.
+        QTimer.singleShot(0, self._maybe_show_crash_recovery_notice)
+
+    def _maybe_show_crash_recovery_notice(self) -> None:
+        """Show a one-time notice if the previous session did not exit cleanly.
+
+        Does nothing on the ordinary clean-shutdown-then-relaunch case.
+        This is a session-level honesty notice, not a restore flow: there
+        is nothing to "recover" beyond what the existing debounced
+        adjustment-persist timer / library catalog save already wrote to
+        disk continuously during the previous session.
+        """
+        if self._last_shutdown_was_clean:
+            return
+        QMessageBox.information(
+            self,
+            "PhotoEdit",
+            "PhotoEdit may not have closed cleanly last time. Your edits "
+            "are saved automatically as you work, so no changes should "
+            "have been lost.",
+        )
+
     def _setup_ui(self):
         """Set up the main UI components."""
         # Central widget
@@ -140,6 +219,9 @@ class MainWindow(QMainWindow):
         # Editing workspace: canvas, local controls, then the active-library strip.
         layout.addWidget(self._image_view, 1)
         layout.addWidget(self._image_toolbar)
+        layout.addWidget(self._crop_toolbar)
+        layout.addWidget(self._mask_toolbar)
+        layout.addWidget(self._healing_toolbar)
         layout.addWidget(self._filmstrip_view)
         
         # Left panel - Library
@@ -199,6 +281,18 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._create_action("&Import Images...", self._import_images, "Ctrl+Shift+O"))
         file_menu.addSeparator()
         file_menu.addAction(self._create_action("&Export...", self._export_image, "Ctrl+E"))
+        file_menu.addAction(
+            self._create_action(
+                "Export with &Previous", self._export_with_previous, "Ctrl+Shift+E"
+            )
+        )
+        file_menu.addSeparator()
+        file_menu.addAction(
+            self._create_action("Export &Preset...", self._export_preset)
+        )
+        file_menu.addAction(
+            self._create_action("Import Pre&set...", self._import_preset)
+        )
         file_menu.addSeparator()
         file_menu.addAction(self._create_action("E&xit", self.close, "Ctrl+Q"))
         
@@ -210,13 +304,47 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._redo_action)
         edit_menu.addSeparator()
         edit_menu.addAction(self._create_action("&Reset Adjustments", self._reset_adjustments, "Ctrl+R"))
-        
+        edit_menu.addAction(
+            self._create_action(
+                "&Copy Edit Settings", self._copy_edit_settings, "Ctrl+Alt+C"
+            )
+        )
+        edit_menu.addAction(
+            self._create_action(
+                "&Paste Edit Settings", self._paste_edit_settings, "Ctrl+Alt+V"
+            )
+        )
+        edit_menu.addSeparator()
+        edit_menu.addAction(
+            self._create_action(
+                "Select &All", self._filmstrip_view.select_all, "Ctrl+A"
+            )
+        )
+        edit_menu.addAction(
+            self._create_action(
+                "Select &None", self._filmstrip_view.select_none, "Ctrl+Shift+A"
+            )
+        )
+        edit_menu.addSeparator()
+        edit_menu.addAction(
+            self._create_action(
+                "&Preferences...", self._show_preferences, "Ctrl+,"
+            )
+        )
+
         # View menu
         view_menu = menubar.addMenu("&View")
         view_menu.addAction(self._create_action("&Fit to Window", self._fit_to_window, "0"))
         view_menu.addAction(self._create_action("&100%", self._view_100_percent, "1"))
         view_menu.addAction(self._create_action("Zoom &In", self._zoom_in, "Ctrl+="))
         view_menu.addAction(self._create_action("Zoom &Out", self._zoom_out, "Ctrl+-"))
+        view_menu.addSeparator()
+        view_menu.addAction(
+            self._create_action("&Next Photo", self._next_photo, "Right")
+        )
+        view_menu.addAction(
+            self._create_action("&Previous Photo", self._previous_photo, "Left")
+        )
         view_menu.addSeparator()
         view_menu.addAction(self._create_action("Toggle &Library Panel", self._toggle_library_panel, "F5"))
         view_menu.addAction(self._create_action("Toggle &Tools Panel", self._toggle_tools_panel, "F6"))
@@ -314,8 +442,6 @@ class MainWindow(QMainWindow):
         self._zoom_label = QLabel("100%")
         self._zoom_label.setStyleSheet("padding: 0 10px;")
         self._status_bar.addPermanentWidget(self._zoom_label)
-        
-        self._status_bar.showMessage("Ready")
 
     def _setup_shortcuts(self):
         """Set up keyboard shortcuts."""
@@ -335,10 +461,34 @@ class MainWindow(QMainWindow):
         self._workspace_header.export_requested.connect(self._export_image)
         self._workspace_header.workspace_changed.connect(self._on_workspace_changed)
         self._tools_panel.adjustments_changed.connect(self._on_adjustments_changed)
-        self._tools_panel.curve_changed.connect(self._on_curve_changed)
+        # Connected to the channel-aware signal (always carries an
+        # explicit channel, including "master"), not the legacy
+        # ``curve_changed`` -- see docs/planning/implementation-notes/
+        # 2026-10-13-per-channel-curves.md section 4.
+        self._tools_panel.curve_channel_changed.connect(self._on_curve_changed)
         self._tools_panel.hsl_changed.connect(self._on_hsl_changed)
         self._tools_panel.color_grading_changed.connect(self._on_color_grading_changed)
         self._tools_panel.slider_released.connect(self._on_slider_released)
+        self._tools_panel.profile_apply_requested.connect(self._apply_profile)
+        self._tools_panel.crop_tool_requested.connect(self._enter_crop_mode)
+        self._crop_toolbar.apply_requested.connect(self._apply_crop)
+        self._crop_toolbar.cancel_requested.connect(self._cancel_crop)
+        self._crop_toolbar.aspect_ratio_changed.connect(self._on_crop_aspect_ratio_changed)
+        self._tools_panel.mask_tool_requested.connect(self._enter_mask_mode)
+        self._mask_toolbar.apply_requested.connect(self._apply_mask)
+        self._mask_toolbar.cancel_requested.connect(self._cancel_mask)
+        self._mask_toolbar.remove_requested.connect(self._remove_mask)
+        self._mask_toolbar.mask_type_changed.connect(self._on_mask_type_changed)
+        self._mask_toolbar.invert_changed.connect(self._on_mask_invert_changed)
+        self._mask_toolbar.adjustments_changed.connect(self._on_mask_adjustments_changed)
+        self._tools_panel.heal_tool_requested.connect(self._enter_healing_mode)
+        self._healing_toolbar.apply_requested.connect(self._apply_healing)
+        self._healing_toolbar.cancel_requested.connect(self._cancel_healing)
+        self._healing_toolbar.remove_last_requested.connect(self._on_heal_remove_last)
+        self._healing_toolbar.clear_all_requested.connect(self._on_heal_clear_all)
+        self._healing_toolbar.mode_changed.connect(self._on_heal_mode_changed)
+        self._healing_toolbar.feather_changed.connect(self._on_heal_feather_changed)
+        self._healing_toolbar.opacity_changed.connect(self._on_heal_opacity_changed)
         self._library_view.image_selected.connect(self._on_library_image_selected)
         self._filmstrip_view.image_selected.connect(self._on_library_image_selected)
         self._library_view.import_requested.connect(self._import_images)
@@ -347,14 +497,78 @@ class MainWindow(QMainWindow):
         self._filmstrip_view.favorite_toggled.connect(
             self._library_controller.set_entry_favorite
         )
+        self._filmstrip_view.rating_changed.connect(
+            self._library_controller.set_entry_rating
+        )
+        self._filmstrip_view.flag_changed.connect(
+            self._library_controller.set_entry_flag
+        )
+        self._filmstrip_view.keywords_changed.connect(
+            self._library_controller.set_entry_keywords
+        )
+        self._filmstrip_view.captured_at_changed.connect(
+            self._library_controller.set_entry_captured_at
+        )
+        self._filmstrip_view.collection_membership_toggled.connect(
+            self._library_controller.set_entry_collection_membership
+        )
+        self._filmstrip_view.new_collection_for_entry_requested.connect(
+            self._library_controller.create_collection_with_entry
+        )
+        # Multi-select batch counterparts (see docs/planning/
+        # implementation-notes/2026-10-13-multi-select-batch-actions.md) --
+        # only ever emitted from the context menu's multi-selection branch,
+        # routed to dedicated controller methods that refresh views once
+        # per batch action instead of once per selected image.
+        self._filmstrip_view.favorite_batch_toggled.connect(
+            self._library_controller.set_entries_favorite
+        )
+        self._filmstrip_view.rating_batch_changed.connect(
+            self._library_controller.set_entries_rating
+        )
+        self._filmstrip_view.flag_batch_changed.connect(
+            self._library_controller.set_entries_flag
+        )
+        self._filmstrip_view.keywords_batch_added.connect(
+            self._library_controller.add_entries_keywords
+        )
+        self._filmstrip_view.captured_at_batch_changed.connect(
+            self._library_controller.set_entries_captured_at
+        )
+        self._filmstrip_view.collection_batch_added.connect(
+            self._library_controller.add_entries_to_collection
+        )
+        # Remove Photo / Delete from Disk (PDF Edit/Photo menu, "Duplicate/
+        # Delete/Remove photo" -- Duplicate is a deliberately deferred
+        # architectural gap, see docs/planning/implementation-notes/
+        # 2026-10-13-remove-delete-photo.md). The confirmation dialog
+        # itself already lives in FilmstripView (mirrors how "Edit Date &
+        # Time..." prompts there too) -- these signals only ever fire
+        # AFTER the user has confirmed, carrying the chosen
+        # delete_from_disk value.
+        self._filmstrip_view.remove_requested.connect(
+            self._on_remove_entry_requested
+        )
+        self._filmstrip_view.remove_batch_requested.connect(
+            self._on_remove_entries_requested
+        )
         self._library_view.create_library_requested.connect(
             self._on_create_library_requested
         )
         self._library_view.remove_library_requested.connect(
             self._on_remove_library_requested
         )
+        self._library_view.create_collection_requested.connect(
+            self._library_controller.create_collection
+        )
         self._library_controller.libraries_changed.connect(
             self._library_view.set_libraries
+        )
+        self._library_controller.collections_changed.connect(
+            self._library_view.set_collections
+        )
+        self._library_controller.collections_changed.connect(
+            self._filmstrip_view.set_collections
         )
         self._library_controller.entries_rebuilt.connect(
             self._on_library_entries_rebuilt
@@ -374,6 +588,9 @@ class MainWindow(QMainWindow):
         self._image_controller.image_load_started.connect(self._on_image_load_started)
         self._image_controller.image_preview_ready.connect(self._on_image_preview_ready)
         self._image_controller.image_load_finished.connect(self._on_image_load_finished)
+        self._image_controller.adjustment_state_restored.connect(
+            self._on_adjustment_state_restored
+        )
 
     def _on_library_entries_rebuilt(self, library_id: str, entries: list[dict]) -> None:
         self._library_view.set_entries(entries)
@@ -417,9 +634,9 @@ class MainWindow(QMainWindow):
         self._image_controller.on_adjustments_changed(adjustments)
         self._adjustment_persist_timer.start()
 
-    def _on_curve_changed(self, points: list):
-        """Handle tone curve changes from the tools panel."""
-        self._image_controller.on_curve_changed(points)
+    def _on_curve_changed(self, channel: str, points: list):
+        """Handle one of the 4 tone curves changing from the tools panel."""
+        self._image_controller.on_curve_changed(points, channel=channel)
         self._adjustment_persist_timer.start()
 
     def _on_hsl_changed(self, values: dict):
@@ -586,6 +803,43 @@ class MainWindow(QMainWindow):
             return
         self._library_controller.remove_library(library_id)
 
+    def _on_remove_entry_requested(self, file_path: str, delete_from_disk: bool) -> None:
+        """Handle a single-image "Remove Photo.../Delete from Disk"
+        request -- already confirmed by ``FilmstripView``'s own 3-way
+        dialog by the time this fires."""
+        self._clear_current_image_if_removed([file_path])
+        self._library_controller.remove_entry(file_path, delete_from_disk)
+
+    def _on_remove_entries_requested(
+        self, file_paths: list, delete_from_disk: bool
+    ) -> None:
+        """Batch counterpart of ``_on_remove_entry_requested``."""
+        self._clear_current_image_if_removed(file_paths)
+        self._library_controller.remove_entries(file_paths, delete_from_disk)
+
+    def _clear_current_image_if_removed(self, removed_paths: list) -> None:
+        """If the image currently open in the editor is one of
+        ``removed_paths``, reset the editor to its own "no image loaded"
+        state BEFORE the library controller removes/deletes it.
+
+        Reuses ``ImageController.clear_image()`` -- the exact state the
+        app is already in right after startup with an empty library,
+        before any image has ever been loaded -- rather than inventing a
+        new empty-state UI. Does not persist the about-to-be-removed
+        image's adjustments first (unlike most other library mutations in
+        this file): that state is being discarded along with the entry
+        itself, so writing it back to the catalog first would be pure
+        waste.
+        """
+        current_path = self._image_controller.image_model.file_path
+        if not current_path or current_path not in removed_paths:
+            return
+        self._image_controller.clear_image()
+        self._tools_panel.set_enabled(False)
+        self._settings_service.set_current_image_path("")
+        self._settings_service.sync()
+        self._status_bar.showMessage("Photo removed", 2000)
+
     # Menu action handlers
     def _open_image(self):
         """Handle open image action."""
@@ -670,6 +924,68 @@ class MainWindow(QMainWindow):
                 self._settings_service.set_last_export_dir(export_path)
             self._status_bar.showMessage(f"Exported to: {export_path}", 3000)
 
+    def _export_with_previous(self):
+        """Repeat the last-used export settings without opening the dialog.
+
+        Mirrors Lightroom's File > Export with Previous: re-runs the most
+        recently used export options (format/quality/resize/preserve
+        aspect) immediately. When no previous export has ever completed,
+        there is nothing to repeat, so this falls back to the normal
+        ``_export_image`` flow (which opens the dialog) -- that is the
+        intended UX, not a bug.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to export", 2000)
+            return
+
+        image = self._image_controller.get_export_image()
+        if image is None:
+            self._status_bar.showMessage("No image to export", 2000)
+            return
+
+        # Get default path from current file (same logic as _export_image).
+        default_path = self._image_controller.image_model.file_path or ""
+        if default_path:
+            p = Path(default_path)
+            default_path = str(p.parent / f"{p.stem}_edited{p.suffix}")
+
+        if not default_path:
+            default_path = str(Path(self._settings_service.get_last_export_dir()))
+
+        options = self._settings_service.get_last_export_options()
+        if options is None:
+            # No previous export to repeat; fall back to the normal
+            # Export dialog flow.
+            self._status_bar.showMessage(
+                "No previous export settings; opening Export dialog...", 2000
+            )
+            self._export_image()
+            return
+
+        if not confirm_overwrite_if_needed(self, default_path, self._settings_service):
+            self._status_bar.showMessage("Export cancelled", 2000)
+            return
+
+        width = options.get("width")
+        height = options.get("height")
+        resize = (width, height) if width is not None and height is not None else None
+
+        export_service = ExportService()
+        success = export_service.export_image(
+            image,
+            default_path,
+            format=options.get("format"),
+            quality=options.get("quality"),
+            resize=resize,
+            preserve_aspect=options.get("preserve_aspect", True),
+        )
+
+        if success:
+            self._settings_service.set_last_export_dir(default_path)
+            self._status_bar.showMessage(f"Exported to: {default_path}", 3000)
+        else:
+            QMessageBox.critical(self, "Export Failed", "Failed to export image.")
+
     def _undo(self):
         """Handle undo action."""
         if self._image_controller.can_undo():
@@ -686,6 +1002,336 @@ class MainWindow(QMainWindow):
         else:
             self._status_bar.showMessage("Nothing to redo", 1000)
 
+    def _on_adjustment_state_restored(self, state: dict) -> None:
+        """Resync the ToolsPanel UI and persist to the catalog after an
+        undo/redo (or any other) call to ImageController.apply_history_state.
+
+        Mirrors ``_reset_adjustments``/``_paste_edit_settings``/
+        ``_apply_profile``'s exact "replace the current image's entire
+        adjustment state" UI-sync pattern.
+
+        Also refreshes the status-bar dimensions label from the now-current
+        image's actual shape. This fixes the gap flagged in slice 1 (see
+        docs/planning/implementation-notes/2026-10-13-crop-processor.md
+        section 2/6): the label was previously set once, at image load, and
+        never refreshed on a later shape-changing edit -- which, before
+        this slice, only Crop could cause, and Crop was unreachable from
+        the UI. ``apply_history_state`` (the only emitter of
+        ``adjustment_state_restored``) already assigns the new image to
+        ``current_image`` before emitting, so reading it here is current.
+        """
+        self._tools_panel.set_adjustments(state, emit_signal=False)
+        self._adjustment_persist_timer.start()
+        current_image = self._image_controller.image_model.get_current_image()
+        if current_image is not None:
+            height, width = current_image.shape[0], current_image.shape[1]
+            self._dimensions_label.setText(f"{width} × {height}")
+            self._megapixels_label.setText(f"{(width * height) / 1_000_000:.1f} MP")
+
+    def _enter_crop_mode(self) -> None:
+        """Show the interactive crop overlay over the full, uncropped image.
+
+        Uses ``get_export_image(apply_crop=False)`` so a previously
+        committed crop does not hide the rest of the frame while the user
+        is re-adjusting it. This is a v1 simplification worth noting: it
+        fetches a full-resolution image on every crop-mode entry, which
+        could be slow for a very large source image -- see
+        docs/planning/implementation-notes/2026-10-13-crop-tool-ui.md.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to crop", 2000)
+            return
+        # Crop/Mask/Heal can never be simultaneously active -- see
+        # _exit_any_interactive_tool_mode's own docstring and
+        # docs/planning/implementation-notes/2026-10-13-healing-tool-ui.md
+        # section 5 (extending the Crop/Mask pairwise check this slice's
+        # predecessor established into a three-way shared helper).
+        self._exit_any_interactive_tool_mode()
+        state = self._image_controller.get_adjustment_state()
+        self._pre_crop_mode_adjustment_state = state
+        crop = state.get("crop") or {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+        uncropped = self._image_controller.get_export_image(apply_crop=False)
+        if uncropped is None:
+            return
+        self._image_view.set_image(uncropped, emit_loaded=False, preserve_view_scale=True)
+        self._image_view.enter_crop_mode(crop)
+        overlay = self._image_view.get_crop_overlay()
+        height, width = uncropped.shape[0], uncropped.shape[1]
+        self._crop_toolbar.set_original_ratio(width / height if height else None)
+        self._crop_toolbar.reset_to_free()
+        if overlay is not None:
+            overlay.set_locked_aspect(None)
+        self._crop_toolbar.show()
+        self._image_toolbar.hide()
+
+    def _apply_crop(self) -> None:
+        """Commit the overlay's current rectangle via on_crop_changed."""
+        overlay = self._image_view.get_crop_overlay()
+        if overlay is not None:
+            rect = overlay.get_rect()
+            self._image_controller.on_crop_changed(rect)
+        self._image_view.exit_crop_mode()
+        self._crop_toolbar.hide()
+        self._image_toolbar.show()
+        self._pre_crop_mode_adjustment_state = None
+        self._status_bar.showMessage("Crop applied", 2000)
+
+    def _cancel_crop(self) -> None:
+        """Exit crop mode without changing the committed crop state."""
+        self._image_view.exit_crop_mode()
+        self._crop_toolbar.hide()
+        self._image_toolbar.show()
+        self._pre_crop_mode_adjustment_state = None
+        image = self._image_controller.get_export_image()
+        if image is not None:
+            self._image_view.set_image(image, emit_loaded=False, preserve_view_scale=True)
+
+    def _on_crop_aspect_ratio_changed(self, ratio) -> None:
+        overlay = self._image_view.get_crop_overlay()
+        if overlay is not None:
+            overlay.set_locked_aspect(ratio)
+
+    # -- Mask mode ----------------------------------------------------------
+
+    def _enter_mask_mode(self) -> None:
+        """Show the interactive mask overlay+toolbar over the current image.
+
+        Unlike crop mode, the canvas keeps showing whatever it is already
+        showing (the normal, fully-adjusted image, including any prior
+        committed mask) -- no uncropped-style image swap is needed; see
+        docs/planning/implementation-notes/2026-10-13-mask-tool-ui.md
+        section 3.5.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to mask", 2000)
+            return
+        # Crop/Mask/Heal can never be simultaneously active -- see
+        # _exit_any_interactive_tool_mode.
+        self._exit_any_interactive_tool_mode()
+
+        state = self._image_controller.get_adjustment_state()
+        mask = state.get("mask") or {}
+        mask_type = mask.get("type", "linear")
+        invert = bool(mask.get("invert", False))
+        exposure = mask.get("exposure", 0.0)
+        contrast = mask.get("contrast", 0.0)
+        saturation = mask.get("saturation", 0.0)
+        clarity = mask.get("clarity", 0.0)
+
+        self._image_view.enter_mask_mode(mask_type, mask)
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is not None and not self._mask_overlay_signal_connected:
+            overlay.geometry_changed.connect(self._on_mask_editing_changed)
+            self._mask_overlay_signal_connected = True
+
+        self._mask_toolbar.set_values(
+            mask_type, invert, exposure, contrast, saturation, clarity
+        )
+        self._mask_toolbar.show()
+        self._image_toolbar.hide()
+
+    def _apply_mask(self) -> None:
+        """Commit the overlay's geometry + toolbar's adjustments via
+        ``on_mask_changed`` -- the ONE real, committed, undoable edit."""
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is not None:
+            mask = overlay.get_geometry()
+            mask.update(self._mask_toolbar.get_adjustments())
+            self._image_controller.on_mask_changed(mask)
+        self._image_view.exit_mask_mode()
+        self._mask_toolbar.hide()
+        self._image_toolbar.show()
+        self._status_bar.showMessage("Mask applied", 2000)
+
+    def _cancel_mask(self) -> None:
+        """Exit mask mode without committing.
+
+        Nothing was ever mutated on the committed engine state while
+        editing (see ``_on_mask_editing_changed``/
+        ``ImageController.preview_mask``), so cancelling only needs to
+        hide the overlay/toolbar and ask the controller to re-display
+        whatever image is still actually current -- there is no stray
+        preview-mode state to roll back.
+        """
+        self._image_view.exit_mask_mode()
+        self._mask_toolbar.hide()
+        self._image_toolbar.show()
+        self._image_controller.refresh_view()
+
+    def _remove_mask(self) -> None:
+        """Commit clearing the mask (``on_mask_changed(None)``) and exit."""
+        self._image_controller.on_mask_changed(None)
+        self._image_view.exit_mask_mode()
+        self._mask_toolbar.hide()
+        self._image_toolbar.show()
+        self._status_bar.showMessage("Mask removed", 2000)
+
+    def _on_mask_type_changed(self, mask_type: str) -> None:
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is not None:
+            overlay.set_mask_type(mask_type)
+        self._on_mask_editing_changed()
+
+    def _on_mask_invert_changed(self, invert: bool) -> None:
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is not None:
+            overlay.set_invert(invert)
+        self._on_mask_editing_changed()
+
+    def _on_mask_adjustments_changed(self, _adjustments: dict) -> None:
+        self._on_mask_editing_changed()
+
+    def _on_mask_editing_changed(self, *_args) -> None:
+        """Live-preview the CURRENT in-progress mask candidate.
+
+        Assembles geometry (from the overlay) + adjustments (from the
+        toolbar) and hands the result to
+        ``ImageController.preview_mask`` -- a display-only call that never
+        touches history or the committed mask state. See
+        docs/planning/implementation-notes/2026-10-13-mask-tool-ui.md
+        section 3.5 for why this, and not ``on_mask_changed``, is used
+        here.
+        """
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is None:
+            return
+        candidate = overlay.get_geometry()
+        candidate.update(self._mask_toolbar.get_adjustments())
+        self._image_controller.preview_mask(candidate)
+
+    # -- Crop/Mask/Heal three-way mutual exclusion --------------------------
+
+    def _exit_any_interactive_tool_mode(self) -> None:
+        """Cancel whichever of Crop/Mask/Heal mode is currently active.
+
+        Crop, Mask, and Heal can never be simultaneously active. Each
+        ``_enter_X_mode`` calls this FIRST, so entering any one of the
+        three tools while mid-edit on either of the OTHER two always
+        discards that other edit (never commits it) -- exactly like
+        clicking its own Cancel button would. A shared helper, rather
+        than three separate pairwise checks, keeps this DRY as a third
+        mode is added (see docs/planning/implementation-notes/
+        2026-10-13-healing-tool-ui.md section 5, which also refactors the
+        prior slice's own Crop<->Mask pairwise checks into this form).
+        """
+        if self._image_view.is_in_crop_mode():
+            self._cancel_crop()
+        if self._image_view.is_in_mask_mode():
+            self._cancel_mask()
+        if self._image_view.is_in_healing_mode():
+            self._cancel_healing()
+
+    # -- Healing mode ---------------------------------------------------------
+
+    def _enter_healing_mode(self) -> None:
+        """Show the interactive healing overlay+toolbar over the current
+        image.
+
+        Mirrors ``_enter_mask_mode`` exactly: like Mask (and unlike Crop),
+        the canvas keeps showing whatever it is already showing -- no
+        image swap is needed, since the live-preview mechanism
+        (``ImageController.preview_heal_spots``) shows exactly the
+        in-progress candidate's effect. See docs/planning/
+        implementation-notes/2026-10-13-healing-tool-ui.md.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to heal", 2000)
+            return
+        # Crop/Mask/Heal can never be simultaneously active.
+        self._exit_any_interactive_tool_mode()
+
+        state = self._image_controller.get_adjustment_state()
+        heal_spots = state.get("heal_spots") or []
+
+        self._image_view.enter_healing_mode(heal_spots)
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None and not self._healing_overlay_signal_connected:
+            overlay.spots_changed.connect(self._on_heal_editing_changed)
+            self._healing_overlay_signal_connected = True
+
+        self._healing_toolbar.set_values("heal", 0.3, 1.0)
+        if overlay is not None:
+            overlay.set_pending_mode("heal")
+            overlay.set_pending_feather(0.3)
+            overlay.set_pending_opacity(1.0)
+        self._healing_toolbar.show()
+        self._image_toolbar.hide()
+
+    def _apply_healing(self) -> None:
+        """Commit the overlay's full spot list via ``on_heal_spots_changed``
+        -- the ONE real, committed, undoable edit."""
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            self._image_controller.on_heal_spots_changed(overlay.get_spots())
+        self._image_view.exit_healing_mode()
+        self._healing_toolbar.hide()
+        self._image_toolbar.show()
+        self._status_bar.showMessage("Healing applied", 2000)
+
+    def _cancel_healing(self) -> None:
+        """Exit healing mode without committing.
+
+        Nothing was ever mutated on the committed engine state while
+        editing (see ``_on_heal_editing_changed``/
+        ``ImageController.preview_heal_spots``), so cancelling only needs
+        to hide the overlay/toolbar and ask the controller to re-display
+        whatever image is still actually current -- mirrors
+        ``_cancel_mask``'s own trivial simplicity exactly.
+        """
+        self._image_view.exit_healing_mode()
+        self._healing_toolbar.hide()
+        self._image_toolbar.show()
+        self._image_controller.refresh_view()
+
+    def _on_heal_remove_last(self) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.remove_last()
+
+    def _on_heal_clear_all(self) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.clear_all()
+
+    def _on_heal_mode_changed(self, mode: str) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.set_pending_mode(mode)
+        # Per spec, every toolbar pending-value-change signal also drives
+        # the live-preview path, even though a mode/feather/opacity change
+        # by itself only affects the NEXT spot placed (not any already-
+        # placed spot) -- see docs/planning/implementation-notes/
+        # 2026-10-13-healing-tool-ui.md. Harmless (and correctly a no-op
+        # on the displayed image) when nothing is placed yet.
+        self._on_heal_editing_changed()
+
+    def _on_heal_feather_changed(self, feather: float) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.set_pending_feather(feather)
+        self._on_heal_editing_changed()
+
+    def _on_heal_opacity_changed(self, opacity: float) -> None:
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is not None:
+            overlay.set_pending_opacity(opacity)
+        self._on_heal_editing_changed()
+
+    def _on_heal_editing_changed(self, *_args) -> None:
+        """Live-preview the CURRENT in-progress heal-spot list.
+
+        Wired to the overlay's ``spots_changed`` signal (emitted on a new
+        spot placement, Remove Last, or Clear All). Hands the overlay's
+        full in-progress list to
+        ``ImageController.preview_heal_spots`` -- a display-only call
+        that never touches history or the committed heal-spot state. See
+        docs/planning/implementation-notes/2026-10-13-healing-tool-ui.md.
+        """
+        overlay = self._image_view.get_healing_overlay()
+        if overlay is None:
+            return
+        self._image_controller.preview_heal_spots(overlay.get_spots())
+
     def _reset_adjustments(self):
         """Handle reset adjustments action."""
         if self._image_controller.has_image():
@@ -693,6 +1339,221 @@ class MainWindow(QMainWindow):
             self._image_controller.restore_adjustment_state({})
             self._adjustment_persist_timer.start()
             self._status_bar.showMessage("Reset to original", 2000)
+
+    def _copy_edit_settings(self):
+        """Handle copy edit settings action.
+
+        Captures the current image's full adjustment-state dict (the same
+        JSON-plain shape ``LibraryCatalogService`` already persists per
+        image) into the single in-memory clipboard slot.
+        """
+        if self._image_controller.has_image():
+            self._copied_adjustment_state = self._image_controller.get_adjustment_state()
+            self._status_bar.showMessage("Copied edit settings", 2000)
+        else:
+            self._status_bar.showMessage("No image to copy edit settings from", 2000)
+
+    def _paste_edit_settings(self):
+        """Handle paste edit settings action.
+
+        Mirrors ``_reset_adjustments``'s exact "replace the current image's
+        entire adjustment state" pattern, but with the copied state instead
+        of ``{}``. A deep copy is passed downstream (rather than the stored
+        clipboard dict itself) so that neither ``ToolsPanel.set_adjustments``
+        nor ``ImageController.restore_adjustment_state`` can leave the
+        clipboard corrupted for a later paste onto a different image --
+        see the implementation note for what was found by inspection about
+        whether either call actually mutates its input.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to paste edit settings to", 2000)
+            return
+        if self._copied_adjustment_state is None:
+            self._status_bar.showMessage(
+                "Nothing to paste; copy edit settings first", 2000
+            )
+            return
+
+        state_for_tools_panel = copy.deepcopy(self._copied_adjustment_state)
+        state_for_controller = copy.deepcopy(self._copied_adjustment_state)
+        self._tools_panel.set_adjustments(state_for_tools_panel, emit_signal=False)
+        self._image_controller.restore_adjustment_state(state_for_controller)
+        self._adjustment_persist_timer.start()
+        self._status_bar.showMessage("Pasted edit settings", 2000)
+
+    def _apply_profile(self, profile_name: str):
+        """Apply a built-in profile's preset adjustment values.
+
+        This is a preset-apply action, not a persistent separate pipeline
+        stage -- see docs/planning/implementation-notes/
+        2026-10-13-profile-selector.md section 1 for the honest scope
+        boundary against real Lightroom Profiles. It mirrors
+        ``_paste_edit_settings``'s exact "replace the current image's
+        entire adjustment state" pattern, with ``BUILTIN_PROFILES``
+        treated as a second clipboard-like source deserving the same
+        defensive-copy treatment (two independent ``copy.deepcopy`` calls,
+        never the stored profile dict itself).
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to apply a profile to", 2000)
+            return
+        profile_state = BUILTIN_PROFILES.get(profile_name)
+        if profile_state is None:
+            self._status_bar.showMessage(f"Unknown profile: {profile_name}", 2000)
+            return
+
+        state_for_tools_panel = copy.deepcopy(profile_state)
+        state_for_controller = copy.deepcopy(profile_state)
+        self._tools_panel.set_adjustments(state_for_tools_panel, emit_signal=False)
+        self._image_controller.restore_adjustment_state(state_for_controller)
+        self._adjustment_persist_timer.start()
+        self._status_bar.showMessage(f"Applied profile: {profile_name}", 2000)
+
+    def _export_preset(self) -> None:
+        """Export the current image's adjustment state as a preset file.
+
+        Single-file export of one user-authored preset (analogous to
+        saving a Lightroom .xmp preset) -- NOT a browsable, persistent
+        preset library. See docs/planning/implementation-notes/
+        2026-10-13-import-export-presets.md section 1 for the full scope
+        boundary. Reuses ``ImageController.get_adjustment_state()`` --
+        the same whole-state dict used by Copy Edit Settings and already
+        persisted per image -- wrapped in a small versioned JSON envelope.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to export a preset from", 2000)
+            return
+
+        default_name = "preset.json"
+        source_path = self._image_controller.image_model.file_path or ""
+        if source_path:
+            default_name = f"{Path(source_path).stem}_preset.json"
+        start_dir = self._settings_service.get_last_preset_dir()
+        default_path = str(Path(start_dir) / default_name)
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Preset", default_path, PRESET_FILE_FILTER
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+
+        if not confirm_overwrite_if_needed(self, path, self._settings_service):
+            self._status_bar.showMessage("Export preset cancelled", 2000)
+            return
+
+        preset_name = Path(path).stem
+        envelope = {
+            "photoedit_preset_version": PRESET_FILE_VERSION,
+            "name": preset_name,
+            "adjustments": self._image_controller.get_adjustment_state(),
+        }
+
+        try:
+            Path(path).write_text(json.dumps(envelope, indent=2), encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Failed to write preset file %s: %s", path, exc)
+            QMessageBox.critical(
+                self, "Export Preset Failed", f"Failed to write preset file:\n{exc}"
+            )
+            return
+
+        self._settings_service.set_last_preset_dir(path)
+        self._status_bar.showMessage(f"Exported preset: {preset_name}", 2000)
+
+    def _import_preset(self) -> None:
+        """Import a preset file and apply it to the current image.
+
+        Mirrors ``_apply_profile``/``_paste_edit_settings``'s exact
+        "replace the current image's entire adjustment state" pattern,
+        with a user-chosen preset file as the source instead of a
+        built-in profile or the in-memory clipboard. The file's content
+        is arbitrary, user-supplied data -- every parsing/validation step
+        below is defensive and reports a clear message rather than
+        letting a malformed file crash the app or partially apply.
+        """
+        if not self._image_controller.has_image():
+            self._status_bar.showMessage("No image to apply a preset to", 2000)
+            return
+
+        start_dir = self._settings_service.get_last_preset_dir()
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Preset", start_dir, PRESET_FILE_FILTER
+        )
+        if not path:
+            return
+
+        try:
+            raw_text = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Failed to read preset file %s: %s", path, exc)
+            QMessageBox.critical(
+                self, "Import Preset Failed", f"Failed to read preset file:\n{exc}"
+            )
+            return
+
+        try:
+            envelope = json.loads(raw_text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            QMessageBox.warning(
+                self,
+                "Import Preset Failed",
+                f"This file is not a valid preset (not valid JSON):\n{exc}",
+            )
+            return
+
+        if not isinstance(envelope, dict):
+            QMessageBox.warning(
+                self,
+                "Import Preset Failed",
+                "This file is not a valid preset (expected a JSON object).",
+            )
+            return
+
+        version = envelope.get("photoedit_preset_version")
+        if version != PRESET_FILE_VERSION:
+            if isinstance(version, int) and version > PRESET_FILE_VERSION:
+                message = (
+                    "This preset was made with a newer version of PhotoEdit "
+                    "and cannot be imported here."
+                )
+            else:
+                message = "This file is not a recognized PhotoEdit preset."
+            QMessageBox.warning(self, "Import Preset Failed", message)
+            return
+
+        adjustments = envelope.get("adjustments")
+        if not isinstance(adjustments, dict):
+            QMessageBox.warning(
+                self,
+                "Import Preset Failed",
+                "This preset file is missing its adjustment data.",
+            )
+            return
+
+        preset_name = envelope.get("name")
+        if not isinstance(preset_name, str) or not preset_name:
+            preset_name = Path(path).stem
+
+        state_for_tools_panel = copy.deepcopy(adjustments)
+        state_for_controller = copy.deepcopy(adjustments)
+        self._tools_panel.set_adjustments(state_for_tools_panel, emit_signal=False)
+        self._image_controller.restore_adjustment_state(state_for_controller)
+        self._adjustment_persist_timer.start()
+        self._settings_service.set_last_preset_dir(path)
+        self._status_bar.showMessage(f"Imported preset: {preset_name}", 2000)
+
+    def _show_preferences(self) -> None:
+        """Open the Preferences dialog."""
+        dialog = PreferencesDialog(
+            settings_service=self._settings_service, parent=self
+        )
+        if dialog.exec():
+            self._status_bar.showMessage(
+                "Preferences saved (preview size changes apply after restart)",
+                3000,
+            )
 
     def _fit_to_window(self):
         """Handle fit to window action."""
@@ -709,6 +1570,24 @@ class MainWindow(QMainWindow):
     def _zoom_out(self):
         """Handle zoom out action."""
         self._image_controller.zoom_out()
+
+    def _next_photo(self) -> None:
+        """Advance to the next photo in the filmstrip's currently displayed
+        (filtered/sorted/searched) order. Routes through
+        ``FilmstripView.select_next()``, which moves the list's current
+        row and relies on the existing ``currentItemChanged`` ->
+        ``image_selected`` -> ``_on_library_image_selected`` path to load
+        the image -- the exact same path a filmstrip click already uses.
+        No wraparound: at the last photo, just show a status message
+        (matching Lightroom's own non-wrapping behavior).
+        """
+        if not self._filmstrip_view.select_next():
+            self._status_bar.showMessage("Already at the last photo", 2000)
+
+    def _previous_photo(self) -> None:
+        """Mirror of ``_next_photo`` -- moves to the previous photo."""
+        if not self._filmstrip_view.select_previous():
+            self._status_bar.showMessage("Already at the first photo", 2000)
 
     def _toggle_library_panel(self):
         """Toggle library panel visibility."""
@@ -821,6 +1700,9 @@ class MainWindow(QMainWindow):
             "saturation": float(values.get("saturation", 0.0)),
             "vibrance": float(values.get("vibrance", 0.0)),
             "tone_curve": values.get("tone_curve"),
+            "tone_curve_red": values.get("tone_curve_red"),
+            "tone_curve_green": values.get("tone_curve_green"),
+            "tone_curve_blue": values.get("tone_curve_blue"),
             "hsl": values.get("hsl"),
             "color_grading": values.get("color_grading"),
         }
@@ -911,6 +1793,7 @@ class MainWindow(QMainWindow):
         self._image_preview_cache_service.remove_orphaned_cache(
             self._library_controller.referenced_adjustment_preview_cache_keys()
         )
+        self._settings_service.set_clean_shutdown(True)
         self._settings_service.sync()
         self._library_controller.cleanup()
         self._library_view.cleanup()

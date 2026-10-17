@@ -17,6 +17,9 @@ from PyQt6.QtWidgets import (
 
 from src.utils.color_pipeline import LinearImage, to_linear
 from src.processing.display_frame import DisplayFrame, linear_to_display_rgb
+from src.views.widgets.crop_overlay import CropOverlay
+from src.views.widgets.healing_overlay import HealingOverlay
+from src.views.widgets.mask_overlay import MaskOverlay
 
 
 logger = logging.getLogger(__name__)
@@ -149,7 +152,10 @@ class ImageView(QWidget):
         self._is_panning: bool = False
         self._pan_button: Optional[Qt.MouseButton] = None
         self._loading_overlay: Optional[_LoadingOverlay] = None
-        
+        self._crop_overlay: Optional[CropOverlay] = None
+        self._mask_overlay: Optional[MaskOverlay] = None
+        self._healing_overlay: Optional[HealingOverlay] = None
+
         self._setup_ui()
 
     def _setup_ui(self):
@@ -188,6 +194,16 @@ class ImageView(QWidget):
         self._set_array(arr, preserve_view_scale=preserve_view_scale)
         if emit_loaded:
             self.image_loaded.emit()
+
+    def clear(self) -> None:
+        """Reset to the "No image loaded" placeholder state -- the same
+        empty state ``_ImageCanvas`` starts in before ``set_image``/
+        ``set_display_frame`` has ever been called (see
+        ``ImageController.clear_image``, used after the currently-open
+        image's library entry is removed or deleted from disk)."""
+        self._pixmap = None
+        self._display_frame = None
+        self._image_canvas.clear()
 
     def set_display_frame(
         self,
@@ -397,6 +413,124 @@ class ImageView(QWidget):
         if not self.has_image():
             return
         self._image_canvas.set_pixmap(self._pixmap, self._zoom_factor)
+        if self._crop_overlay is not None and self._crop_overlay.isVisible():
+            self._crop_overlay.resize(self._image_canvas.size())
+        if self._mask_overlay is not None and self._mask_overlay.isVisible():
+            self._mask_overlay.resize(self._image_canvas.size())
+        if self._healing_overlay is not None and self._healing_overlay.isVisible():
+            self._healing_overlay.resize(self._image_canvas.size())
+
+    # -- Crop mode --------------------------------------------------------
+
+    def enter_crop_mode(self, initial_rect: dict) -> None:
+        """Show the interactive crop overlay over the canvas.
+
+        The caller (``MainWindow``) is responsible for having already
+        displayed the full, uncropped image (via
+        ``ImageController.get_export_image(apply_crop=False)``) before
+        calling this -- ``ImageView`` itself has no opinion about
+        adjustment state.
+        """
+        if self._crop_overlay is None:
+            self._crop_overlay = CropOverlay(self._image_canvas)
+        self._crop_overlay.resize(self._image_canvas.size())
+        self._crop_overlay.move(0, 0)
+        self._crop_overlay.set_rect(
+            initial_rect.get("x0", 0.0),
+            initial_rect.get("y0", 0.0),
+            initial_rect.get("x1", 1.0),
+            initial_rect.get("y1", 1.0),
+        )
+        self._crop_overlay.show()
+        self._crop_overlay.raise_()
+
+    def exit_crop_mode(self) -> None:
+        """Hide the crop overlay (kept alive, not destroyed, for reuse)."""
+        if self._crop_overlay is not None:
+            self._crop_overlay.hide()
+
+    def is_in_crop_mode(self) -> bool:
+        return self._crop_overlay is not None and self._crop_overlay.isVisible()
+
+    def get_crop_overlay(self) -> Optional[CropOverlay]:
+        return self._crop_overlay
+
+    # -- Mask mode --------------------------------------------------------
+
+    def enter_mask_mode(self, initial_type: str, initial_geometry: dict) -> None:
+        """Show the interactive mask overlay over the canvas.
+
+        Mirrors ``enter_crop_mode`` exactly. Unlike crop mode, the caller
+        does NOT need to have swapped in an "unmasked" display image
+        first -- the canvas keeps showing whatever it was already
+        showing (the normal, fully-adjusted image); only the overlay
+        itself is new. See docs/planning/implementation-notes/
+        2026-10-13-mask-tool-ui.md section 3.5 for why.
+        """
+        if self._mask_overlay is None:
+            self._mask_overlay = MaskOverlay(self._image_canvas)
+        self._mask_overlay.resize(self._image_canvas.size())
+        self._mask_overlay.move(0, 0)
+        self._mask_overlay.set_mask_type(initial_type)
+        self._mask_overlay.set_invert(bool(initial_geometry.get("invert", False)))
+        if initial_type == "radial":
+            self._mask_overlay.set_radial_geometry(
+                initial_geometry.get("cx", 0.5),
+                initial_geometry.get("cy", 0.5),
+                initial_geometry.get("rx", 0.25),
+                initial_geometry.get("ry", 0.25),
+                initial_geometry.get("feather", 0.5),
+            )
+        else:
+            self._mask_overlay.set_linear_geometry(
+                initial_geometry.get("x0", 0.3),
+                initial_geometry.get("y0", 0.5),
+                initial_geometry.get("x1", 0.7),
+                initial_geometry.get("y1", 0.5),
+            )
+        self._mask_overlay.show()
+        self._mask_overlay.raise_()
+
+    def exit_mask_mode(self) -> None:
+        """Hide the mask overlay (kept alive, not destroyed, for reuse)."""
+        if self._mask_overlay is not None:
+            self._mask_overlay.hide()
+
+    def is_in_mask_mode(self) -> bool:
+        return self._mask_overlay is not None and self._mask_overlay.isVisible()
+
+    def get_mask_overlay(self) -> Optional[MaskOverlay]:
+        return self._mask_overlay
+
+    # -- Healing mode -------------------------------------------------------
+
+    def enter_healing_mode(self, initial_spots: list) -> None:
+        """Show the interactive healing overlay over the canvas.
+
+        Mirrors ``enter_crop_mode``/``enter_mask_mode`` exactly. Like mask
+        mode (and unlike crop mode), the caller does NOT need to have
+        swapped in any different display image first -- the canvas keeps
+        showing whatever it was already showing; only the overlay itself
+        is new.
+        """
+        if self._healing_overlay is None:
+            self._healing_overlay = HealingOverlay(self._image_canvas)
+        self._healing_overlay.resize(self._image_canvas.size())
+        self._healing_overlay.move(0, 0)
+        self._healing_overlay.set_spots(initial_spots)
+        self._healing_overlay.show()
+        self._healing_overlay.raise_()
+
+    def exit_healing_mode(self) -> None:
+        """Hide the healing overlay (kept alive, not destroyed, for reuse)."""
+        if self._healing_overlay is not None:
+            self._healing_overlay.hide()
+
+    def is_in_healing_mode(self) -> bool:
+        return self._healing_overlay is not None and self._healing_overlay.isVisible()
+
+    def get_healing_overlay(self) -> Optional[HealingOverlay]:
+        return self._healing_overlay
 
     def _preserve_scale_after_pixmap_swap(
         self,

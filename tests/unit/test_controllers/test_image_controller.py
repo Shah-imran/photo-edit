@@ -28,6 +28,89 @@ def qapp():
     yield app
 
 
+@pytest.fixture
+def isolated_settings(tmp_path):
+    """Create a QSettings instance backed by a per-test INI file."""
+    ini_path = tmp_path / "photoedit-test.ini"
+    settings = QSettings(str(ini_path), QSettings.Format.IniFormat)
+    yield settings
+    settings.sync()
+
+
+@pytest.fixture
+def settings_service(isolated_settings):
+    """Provide a SettingsService bound to the isolated QSettings."""
+    return SettingsService(isolated_settings)
+
+
+class TestImageControllerProxySizePreferences:
+    """ImageController wires proxy-size preferences into its two workers."""
+
+    def test_stored_preferences_reach_both_processing_workers(
+        self, qapp, settings_service
+    ):
+        settings_service.set_proxy_max_size(2000)
+        settings_service.set_interactive_proxy_max_size(900)
+        view = ImageView()
+        controller = ImageController(
+            view, settings_service=settings_service, use_threading=True
+        )
+        try:
+            assert controller._processing_worker.proxy_manager.max_size == 2000
+            assert (
+                controller._processing_worker.proxy_manager.interactive_max_size
+                == 900
+            )
+            assert (
+                controller._final_processing_worker.proxy_manager.max_size == 2000
+            )
+            assert (
+                controller._final_processing_worker.proxy_manager
+                .interactive_max_size
+                == 900
+            )
+        finally:
+            controller.cleanup()
+
+    def test_no_settings_service_behaves_unchanged(self, qapp):
+        from src.processing.proxy_manager import ProxyManager
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=True)
+        try:
+            assert (
+                controller._processing_worker.proxy_manager.max_size
+                == ProxyManager.DEFAULT_PROXY_SIZE
+            )
+            assert (
+                controller._processing_worker.proxy_manager.interactive_max_size
+                == ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE
+            )
+        finally:
+            controller.cleanup()
+
+    def test_settings_service_without_stored_prefs_behaves_unchanged(
+        self, qapp, settings_service
+    ):
+        from src.processing.proxy_manager import ProxyManager
+
+        view = ImageView()
+        controller = ImageController(
+            view, settings_service=settings_service, use_threading=True
+        )
+        try:
+            assert (
+                controller._processing_worker.proxy_manager.max_size
+                == ProxyManager.DEFAULT_PROXY_SIZE
+            )
+            assert (
+                controller._processing_worker.proxy_manager.interactive_max_size
+                == ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE
+            )
+        finally:
+            controller.cleanup()
+
+
 class TestImageController:
     """Test cases for ImageController class."""
 
@@ -165,9 +248,31 @@ class TestImageController:
             "saturation": 0.0,
             "vibrance": 0.0,
             "texture": 0.0,
+            "clarity": 0.0,
+            "dehaze": 0.0,
+            "vignette": 0.0,
+            "grain": 0.0,
+            "sharpening": 0.0,
+            "luminance_nr": 0.0,
+            "color_nr": 0.0,
+            "remove_ca": 0.0,
+            "defringe": 0.0,
+            "straighten": 0.0,
+            "distortion": 0.0,
+            "vertical": 0.0,
+            "horizontal": 0.0,
+            "scale": 100.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_red": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_green": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_blue": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
+            "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
+            "mask": None,
+            "heal_spots": [],
         }
         controller.cleanup()
 
@@ -199,9 +304,31 @@ class TestImageController:
             "saturation": 20.0,
             "vibrance": 8.0,
             "texture": 0.0,
+            "clarity": 0.0,
+            "dehaze": 0.0,
+            "vignette": 0.0,
+            "grain": 0.0,
+            "sharpening": 0.0,
+            "luminance_nr": 0.0,
+            "color_nr": 0.0,
+            "remove_ca": 0.0,
+            "defringe": 0.0,
+            "straighten": 0.0,
+            "distortion": 0.0,
+            "vertical": 0.0,
+            "horizontal": 0.0,
+            "scale": 100.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
             "tone_curve": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_red": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_green": [[0.0, 0.0], [1.0, 1.0]],
+            "tone_curve_blue": [[0.0, 0.0], [1.0, 1.0]],
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
+            "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
+            "mask": None,
+            "heal_spots": [],
         }
         assert controller.image_model.get_current_image() is not None
         assert controller.can_undo() is False
@@ -520,6 +647,12 @@ class TestImageController:
         rendered = np.full_like(original, 0.75)
         previous = original.copy()
         controller._pending_history_previous_image = previous
+        # The real capture flow (_capture_pending_history_state) snapshots
+        # get_adjustment_state() at the same moment it snapshots the image
+        # -- replicate that here since this test sets
+        # _pending_history_previous_image directly rather than going
+        # through apply_adjustments().
+        controller._pending_history_previous_state = controller.get_adjustment_state()
         controller._pending_final_request_id = 7
         controller._exposure_params = {"exposure": 1.0}
         controller._color_params = {"saturation": 0.0}
@@ -851,6 +984,9 @@ class TestImageController:
 
         rendered = np.full_like(original, 0.8)
         controller._pending_history_previous_image = original
+        # See the matching comment in
+        # test_threaded_final_render_commits_history_without_reprocessing.
+        controller._pending_history_previous_state = controller.get_adjustment_state()
         controller._pending_final_request_id = 42
         controller._exposure_params = {"exposure": 1.0}
         controller._color_params = {"saturation": 0.0}
@@ -934,6 +1070,150 @@ class TestImageController:
         assert controller._final_render_timer.isActive() is False
         assert controller._pending_final_request_id == -1
         assert len(fake_debouncer.calls) == 1
+        controller.cleanup()
+
+
+class TestImageControllerPerChannelCurves:
+    """Per-channel (R/G/B) Tone Curve state round-trip (PDF section 12,
+    Phase E) -- mirrors ``TestImageController``'s existing master-curve
+    tests above.
+    """
+
+    def test_get_adjustment_state_includes_identity_channel_keys(self, qapp):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+
+        state = controller.get_adjustment_state()
+
+        assert state["tone_curve_red"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_green"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_blue"] == [[0.0, 0.0], [1.0, 1.0]]
+        controller.cleanup()
+
+    def test_restore_adjustment_state_round_trips_all_four_channels(
+        self, qapp, sample_image
+    ):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {
+                "tone_curve": [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]],
+                "tone_curve_red": [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]],
+                "tone_curve_green": [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]],
+                "tone_curve_blue": [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]],
+            }
+        )
+
+        state = controller.get_adjustment_state()
+        assert state["tone_curve"] == [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        assert state["tone_curve_red"] == [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]]
+        assert state["tone_curve_green"] == [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]]
+        assert state["tone_curve_blue"] == [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]]
+        controller.cleanup()
+
+    def test_restore_adjustment_state_tolerates_malformed_channel_curves(
+        self, qapp, sample_image
+    ):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"tone_curve_red": "not a curve", "tone_curve_green": 42}
+        )
+
+        state = controller.get_adjustment_state()
+        assert state["tone_curve_red"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_green"] == [[0.0, 0.0], [1.0, 1.0]]
+        controller.cleanup()
+
+    def test_on_curve_changed_with_channel_only_updates_that_channel(self, qapp):
+        import numpy as np
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image(
+            "sample.jpg", np.full((4, 4, 3), 0.5, dtype=np.float32)
+        )
+
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]], channel="master"
+        )
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], channel="green"
+        )
+
+        state = controller.get_adjustment_state()
+        assert state["tone_curve"] == [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        assert state["tone_curve_green"] == [[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]]
+        assert state["tone_curve_red"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_blue"] == [[0.0, 0.0], [1.0, 1.0]]
+        controller.cleanup()
+
+    def test_on_curve_changed_red_only_leaves_green_blue_pixels_untouched(
+        self, qapp
+    ):
+        import numpy as np
+
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        mid_gray = np.full((4, 4, 3), 0.5, dtype=np.float32)
+        controller._apply_loaded_image("sample.jpg", mid_gray)
+
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.85], [1.0, 1.0]], channel="red"
+        )
+
+        exported = controller.get_export_image()
+        original = controller.image_model.get_original_image()
+        np.testing.assert_allclose(
+            exported[..., 1], original[..., 1], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            exported[..., 2], original[..., 2], atol=1e-6
+        )
+        assert not np.allclose(exported[..., 0], original[..., 0], atol=1e-4)
+        controller.cleanup()
+
+    def test_undo_redo_round_trips_per_channel_curves(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], channel="red"
+        )
+        controller.commit_adjustments()
+        first_red = controller.get_adjustment_state()["tone_curve_red"]
+
+        controller.on_curve_changed(
+            [[0.0, 0.0], [0.5, 0.3], [1.0, 1.0]], channel="red"
+        )
+        controller.commit_adjustments()
+        second_red = controller.get_adjustment_state()["tone_curve_red"]
+        assert second_red != first_red
+
+        controller.undo()
+        assert controller.get_adjustment_state()["tone_curve_red"] == first_red
+
+        controller.redo()
+        assert controller.get_adjustment_state()["tone_curve_red"] == second_red
+        controller.cleanup()
+
+    def test_reset_to_original_clears_all_channel_curves(self, qapp, sample_image):
+        view = ImageView()
+        controller = ImageController(view, use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_curve_changed([[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]], "red")
+        controller.on_curve_changed([[0.0, 0.0], [0.5, 0.2], [1.0, 1.0]], "blue")
+
+        controller.reset_to_original()
+
+        state = controller.get_adjustment_state()
+        assert state["tone_curve_red"] == [[0.0, 0.0], [1.0, 1.0]]
+        assert state["tone_curve_blue"] == [[0.0, 0.0], [1.0, 1.0]]
         controller.cleanup()
 
 
@@ -1074,3 +1354,1235 @@ class TestImageControllerTexture:
         controller = ImageController(ImageView(), use_threading=False)
         controller.restore_adjustment_state({"exposure": 1.0})
         assert controller.get_adjustment_state()["texture"] == 0.0
+
+
+class TestImageControllerClarity:
+    def test_clarity_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original = controller.image_model.get_original_image().copy()
+        original[40:60, 40:60] *= 0.6
+        controller.image_model.set_original_image(original)
+        controller.restore_adjustment_state({"clarity": 45.0})
+        assert controller.get_adjustment_state()["clarity"] == 45.0
+        assert not np.array_equal(controller.get_export_image(), original)
+
+    def test_missing_clarity_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["clarity"] == 0.0
+
+
+class TestImageControllerDehaze:
+    def test_dehaze_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original = controller.image_model.get_original_image().copy()
+        original[40:60, 40:60] *= 0.6
+        controller.image_model.set_original_image(original)
+        controller.restore_adjustment_state({"dehaze": 45.0})
+        assert controller.get_adjustment_state()["dehaze"] == 45.0
+        assert not np.array_equal(controller.get_export_image(), original)
+
+    def test_missing_dehaze_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["dehaze"] == 0.0
+
+
+class TestImageControllerVignette:
+    def test_vignette_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original = controller.image_model.get_original_image().copy()
+        original[40:60, 40:60] *= 0.6
+        controller.image_model.set_original_image(original)
+        controller.restore_adjustment_state({"vignette": 45.0})
+        assert controller.get_adjustment_state()["vignette"] == 45.0
+        assert not np.array_equal(controller.get_export_image(), original)
+
+    def test_missing_vignette_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["vignette"] == 0.0
+
+    def test_vignette_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            vignette_params={"vignette": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerGrain:
+    def test_grain_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original = controller.image_model.get_original_image().copy()
+        controller.restore_adjustment_state({"grain": 45.0})
+        assert controller.get_adjustment_state()["grain"] == 45.0
+        assert not np.array_equal(controller.get_export_image(), original)
+
+    def test_missing_grain_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["grain"] == 0.0
+
+    def test_grain_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            grain_params={"grain": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerSharpening:
+    def test_sharpening_round_trips_and_reaches_export(self, qapp):
+        # A flat/constant image (e.g. the shared ``sample_image`` fixture)
+        # is exactly the case Sharpening's masking safeguard is meant to
+        # leave unchanged, so this uses an image with real edges to confirm
+        # the parameter actually reaches ``get_export_image()``.
+        from PIL import Image as PILImage
+
+        edge_image = PILImage.new("RGB", (100, 100), color="red")
+        for x in range(50, 100):
+            for y in range(100):
+                edge_image.putpixel((x, y), (0, 255, 0))
+
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(edge_image))
+        original = controller.image_model.get_original_image().copy()
+        controller.restore_adjustment_state({"sharpening": 45.0})
+        assert controller.get_adjustment_state()["sharpening"] == 45.0
+        assert not np.array_equal(controller.get_export_image(), original)
+
+    def test_missing_sharpening_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["sharpening"] == 0.0
+
+    def test_sharpening_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            sharpening_params={"sharpening": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerLuminanceNR:
+    def test_luminance_nr_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"luminance_nr": 45.0})
+        assert controller.get_adjustment_state()["luminance_nr"] == 45.0
+        # The luminance NR params are at least threaded through to export,
+        # even though the shared flat sample_image has no noise for the
+        # filter to visibly act on.
+        assert controller.get_export_image() is not None
+
+    def test_missing_luminance_nr_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["luminance_nr"] == 0.0
+
+    def test_luminance_nr_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            luminance_nr_params={"luminance_nr": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerColorNR:
+    def test_color_nr_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"color_nr": 45.0})
+        assert controller.get_adjustment_state()["color_nr"] == 45.0
+        # The color NR params are at least threaded through to export,
+        # even though the shared flat sample_image has no chroma noise for
+        # the filter to visibly act on.
+        assert controller.get_export_image() is not None
+
+    def test_missing_color_nr_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["color_nr"] == 0.0
+
+    def test_color_nr_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            color_nr_params={"color_nr": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerRemoveCA:
+    """Phase H (Optics) -- Remove Chromatic Aberration."""
+
+    def test_remove_ca_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"remove_ca": 45.0})
+        assert controller.get_adjustment_state()["remove_ca"] == 45.0
+        assert controller.get_export_image() is not None
+
+    def test_missing_remove_ca_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["remove_ca"] == 0.0
+
+    def test_remove_ca_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            remove_ca_params={"remove_ca": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerDefringe:
+    """Phase H (Optics) -- Defringe."""
+
+    def test_defringe_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"defringe": 45.0})
+        assert controller.get_adjustment_state()["defringe"] == 45.0
+        assert controller.get_export_image() is not None
+
+    def test_missing_defringe_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["defringe"] == 0.0
+
+    def test_defringe_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            defringe_params={"defringe": 40.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerStraighten:
+    """Phase I (Geometry) -- Straighten."""
+
+    def test_straighten_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"straighten": 12.0})
+        assert controller.get_adjustment_state()["straighten"] == 12.0
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape == pil_to_linear(sample_image).shape
+
+    def test_missing_straighten_restores_identity(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        assert controller.get_adjustment_state()["straighten"] == 0.0
+
+    def test_straighten_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            straighten_params={"straighten": 8.0}, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+
+class TestImageControllerGeometry:
+    """Phase I (Geometry) -- Distortion/Vertical/Horizontal/Scale/Offset.
+    See docs/planning/implementation-notes/
+    2026-10-13-geometry-processor.md."""
+
+    _ALL_GEOMETRY = {
+        "distortion": 40.0,
+        "vertical": -30.0,
+        "horizontal": 20.0,
+        "scale": 120.0,
+        "offset_x": 10.0,
+        "offset_y": -5.0,
+    }
+
+    def test_geometry_round_trips_and_reaches_export(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state(self._ALL_GEOMETRY)
+        state = controller.get_adjustment_state()
+        for key, value in self._ALL_GEOMETRY.items():
+            assert state[key] == value
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape == pil_to_linear(sample_image).shape
+
+    def test_missing_geometry_restores_identity_defaults(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller.restore_adjustment_state({"exposure": 1.0})
+        state = controller.get_adjustment_state()
+        assert state["distortion"] == 0.0
+        assert state["vertical"] == 0.0
+        assert state["horizontal"] == 0.0
+        assert state["scale"] == 100.0
+        assert state["offset_x"] == 0.0
+        assert state["offset_y"] == 0.0
+
+    def test_geometry_undo_restores_previous_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            geometry_params=self._ALL_GEOMETRY, add_to_history=True
+        )
+        assert controller.can_undo() is True
+        assert controller.undo() is True
+
+    def test_geometry_scale_identity_alone_is_not_a_pending_change(
+        self, qapp, sample_image
+    ):
+        """scale=100 is Geometry's own identity value, not 0.0 -- make
+        sure the "any pending change" bookkeeping compares against each
+        key's own default (not a bare 0.0) so a restored state sitting
+        exactly at every identity value is correctly treated as "no
+        changes", exercising the same bug class a naive ``!= 0.0`` check
+        over all of ``_ADJUSTMENT_DEFAULTS`` would hit for ``scale``."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.restore_adjustment_state({"scale": 100.0})
+        assert controller._has_pending_adjustment_changes() is False
+
+    def test_geometry_runs_before_straighten_pipeline_order(
+        self, qapp, sample_image
+    ):
+        """Pipeline-order regression: Geometry and Straighten combined
+        must differ from applying either alone, and from applying them
+        in a different relative order would be indistinguishable at the
+        processor level -- but the controller must at least route both
+        into the single recompute chain without skipping either."""
+        controller = ImageController(ImageView(), use_threading=False)
+        distinct = pil_to_linear(sample_image).copy()
+        distinct[20:40, 60:80] = 0.0  # off-center detail so warps are visible
+        controller._apply_loaded_image("sample.jpg", distinct)
+
+        geometry_only = controller.get_export_image()
+        controller.restore_adjustment_state({"distortion": 60.0})
+        after_geometry = controller.get_export_image()
+        controller.restore_adjustment_state(
+            {"distortion": 60.0, "straighten": 15.0}
+        )
+        after_both = controller.get_export_image()
+
+        assert not np.array_equal(after_geometry, geometry_only)
+        assert not np.array_equal(after_both, after_geometry)
+        assert after_both.shape == pil_to_linear(sample_image).shape
+
+
+class TestImageControllerCrop:
+    """Phase I (Geometry and Crop), slice 1 -- the data/processing layer
+    for the Crop tool. See docs/planning/implementation-notes/
+    2026-10-13-crop-processor.md."""
+
+    def test_default_crop_is_full_frame(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_restore_adjustment_state_applies_crop(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"crop": {"x0": 0.1, "y0": 0.2, "x1": 0.8, "y1": 0.9}}
+        )
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.1,
+            "y0": 0.2,
+            "x1": 0.8,
+            "y1": 0.9,
+        }
+
+    def test_missing_crop_key_defaults_to_full_frame(self, qapp, sample_image):
+        """Backward compatibility: an old catalog/preset payload that
+        pre-dates this slice and omits "crop" entirely must default
+        cleanly to the full-frame rectangle -- the same pattern every
+        prior non-flat-key addition (tone_curve/hsl/color_grading)
+        already established."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"exposure": 1.0})
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_restore_adjustment_state_tolerates_malformed_crop(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"crop": "not a dict"})
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_restore_adjustment_state_clamps_out_of_range_crop(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"crop": {"x0": -0.5, "y0": -0.5, "x1": 1.5, "y1": 1.5}}
+        )
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_crop_reaches_export_image_and_shrinks_it(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original_shape = pil_to_linear(sample_image).shape
+
+        controller.restore_adjustment_state(
+            {"crop": {"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75}}
+        )
+
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape != original_shape
+        assert export.shape[0] < original_shape[0]
+        assert export.shape[1] < original_shape[1]
+
+    def test_on_crop_changed_round_trips_and_adds_to_history(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_crop_changed({"x0": 0.1, "y0": 0.1, "x1": 0.6, "y1": 0.6})
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.1,
+            "y0": 0.1,
+            "x1": 0.6,
+            "y1": 0.6,
+        }
+        assert controller.can_undo() is True
+
+    def test_on_crop_changed_normalizes_defensively(self, qapp, sample_image):
+        """on_crop_changed must not trust its caller, mirroring
+        CropProcessor's own clamp/swap logic."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_crop_changed({"x0": 0.9, "y0": -1.0, "x1": 0.1, "y1": 2.0})
+
+        state = controller.get_adjustment_state()["crop"]
+        assert state["x0"] == 0.1
+        assert state["x1"] == 0.9
+        assert state["y0"] == 0.0
+        assert state["y1"] == 1.0
+
+    def test_crop_undo_restores_full_crop_state(self, qapp, sample_image):
+        """Crop to rect A, then crop to rect B, undo, assert the crop
+        state equals rect A's values, not rect B's -- mirrors the core
+        state-aware undo/redo regression pattern."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        rect_a = {"x0": 0.1, "y0": 0.1, "x1": 0.5, "y1": 0.5}
+        rect_b = {"x0": 0.2, "y0": 0.2, "x1": 0.6, "y1": 0.6}
+        controller.on_crop_changed(rect_a)
+        controller.on_crop_changed(rect_b)
+
+        assert controller.get_adjustment_state()["crop"] == rect_b
+
+        assert controller.undo() is True
+
+        assert controller.get_adjustment_state()["crop"] == rect_a
+
+    def test_crop_undo_restores_image_shape_too(self, qapp, sample_image):
+        """Undo must restore both the crop state AND the actual image
+        shape, not just the pixel-buffer-only behavior this slice's
+        state-aware undo/redo infrastructure was built to fix."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original_shape = pil_to_linear(sample_image).shape
+
+        controller.on_crop_changed({"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75})
+        cropped_shape = controller.get_current_image().shape
+        assert cropped_shape != original_shape
+
+        controller.on_crop_changed({"x0": 0.1, "y0": 0.1, "x1": 0.4, "y1": 0.4})
+        smaller_shape = controller.get_current_image().shape
+        assert smaller_shape != cropped_shape
+
+        assert controller.undo() is True
+
+        assert controller.get_current_image().shape == cropped_shape
+
+    def test_reset_to_original_clears_crop(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_crop_changed({"x0": 0.1, "y0": 0.1, "x1": 0.5, "y1": 0.5})
+
+        controller.reset_to_original()
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+    def test_loading_a_different_image_clears_crop(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_crop_changed({"x0": 0.1, "y0": 0.1, "x1": 0.5, "y1": 0.5})
+
+        controller._apply_loaded_image("other.jpg", pil_to_linear(sample_image))
+
+        assert controller.get_adjustment_state()["crop"] == {
+            "x0": 0.0,
+            "y0": 0.0,
+            "x1": 1.0,
+            "y1": 1.0,
+        }
+
+
+class TestImageControllerMask:
+    """Phase J (Masking), slice 1 -- the data/processing layer for a
+    single-slot linear/radial local-adjustment mask. See
+    docs/planning/implementation-notes/2026-10-13-mask-processor.md."""
+
+    _LINEAR_MASK = {
+        "type": "linear",
+        "invert": False,
+        "x0": 0.1,
+        "y0": 0.2,
+        "x1": 0.8,
+        "y1": 0.9,
+        "exposure": 1.0,
+        "contrast": 10.0,
+        "saturation": 20.0,
+        "clarity": 5.0,
+    }
+    _RADIAL_MASK = {
+        "type": "radial",
+        "invert": False,
+        "cx": 0.5,
+        "cy": 0.5,
+        "rx": 0.3,
+        "ry": 0.2,
+        "feather": 0.4,
+        "exposure": -1.0,
+        "contrast": 0.0,
+        "saturation": 0.0,
+        "clarity": 0.0,
+    }
+
+    def test_default_mask_is_none(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        assert controller.get_adjustment_state()["mask"] is None
+
+    def test_restore_adjustment_state_applies_linear_mask(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"mask": self._LINEAR_MASK})
+
+        assert controller.get_adjustment_state()["mask"] == self._LINEAR_MASK
+
+    def test_restore_adjustment_state_applies_radial_mask(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"mask": self._RADIAL_MASK})
+
+        assert controller.get_adjustment_state()["mask"] == self._RADIAL_MASK
+
+    def test_missing_mask_key_defaults_to_none(self, qapp, sample_image):
+        """Backward compatibility: an old catalog/preset payload that
+        pre-dates this slice and omits "mask" entirely must default
+        cleanly to None."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"exposure": 1.0})
+
+        assert controller.get_adjustment_state()["mask"] is None
+
+    def test_restore_adjustment_state_tolerates_malformed_mask(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"mask": "not a dict"})
+
+        assert controller.get_adjustment_state()["mask"] is None
+
+    def test_restore_adjustment_state_tolerates_unrecognized_type(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"mask": {"type": "brush", "exposure": 2.0}}
+        )
+
+        assert controller.get_adjustment_state()["mask"] is None
+
+    def test_restore_adjustment_state_clamps_out_of_range_mask(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {
+                "mask": {
+                    "type": "linear",
+                    "x0": -0.5,
+                    "y0": 1.5,
+                    "x1": 2.0,
+                    "y1": -2.0,
+                    "exposure": 50.0,
+                    "contrast": 500.0,
+                    "saturation": -500.0,
+                    "clarity": 500.0,
+                }
+            }
+        )
+
+        state = controller.get_adjustment_state()["mask"]
+        assert state["x0"] == 0.0
+        assert state["y0"] == 1.0
+        assert state["x1"] == 1.0
+        assert state["y1"] == 0.0
+        assert state["exposure"] == 5.0
+        assert state["contrast"] == 100.0
+        assert state["saturation"] == -100.0
+        assert state["clarity"] == 100.0
+
+    def test_mask_reaches_export_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        unmasked_export = controller.get_export_image()
+        controller.restore_adjustment_state({"mask": self._RADIAL_MASK})
+        masked_export = controller.get_export_image()
+
+        assert masked_export is not None
+        assert masked_export.shape == unmasked_export.shape
+        assert not (masked_export == unmasked_export).all()
+
+    def test_on_mask_changed_round_trips_and_adds_to_history(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_mask_changed(self._LINEAR_MASK)
+
+        assert controller.get_adjustment_state()["mask"] == self._LINEAR_MASK
+        assert controller.can_undo() is True
+
+    def test_on_mask_changed_none_clears_a_previously_set_mask(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_mask_changed(self._LINEAR_MASK)
+        assert controller.get_adjustment_state()["mask"] is not None
+
+        controller.on_mask_changed(None)
+
+        assert controller.get_adjustment_state()["mask"] is None
+
+    def test_on_mask_changed_normalizes_defensively(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_mask_changed({"type": "radial", "rx": -5.0, "ry": 5.0})
+
+        state = controller.get_adjustment_state()["mask"]
+        assert state["type"] == "radial"
+        assert 0.0 < state["rx"] <= 1.0
+        assert 0.0 < state["ry"] <= 1.0
+
+    def test_mask_undo_restores_prior_mask_state_not_latest(
+        self, qapp, sample_image
+    ):
+        """Set mask A, then mask B, undo, assert the mask state equals A,
+        not B -- the core state-aware undo/redo regression pattern."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_mask_changed(self._LINEAR_MASK)
+        controller.on_mask_changed(self._RADIAL_MASK)
+
+        assert controller.get_adjustment_state()["mask"] == self._RADIAL_MASK
+
+        assert controller.undo() is True
+
+        assert controller.get_adjustment_state()["mask"] == self._LINEAR_MASK
+
+    def test_reset_to_original_clears_mask(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_mask_changed(self._LINEAR_MASK)
+
+        controller.reset_to_original()
+
+        assert controller.get_adjustment_state()["mask"] is None
+
+    def test_loading_a_different_image_clears_mask(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_mask_changed(self._LINEAR_MASK)
+
+        controller._apply_loaded_image("other.jpg", pil_to_linear(sample_image))
+
+        assert controller.get_adjustment_state()["mask"] is None
+
+    def test_mask_applies_before_crop_not_after(self, qapp, sample_image):
+        """Pipeline-order regression: mask geometry is expressed in the
+        full pre-crop frame's own normalized coordinates, so a mask set
+        alongside a crop must still reach a shape that matches the
+        cropped output (mask-then-crop, not crop-then-mask)."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original_shape = pil_to_linear(sample_image).shape
+
+        controller.restore_adjustment_state(
+            {
+                "mask": self._RADIAL_MASK,
+                "crop": {"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75},
+            }
+        )
+
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape[0] < original_shape[0]
+        assert export.shape[1] < original_shape[1]
+        assert np.all(np.isfinite(export))
+
+
+class TestImageControllerHealing:
+    """Phase J (Healing), slice 1 -- the data/processing layer for a
+    multi-spot clone/heal list. See
+    docs/planning/implementation-notes/2026-10-13-healing-processor.md."""
+
+    _SPOT_A = {
+        "mode": "clone",
+        "dst_x": 0.75,
+        "dst_y": 0.75,
+        "src_x": 0.1,
+        "src_y": 0.1,
+        "radius": 0.1,
+        "feather": 0.1,
+        "opacity": 1.0,
+    }
+    _SPOT_B = {
+        "mode": "heal",
+        "dst_x": 0.6,
+        "dst_y": 0.2,
+        "src_x": 0.2,
+        "src_y": 0.6,
+        "radius": 0.15,
+        "feather": 0.3,
+        "opacity": 0.8,
+    }
+
+    def test_default_heal_spots_is_empty_list(self, qapp):
+        controller = ImageController(ImageView(), use_threading=False)
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_restore_adjustment_state_applies_heal_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"heal_spots": [self._SPOT_A, self._SPOT_B]}
+        )
+
+        assert controller.get_adjustment_state()["heal_spots"] == [
+            self._SPOT_A,
+            self._SPOT_B,
+        ]
+
+    def test_missing_heal_spots_key_defaults_to_empty_list(
+        self, qapp, sample_image
+    ):
+        """Backward compatibility: an old catalog/preset payload that
+        pre-dates this slice and omits "heal_spots" entirely must
+        default cleanly to []."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"exposure": 1.0})
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_restore_adjustment_state_tolerates_malformed_heal_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state({"heal_spots": "not a list"})
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_restore_adjustment_state_skips_spots_with_bad_mode(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {"heal_spots": [{"mode": "smudge"}, self._SPOT_A, "garbage"]}
+        )
+
+        assert controller.get_adjustment_state()["heal_spots"] == [self._SPOT_A]
+
+    def test_restore_adjustment_state_clamps_out_of_range_heal_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.restore_adjustment_state(
+            {
+                "heal_spots": [
+                    {
+                        "mode": "clone",
+                        "dst_x": -5.0,
+                        "dst_y": 5.0,
+                        "src_x": 2.0,
+                        "src_y": -2.0,
+                        "radius": 10.0,
+                        "feather": -1.0,
+                        "opacity": 3.0,
+                    }
+                ]
+            }
+        )
+
+        spot = controller.get_adjustment_state()["heal_spots"][0]
+        assert spot["dst_x"] == 0.0
+        assert spot["dst_y"] == 1.0
+        assert spot["src_x"] == 1.0
+        assert spot["src_y"] == 0.0
+        assert spot["radius"] == 1.0
+        assert spot["feather"] == 0.0
+        assert spot["opacity"] == 1.0
+
+    def test_heal_spots_reach_export_image(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        distinct = pil_to_linear(sample_image).copy()
+        distinct[5:15, 5:15] = 0.0
+        controller._apply_loaded_image("sample.jpg", distinct)
+
+        unhealed_export = controller.get_export_image()
+        controller.restore_adjustment_state({"heal_spots": [self._SPOT_A]})
+        healed_export = controller.get_export_image()
+
+        assert healed_export is not None
+        assert healed_export.shape == unhealed_export.shape
+        assert not (healed_export == unhealed_export).all()
+
+    def test_on_heal_spots_changed_round_trips_and_adds_to_history(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_heal_spots_changed([self._SPOT_A, self._SPOT_B])
+
+        assert controller.get_adjustment_state()["heal_spots"] == [
+            self._SPOT_A,
+            self._SPOT_B,
+        ]
+        assert controller.can_undo() is True
+
+    def test_on_heal_spots_changed_empty_list_clears_previous_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_heal_spots_changed([self._SPOT_A])
+        assert controller.get_adjustment_state()["heal_spots"] != []
+
+        controller.on_heal_spots_changed([])
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_on_heal_spots_changed_normalizes_defensively(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_heal_spots_changed(
+            [{"mode": "heal", "radius": -5.0, "opacity": 10.0}]
+        )
+
+        state = controller.get_adjustment_state()["heal_spots"]
+        assert len(state) == 1
+        assert state[0]["mode"] == "heal"
+        assert 0.0 < state[0]["radius"] <= 1.0
+        assert 0.0 <= state[0]["opacity"] <= 1.0
+
+    def test_heal_spots_undo_restores_prior_list_not_latest(
+        self, qapp, sample_image
+    ):
+        """Set spots A, then spots B, undo, assert heal_spots equals A,
+        not B -- the core state-aware undo/redo regression pattern."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.on_heal_spots_changed([self._SPOT_A])
+        controller.on_heal_spots_changed([self._SPOT_B])
+
+        assert controller.get_adjustment_state()["heal_spots"] == [self._SPOT_B]
+
+        assert controller.undo() is True
+
+        assert controller.get_adjustment_state()["heal_spots"] == [self._SPOT_A]
+
+    def test_reset_to_original_clears_heal_spots(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_heal_spots_changed([self._SPOT_A])
+
+        controller.reset_to_original()
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_loading_a_different_image_clears_heal_spots(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.on_heal_spots_changed([self._SPOT_A])
+
+        controller._apply_loaded_image("other.jpg", pil_to_linear(sample_image))
+
+        assert controller.get_adjustment_state()["heal_spots"] == []
+
+    def test_heal_spots_apply_before_crop_not_after(self, qapp, sample_image):
+        """Pipeline-order regression: healing's spot geometry is
+        expressed in the full pre-crop frame's own normalized
+        coordinates, so spots set alongside a crop must still reach a
+        shape that matches the cropped output."""
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        original_shape = pil_to_linear(sample_image).shape
+
+        controller.restore_adjustment_state(
+            {
+                "heal_spots": [self._SPOT_A],
+                "crop": {"x0": 0.25, "y0": 0.25, "x1": 0.75, "y1": 0.75},
+            }
+        )
+
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape[0] < original_shape[0]
+        assert export.shape[1] < original_shape[1]
+        assert np.all(np.isfinite(export))
+
+    def test_heal_spots_apply_before_exposure(self, qapp, sample_image):
+        """Pipeline-order regression, controller level: healing must run
+        before Exposure in get_export_image()'s recompute chain."""
+        controller = ImageController(ImageView(), use_threading=False)
+        distinct = pil_to_linear(sample_image).copy()
+        distinct[5:15, 5:15] = 0.0
+        controller._apply_loaded_image("sample.jpg", distinct)
+
+        controller.restore_adjustment_state(
+            {
+                "heal_spots": [self._SPOT_A],
+                "exposure": 1.0,
+            }
+        )
+
+        export = controller.get_export_image()
+        assert export is not None
+        assert export.shape == distinct.shape
+        assert np.all(np.isfinite(export))
+
+
+class TestImageControllerStateAwareUndoRedo:
+    """State-aware undo/redo (docs/planning/implementation-notes/
+    2026-10-13-state-aware-undo-redo.md): undo/redo must restore not just
+    the pixel buffer but the full internal adjustment-param state, and
+    must notify listeners via ``adjustment_state_restored`` so the UI and
+    persisted catalog state resync.
+    """
+
+    def test_undo_restores_adjustment_state_not_just_image(self, qapp, sample_image):
+        """The core regression test for this slice.
+
+        Before this fix, ImageController's undo only swapped the pixel
+        buffer -- the internal _exposure_params dict stayed at whatever
+        the most recent edit set it to. Applying exposure=1.0 then
+        exposure=2.0, then undoing, must leave get_adjustment_state()
+        reporting 1.0 (matching the now-displayed image), not 2.0 (the
+        stale, pre-undo param value).
+        """
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+        assert controller.get_adjustment_state()["exposure"] == 2.0
+
+        assert controller.undo() is True
+
+        assert controller.get_adjustment_state()["exposure"] == 1.0
+
+    def test_live_pipeline_builds_on_undone_state_not_stale_params(
+        self, qapp, sample_image
+    ):
+        """After undo, a further edit must build on the *restored* state,
+        not on the stale pre-undo params -- otherwise the live pipeline
+        would silently recompute from the wrong baseline.
+        """
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+        controller.undo()
+
+        # Apply a third, distinct adjustment through the normal flow.
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0, "contrast": 5.0, "brightness": 0.0},
+            add_to_history=True,
+        )
+
+        state = controller.get_adjustment_state()
+        assert state["exposure"] == 1.0
+        assert state["contrast"] == 5.0
+
+        # Independently compute the expected image: exposure=1.0 baseline
+        # (the undone-to state) + contrast=5.0, not exposure=2.0 + contrast=5.0.
+        original = controller.image_model.get_original_image()
+        expected = controller._exposure_processor.process(
+            original.copy(), exposure=1.0, contrast=5.0, brightness=0.0
+        )
+        assert np.allclose(controller.image_model.current_image, expected)
+
+    def test_redo_restores_image_and_state_to_pre_undo_values(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+        image_after_second_edit = controller.image_model.current_image
+
+        controller.undo()
+        assert controller.get_adjustment_state()["exposure"] == 1.0
+
+        assert controller.redo() is True
+
+        assert controller.get_adjustment_state()["exposure"] == 2.0
+        assert np.allclose(
+            controller.image_model.current_image, image_after_second_edit
+        )
+
+    def test_adjustment_state_restored_emitted_on_undo(
+        self, qapp, qtbot, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+
+        with qtbot.waitSignal(
+            controller.adjustment_state_restored, timeout=2000
+        ) as blocker:
+            controller.undo()
+
+        assert blocker.args[0]["exposure"] == 1.0
+
+    def test_adjustment_state_restored_emitted_on_redo(
+        self, qapp, qtbot, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller.apply_adjustments(
+            exposure_params={"exposure": 1.0}, add_to_history=True
+        )
+        controller.apply_adjustments(
+            exposure_params={"exposure": 2.0}, add_to_history=True
+        )
+        controller.undo()
+
+        with qtbot.waitSignal(
+            controller.adjustment_state_restored, timeout=2000
+        ) as blocker:
+            controller.redo()
+
+        assert blocker.args[0]["exposure"] == 2.0
+
+    def test_curve_undo_restores_full_curve_state(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        first_points = [[0.0, 0.0], [0.25, 0.35], [1.0, 1.0]]
+        second_points = [[0.0, 0.0], [0.25, 0.12], [1.0, 1.0]]
+        controller.on_curve_changed(first_points)
+        controller.commit_adjustments()
+        controller.on_curve_changed(second_points)
+        controller.commit_adjustments()
+
+        assert controller.get_adjustment_state()["tone_curve"] != first_points
+
+        assert controller.undo() is True
+
+        restored_curve = controller.get_adjustment_state()["tone_curve"]
+        assert restored_curve == first_points
+
+    def test_hsl_undo_restores_full_hsl_state(self, qapp, sample_image):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        first_hsl = {**default_hsl_params(), "red_sat": 20.0}
+        second_hsl = {**default_hsl_params(), "red_sat": 40.0}
+        controller.on_hsl_changed(first_hsl)
+        controller.commit_adjustments()
+        controller.on_hsl_changed(second_hsl)
+        controller.commit_adjustments()
+
+        assert controller.get_adjustment_state()["hsl"]["red_sat"] == 40.0
+
+        assert controller.undo() is True
+
+        assert controller.get_adjustment_state()["hsl"]["red_sat"] == 20.0
+
+    def test_color_grading_undo_restores_full_color_grading_state(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+
+        first_cg = {**default_color_grading_params(), "midtones_hue": 90.0}
+        second_cg = {**default_color_grading_params(), "midtones_hue": 180.0}
+        controller.on_color_grading_changed(first_cg)
+        controller.commit_adjustments()
+        controller.on_color_grading_changed(second_cg)
+        controller.commit_adjustments()
+
+        assert (
+            controller.get_adjustment_state()["color_grading"]["midtones_hue"] == 180.0
+        )
+
+        assert controller.undo() is True
+
+        assert (
+            controller.get_adjustment_state()["color_grading"]["midtones_hue"] == 90.0
+        )
+
+    def test_restore_adjustment_state_clears_pending_history_state(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._pending_history_previous_image = (
+            controller.image_model.get_current_image()
+        )
+        controller._pending_history_previous_state = controller.get_adjustment_state()
+
+        controller.restore_adjustment_state({"exposure": 1.0})
+
+        assert controller._pending_history_previous_image is None
+        assert controller._pending_history_previous_state is None
+
+    def test_reset_to_original_clears_pending_history_state(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._pending_history_previous_image = (
+            controller.image_model.get_current_image()
+        )
+        controller._pending_history_previous_state = controller.get_adjustment_state()
+
+        controller.reset_to_original()
+
+        assert controller._pending_history_previous_image is None
+        assert controller._pending_history_previous_state is None
+
+    def test_loading_a_different_image_clears_pending_history_state(
+        self, qapp, sample_image
+    ):
+        controller = ImageController(ImageView(), use_threading=False)
+        controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
+        controller._pending_history_previous_image = (
+            controller.image_model.get_current_image()
+        )
+        controller._pending_history_previous_state = controller.get_adjustment_state()
+
+        controller._apply_loaded_image("sample2.jpg", pil_to_linear(sample_image))
+
+        assert controller._pending_history_previous_image is None
+        assert controller._pending_history_previous_state is None

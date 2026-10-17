@@ -13,6 +13,7 @@ in :mod:`src.main`). On macOS/Linux it uses native plist/INI files.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -27,9 +28,15 @@ logger = logging.getLogger(__name__)
 
 _KEY_LAST_OPEN_DIR = "paths/last_open_dir"
 _KEY_LAST_EXPORT_DIR = "paths/last_export_dir"
+_KEY_LAST_PRESET_DIR = "paths/last_preset_dir"
 _KEY_WINDOW_GEOMETRY = "window/geometry"
 _KEY_WINDOW_STATE = "window/state"
 _KEY_CURRENT_IMAGE_PATH = "session/current_image_path"
+_KEY_CONFIRM_EXPORT_OVERWRITE = "export/confirm_overwrite"
+_KEY_LAST_EXPORT_OPTIONS = "export/last_options"
+_KEY_PROXY_MAX_SIZE = "performance/proxy_max_size"
+_KEY_INTERACTIVE_PROXY_MAX_SIZE = "performance/interactive_proxy_max_size"
+_KEY_CLEAN_SHUTDOWN = "session/clean_shutdown"
 
 
 class SettingsService:
@@ -88,6 +95,22 @@ class SettingsService:
         """Persist the last export directory (file path or directory)."""
         self._set_dir(_KEY_LAST_EXPORT_DIR, path)
 
+    def get_last_preset_dir(self) -> str:
+        """Return the last directory used for Export/Import Preset dialogs.
+
+        Kept as its own key rather than sharing ``get_last_export_dir``:
+        a user's preset files (small, hand-authored JSON) commonly live
+        in a different place than their exported images (large JPEG/PNG
+        output), e.g. a dedicated "presets" folder kept alongside a
+        project rather than next to rendered exports. Same fallback
+        semantics as :meth:`get_last_open_dir`.
+        """
+        return self._get_existing_dir(_KEY_LAST_PRESET_DIR)
+
+    def set_last_preset_dir(self, path: str) -> None:
+        """Persist the last Export/Import Preset directory (file or dir)."""
+        self._set_dir(_KEY_LAST_PRESET_DIR, path)
+
     def get_window_geometry(self) -> Optional[bytes]:
         """Return the saved ``QMainWindow.saveGeometry()`` blob, or ``None``."""
         value = self._settings.value(_KEY_WINDOW_GEOMETRY)
@@ -142,6 +165,125 @@ class SettingsService:
             return
         candidate = Path(path).expanduser()
         self._settings.setValue(_KEY_CURRENT_IMAGE_PATH, str(candidate))
+
+    def get_confirm_export_overwrite(self) -> bool:
+        """Return whether Export should confirm before overwriting a file.
+
+        Defaults to ``True`` (confirmation is shown) when the preference
+        has never been explicitly set. The ``type=bool`` hint keeps
+        ``QSettings`` from handing back the stored ``"false"``/``"true"``
+        string on platforms that persist booleans as text (a string is
+        always truthy in Python, so without this the setting would never
+        actually suppress the prompt).
+        """
+        return bool(
+            self._settings.value(
+                _KEY_CONFIRM_EXPORT_OVERWRITE, True, type=bool
+            )
+        )
+
+    def set_confirm_export_overwrite(self, confirm: bool) -> None:
+        """Persist whether Export should confirm before overwriting a file."""
+        self._settings.setValue(_KEY_CONFIRM_EXPORT_OVERWRITE, bool(confirm))
+
+    def get_last_export_options(self) -> Optional[dict]:
+        """Return the last-persisted "Export with Previous" options.
+
+        The options are stored as a JSON string (see
+        :meth:`set_last_export_options`) rather than relying on
+        ``QSettings``'s own dict round-tripping, which is backend-specific.
+        Returns ``None`` when no export has completed yet, or when the
+        stored value is missing/empty/corrupt, rather than raising.
+
+        The returned dict has the shape::
+
+            {
+                "format": str,            # e.g. "JPEG"
+                "quality": int,            # 1-100
+                "width": Optional[int],    # None means no resize
+                "height": Optional[int],   # None means no resize
+                "preserve_aspect": bool,
+            }
+        """
+        value = self._settings.value(_KEY_LAST_EXPORT_OPTIONS)
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            logger.warning("Stored last export options are not valid JSON; ignoring")
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+
+    def set_last_export_options(self, options: dict) -> None:
+        """Persist the options used by the most recent successful export.
+
+        See :meth:`get_last_export_options` for the expected shape.
+        """
+        self._settings.setValue(_KEY_LAST_EXPORT_OPTIONS, json.dumps(options))
+
+    def get_proxy_max_size(self) -> Optional[int]:
+        """Return the preferred quality-preview proxy max dimension (px).
+
+        Returns ``None`` when the preference has never been explicitly
+        set. There is deliberately no hardcoded fallback here -- the
+        default lives on ``ProxyManager.DEFAULT_PROXY_SIZE`` so there is a
+        single source of truth for it; callers that need an effective
+        value should fall back to that constant themselves.
+        """
+        if not self._settings.contains(_KEY_PROXY_MAX_SIZE):
+            return None
+        return int(self._settings.value(_KEY_PROXY_MAX_SIZE, 0, type=int))
+
+    def set_proxy_max_size(self, size: int) -> None:
+        """Persist the preferred quality-preview proxy max dimension (px)."""
+        self._settings.setValue(_KEY_PROXY_MAX_SIZE, int(size))
+
+    def get_interactive_proxy_max_size(self) -> Optional[int]:
+        """Return the preferred interactive/drag proxy max dimension (px).
+
+        Returns ``None`` when unset. See :meth:`get_proxy_max_size` for
+        why there is no hardcoded default here -- it lives on
+        ``ProxyManager.DEFAULT_INTERACTIVE_PROXY_SIZE`` instead.
+        """
+        if not self._settings.contains(_KEY_INTERACTIVE_PROXY_MAX_SIZE):
+            return None
+        return int(
+            self._settings.value(_KEY_INTERACTIVE_PROXY_MAX_SIZE, 0, type=int)
+        )
+
+    def set_interactive_proxy_max_size(self, size: int) -> None:
+        """Persist the preferred interactive/drag proxy max dimension (px)."""
+        self._settings.setValue(_KEY_INTERACTIVE_PROXY_MAX_SIZE, int(size))
+
+    def get_clean_shutdown(self) -> bool:
+        """Return whether the previous session reached a clean shutdown.
+
+        Defaults to ``True`` when the preference has never been
+        explicitly set, so a fresh install (or a settings store wiped by
+        a test) never shows a false-positive "may not have closed
+        cleanly" recovery notice on its very first launch. Unlike
+        :meth:`get_proxy_max_size`'s ``contains()``-first pattern (which
+        needs to distinguish "never set" from "explicitly set" because it
+        has no sane in-process default), this flag always wants a real
+        default of ``True``, so the plain ``type=bool`` pattern from
+        :meth:`get_confirm_export_overwrite` is used instead -- it keeps
+        ``QSettings`` from handing back the stored ``"false"``/``"true"``
+        string on platforms that persist booleans as text (a string is
+        always truthy in Python).
+        """
+        return bool(self._settings.value(_KEY_CLEAN_SHUTDOWN, True, type=bool))
+
+    def set_clean_shutdown(self, clean: bool) -> None:
+        """Persist whether the current session is (or was) cleanly closed.
+
+        Callers set this to ``False`` early in startup (the session is
+        now "in progress") and back to ``True`` in a clean
+        ``closeEvent`` -- see ``MainWindow`` for the exact sequencing.
+        """
+        self._settings.setValue(_KEY_CLEAN_SHUTDOWN, bool(clean))
 
     def sync(self) -> None:
         """Flush pending changes to the underlying store."""

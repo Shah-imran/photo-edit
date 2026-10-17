@@ -33,6 +33,20 @@ class ProcessingRequest:
     hsl_params: Dict[str, float] = field(default_factory=dict)
     color_grading_params: Dict[str, float] = field(default_factory=dict)
     texture_params: Dict[str, float] = field(default_factory=dict)
+    clarity_params: Dict[str, float] = field(default_factory=dict)
+    dehaze_params: Dict[str, float] = field(default_factory=dict)
+    vignette_params: Dict[str, float] = field(default_factory=dict)
+    grain_params: Dict[str, float] = field(default_factory=dict)
+    sharpening_params: Dict[str, float] = field(default_factory=dict)
+    luminance_nr_params: Dict[str, float] = field(default_factory=dict)
+    color_nr_params: Dict[str, float] = field(default_factory=dict)
+    remove_ca_params: Dict[str, float] = field(default_factory=dict)
+    defringe_params: Dict[str, float] = field(default_factory=dict)
+    geometry_params: Dict[str, float] = field(default_factory=dict)
+    straighten_params: Dict[str, float] = field(default_factory=dict)
+    crop_params: Dict[str, float] = field(default_factory=dict)
+    mask_params: Dict[str, Any] = field(default_factory=dict)
+    healing_params: Dict[str, Any] = field(default_factory=dict)
     use_proxy: bool = True
     timestamp: float = field(default_factory=time.time)
     cancelled: bool = False
@@ -93,6 +107,20 @@ class ProcessingQueue:
         hsl_params: Optional[Dict[str, float]] = None,
         color_grading_params: Optional[Dict[str, float]] = None,
         texture_params: Optional[Dict[str, float]] = None,
+        clarity_params: Optional[Dict[str, float]] = None,
+        dehaze_params: Optional[Dict[str, float]] = None,
+        vignette_params: Optional[Dict[str, float]] = None,
+        grain_params: Optional[Dict[str, float]] = None,
+        sharpening_params: Optional[Dict[str, float]] = None,
+        luminance_nr_params: Optional[Dict[str, float]] = None,
+        color_nr_params: Optional[Dict[str, float]] = None,
+        remove_ca_params: Optional[Dict[str, float]] = None,
+        defringe_params: Optional[Dict[str, float]] = None,
+        geometry_params: Optional[Dict[str, float]] = None,
+        straighten_params: Optional[Dict[str, float]] = None,
+        crop_params: Optional[Dict[str, float]] = None,
+        mask_params: Optional[Dict[str, Any]] = None,
+        healing_params: Optional[Dict[str, Any]] = None,
         use_proxy: bool = True,
         interactive_preview: bool = True,
     ) -> ProcessingRequest:
@@ -122,6 +150,20 @@ class ProcessingQueue:
                 hsl_params=hsl_params or {},
                 color_grading_params=color_grading_params or {},
                 texture_params=texture_params or {},
+                clarity_params=clarity_params or {},
+                dehaze_params=dehaze_params or {},
+                vignette_params=vignette_params or {},
+                grain_params=grain_params or {},
+                sharpening_params=sharpening_params or {},
+                luminance_nr_params=luminance_nr_params or {},
+                color_nr_params=color_nr_params or {},
+                remove_ca_params=remove_ca_params or {},
+                defringe_params=defringe_params or {},
+                geometry_params=geometry_params or {},
+                straighten_params=straighten_params or {},
+                crop_params=crop_params or {},
+                mask_params=mask_params or {},
+                healing_params=healing_params or {},
                 use_proxy=use_proxy,
                 interactive_preview=interactive_preview,
             )

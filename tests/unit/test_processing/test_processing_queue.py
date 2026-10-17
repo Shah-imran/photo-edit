@@ -124,6 +124,88 @@ class TestProcessingQueue:
         request = ProcessingQueue().create_request(texture_params={"texture": 35.0})
         assert request.texture_params == {"texture": 35.0}
 
+    def test_create_request_threads_clarity_params(self):
+        request = ProcessingQueue().create_request(clarity_params={"clarity": 35.0})
+        assert request.clarity_params == {"clarity": 35.0}
+
+    def test_create_request_threads_dehaze_params(self):
+        request = ProcessingQueue().create_request(dehaze_params={"dehaze": 35.0})
+        assert request.dehaze_params == {"dehaze": 35.0}
+
+    def test_create_request_threads_vignette_params(self):
+        request = ProcessingQueue().create_request(vignette_params={"vignette": 35.0})
+        assert request.vignette_params == {"vignette": 35.0}
+
+    def test_create_request_threads_grain_params(self):
+        request = ProcessingQueue().create_request(grain_params={"grain": 35.0})
+        assert request.grain_params == {"grain": 35.0}
+
+    def test_create_request_threads_sharpening_params(self):
+        request = ProcessingQueue().create_request(
+            sharpening_params={"sharpening": 35.0}
+        )
+        assert request.sharpening_params == {"sharpening": 35.0}
+
+    def test_create_request_threads_luminance_nr_params(self):
+        request = ProcessingQueue().create_request(
+            luminance_nr_params={"luminance_nr": 35.0}
+        )
+        assert request.luminance_nr_params == {"luminance_nr": 35.0}
+
+    def test_create_request_threads_color_nr_params(self):
+        request = ProcessingQueue().create_request(
+            color_nr_params={"color_nr": 35.0}
+        )
+        assert request.color_nr_params == {"color_nr": 35.0}
+
+    def test_create_request_threads_remove_ca_params(self):
+        request = ProcessingQueue().create_request(
+            remove_ca_params={"remove_ca": 35.0}
+        )
+        assert request.remove_ca_params == {"remove_ca": 35.0}
+
+    def test_create_request_threads_defringe_params(self):
+        request = ProcessingQueue().create_request(
+            defringe_params={"defringe": 35.0}
+        )
+        assert request.defringe_params == {"defringe": 35.0}
+
+    def test_create_request_threads_straighten_params(self):
+        request = ProcessingQueue().create_request(
+            straighten_params={"straighten": 15.0}
+        )
+        assert request.straighten_params == {"straighten": 15.0}
+
+    def test_create_request_threads_crop_params(self):
+        request = ProcessingQueue().create_request(
+            crop_params={"x0": 0.1, "y0": 0.1, "x1": 0.9, "y1": 0.9}
+        )
+        assert request.crop_params == {"x0": 0.1, "y0": 0.1, "x1": 0.9, "y1": 0.9}
+
+    def test_create_request_defaults_crop_params_to_empty_dict(self):
+        request = ProcessingQueue().create_request()
+        assert request.crop_params == {}
+
+    def test_create_request_threads_mask_params(self):
+        mask = {"type": "linear", "x0": 0.1, "y0": 0.0, "x1": 0.9, "y1": 1.0}
+        request = ProcessingQueue().create_request(mask_params=mask)
+        assert request.mask_params == mask
+
+    def test_create_request_defaults_mask_params_to_empty_dict(self):
+        request = ProcessingQueue().create_request()
+        assert request.mask_params == {}
+
+    def test_create_request_threads_healing_params(self):
+        healing = {"heal_spots": [{"mode": "clone", "dst_x": 0.5, "dst_y": 0.5,
+                                    "src_x": 0.1, "src_y": 0.1, "radius": 0.1,
+                                    "feather": 0.2, "opacity": 1.0}]}
+        request = ProcessingQueue().create_request(healing_params=healing)
+        assert request.healing_params == healing
+
+    def test_create_request_defaults_healing_params_to_empty_dict(self):
+        request = ProcessingQueue().create_request()
+        assert request.healing_params == {}
+
     def test_create_request_increments_id(self):
         """Test request IDs are auto-incremented."""
         queue = ProcessingQueue()

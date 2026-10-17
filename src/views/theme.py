@@ -83,6 +83,24 @@ QLineEdit, QSpinBox, QDoubleSpinBox {
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
     border-color: #0078d4;
 }
+QComboBox {
+    background: #2b2b2b;
+    border: 1px solid #424242;
+    border-radius: 3px;
+    padding: 3px 6px;
+    selection-background-color: #0078d4;
+}
+QComboBox:hover { border-color: #0078d4; }
+QComboBox:disabled { color: #606060; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox QAbstractItemView {
+    background: #2b2b2b;
+    color: #e0e0e0;
+    border: 1px solid #424242;
+    outline: none;
+    selection-background-color: #005a9e;
+    selection-color: #ffffff;
+}
 QScrollArea, QAbstractScrollArea { border: none; background: transparent; }
 QScrollBar:vertical { background: #202020; width: 9px; margin: 0; }
 QScrollBar:horizontal { background: #202020; height: 9px; margin: 0; }
