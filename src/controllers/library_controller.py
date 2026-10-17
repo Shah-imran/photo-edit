@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage
 
 from src.services.image_service import ImageService
@@ -264,8 +264,26 @@ class LibraryController(QObject):
         runs the catalog entry removal this is paired with has already
         succeeded and should not be undone by a secondary disk failure.
         """
+        self._try_delete_file(file_path, attempts_left=self._DELETE_RETRIES)
+
+    # On Windows a file can't be deleted while another thread still has it
+    # open -- e.g. the thumbnail or preview decode of a just-imported photo
+    # (WinError 32). Such locks are released within moments, so a sharing
+    # violation is retried on a timer (never blocking the UI thread).
+    _DELETE_RETRIES = 30
+    _DELETE_RETRY_MS = 100
+
+    def _try_delete_file(self, file_path: str, attempts_left: int) -> None:
         try:
             Path(file_path).unlink(missing_ok=True)
+        except PermissionError:
+            if attempts_left > 0:
+                QTimer.singleShot(
+                    self._DELETE_RETRY_MS,
+                    lambda: self._try_delete_file(file_path, attempts_left - 1),
+                )
+                return
+            logger.exception("Failed to delete file from disk: %s", file_path)
         except OSError:
             logger.exception("Failed to delete file from disk: %s", file_path)
 

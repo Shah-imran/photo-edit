@@ -406,7 +406,9 @@ class TestLibraryController:
             result = controller.remove_entry(sample_image_path, delete_from_disk=True)
 
         assert result is True
-        assert not Path(sample_image_path).exists()
+        # On Windows the just-imported file may still be open in the
+        # thumbnail thread; the delete retries until the lock is released.
+        qtbot.waitUntil(lambda: not Path(sample_image_path).exists(), timeout=4000)
 
     def test_remove_entry_delete_from_disk_survives_oserror(
         self, controller, sample_image_path, qtbot, monkeypatch
@@ -468,8 +470,9 @@ class TestLibraryController:
         with qtbot.waitSignal(controller.entries_rebuilt, timeout=1000):
             controller.remove_entries(paths, delete_from_disk=True)
 
-        for path in paths:
-            assert not Path(path).exists()
+        qtbot.waitUntil(
+            lambda: not any(Path(path).exists() for path in paths), timeout=4000
+        )
 
     def test_remove_entries_no_op_on_empty_paths_or_no_current_library(
         self, controller, qtbot
@@ -672,3 +675,28 @@ class TestLibraryRebuildResponsiveness:
         _, payloads = rebuilt.args
         assert len(payloads) == count
         assert elapsed < 1.0
+
+
+def test_delete_retries_while_the_file_is_locked(qtbot, tmp_path, monkeypatch):
+    """A sharing violation (another thread still reading the file) is
+    retried in the background instead of silently giving up."""
+    from src.controllers import library_controller as module
+
+    target = tmp_path / "locked.jpg"
+    target.write_bytes(b"x")
+    real_unlink = Path.unlink
+    calls = {"n": 0}
+
+    def flaky_unlink(self, missing_ok=False):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(32, "being used by another process")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    controller = module.LibraryController.__new__(module.LibraryController)
+    module.QObject.__init__(controller)
+    controller._delete_file_from_disk(str(target))
+
+    qtbot.waitUntil(lambda: not target.exists(), timeout=3000)
+    assert calls["n"] == 3
