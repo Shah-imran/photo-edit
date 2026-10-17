@@ -33,7 +33,7 @@ RECIPE = {
     "mask": {"type": "radial", "cx": 0.5, "cy": 0.5, "rx": 0.3, "ry": 0.3,
              "feather": 0.5, "invert": False, "exposure": 1.0, "contrast": 0.0,
              "saturation": 0.0, "clarity": 0.0},
-    "heal_spots": [{"mode": "heal", "x": 0.3, "y": 0.4, "src_x": 0.6, "src_y": 0.4,
+    "heal_spots": [{"mode": "heal", "dst_x": 0.3, "dst_y": 0.4, "src_x": 0.6, "src_y": 0.4,
                     "radius": 0.05, "feather": 0.3, "opacity": 1.0}],
 }
 

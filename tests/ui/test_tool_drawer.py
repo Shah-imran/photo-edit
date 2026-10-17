@@ -171,3 +171,38 @@ def test_ctrl_shift_r_resets_all_settings(window, qtbot):
     QTest.keyClick(window, Qt.Key.Key_R, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
 
     assert controller.get_adjustment_state()["exposure"] == 0.0
+
+
+def _rect_in_window(window, widget):
+    """Widget geometry in main-window coordinates."""
+    from PyQt6.QtCore import QPoint, QRect
+
+    top_left = widget.mapTo(window, QPoint(0, 0))
+    return QRect(top_left, widget.size())
+
+
+@pytest.mark.parametrize("tool", ["crop", "heal", "mask"])
+def test_placement_matches_lightroom_spec(window, qtbot, tool):
+    """docs/UI_UX.md placement spec, as geometry: histogram, then the tool
+    strip, then the open tool's drawer, stacked at the top of the right
+    panel; the photo and its zoom toolbar keep the centre; no tool options
+    under the photo."""
+    _strip_button(window, tool).click()
+    qtbot.wait(50)
+    panel = window._tools_panel
+    strip = _rect_in_window(window, panel._editing_tool_strip)
+    drawer = _rect_in_window(window, panel.tool_drawer)
+    histogram = _rect_in_window(window, panel._histogram_widget)
+    photo = _rect_in_window(window, window._image_view)
+    zoom_bar = _rect_in_window(window, window._image_toolbar)
+
+    # Right panel: histogram above the strip, drawer directly under it.
+    assert histogram.bottom() < strip.top()
+    assert abs(drawer.top() - (strip.bottom() + 1)) <= 2
+    assert strip.left() > photo.right() and drawer.left() > photo.right()
+    # Centre: the zoom toolbar sits right under the photo.
+    assert abs(zoom_bar.top() - (photo.bottom() + 1)) <= 2
+    # Every tool page lives in the drawer, never in the central area.
+    central = window.centralWidget()
+    for page in ("crop", "heal", "mask"):
+        assert not central.isAncestorOf(panel.tool_drawer.page(page))
