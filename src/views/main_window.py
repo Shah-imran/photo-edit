@@ -134,6 +134,9 @@ class MainWindow(QMainWindow):
         self._mask_toolbar = MaskToolbar()
         self._mask_toolbar.hide()
         self._mask_overlay_signal_connected = False
+        # Masking tool: the masks being edited and which one is selected.
+        self._mask_working: list = []
+        self._mask_selected = 0
         self._healing_toolbar = HealingToolbar()
         self._healing_toolbar.hide()
         self._healing_overlay_signal_connected = False
@@ -507,6 +510,8 @@ class MainWindow(QMainWindow):
         self._mask_toolbar.mask_type_changed.connect(self._on_mask_type_changed)
         self._mask_toolbar.invert_changed.connect(self._on_mask_invert_changed)
         self._mask_toolbar.adjustments_changed.connect(self._on_mask_adjustments_changed)
+        self._mask_toolbar.add_requested.connect(self._on_mask_add)
+        self._mask_toolbar.selection_changed.connect(self._on_mask_selected)
         self._tools_panel.heal_tool_requested.connect(lambda: self._toggle_tool("heal"))
         self._healing_toolbar.apply_requested.connect(self._apply_healing)
         self._healing_toolbar.cancel_requested.connect(self._cancel_healing)
@@ -1144,76 +1149,151 @@ class MainWindow(QMainWindow):
     # -- Mask mode ----------------------------------------------------------
 
     def _enter_mask_mode(self) -> None:
-        """Show the interactive mask overlay+toolbar over the current image.
-
-        Unlike crop mode, the canvas keeps showing whatever it is already
-        showing (the normal, fully-adjusted image, including any prior
-        committed mask) -- no uncropped-style image swap is needed; see
-        docs/planning/implementation-notes/2026-10-13-mask-tool-ui.md
-        section 3.5.
-        """
+        """Open the Masking tool: the mask list in the drawer, the selected
+        mask's handles on the photo and a pin for every other mask
+        (Lightroom's mask panel). With no masks yet, a radial one is
+        created to start from; masks left without any adjustment are
+        dropped on Done."""
         if not self._image_controller.has_image():
             self._status_bar.showMessage("No image to mask", 2000)
             return
-        # Crop/Mask/Heal can never be simultaneously active -- see
-        # _exit_any_interactive_tool_mode.
+        # Crop/Mask/Heal can never be simultaneously active.
         self._exit_any_interactive_tool_mode()
 
         state = self._image_controller.get_adjustment_state()
-        mask = state.get("mask") or {}
-        mask_type = mask.get("type", "linear")
-        invert = bool(mask.get("invert", False))
-        exposure = mask.get("exposure", 0.0)
-        contrast = mask.get("contrast", 0.0)
-        saturation = mask.get("saturation", 0.0)
-        clarity = mask.get("clarity", 0.0)
+        masks = [dict(mask) for mask in (state.get("masks") or [])]
+        if not masks:
+            masks = [self._new_mask("linear")]
+        self._mask_working = masks
+        self._mask_selected = len(masks) - 1
 
-        self._image_view.enter_mask_mode(mask_type, mask)
+        selected = masks[self._mask_selected]
+        self._image_view.enter_mask_mode(selected["type"], selected)
         overlay = self._image_view.get_mask_overlay()
         if overlay is not None and not self._mask_overlay_signal_connected:
             overlay.geometry_changed.connect(self._on_mask_editing_changed)
+            overlay.pin_clicked.connect(self._on_mask_selected)
             self._mask_overlay_signal_connected = True
-
-        self._mask_toolbar.set_values(
-            mask_type, invert, exposure, contrast, saturation, clarity
-        )
+        self._show_selected_mask()
         self._sync_tool_ui()
 
-    def _apply_mask(self) -> None:
-        """Commit the overlay's geometry + toolbar's adjustments via
-        ``on_mask_changed`` -- the ONE real, committed, undoable edit."""
-        before = self._image_controller.get_adjustment_state()
+    _NEW_MASK_GEOMETRY = {
+        "radial": {"cx": 0.5, "cy": 0.5, "rx": 0.25, "ry": 0.25, "feather": 0.5},
+        "linear": {"x0": 0.5, "y0": 0.3, "x1": 0.5, "y1": 0.7},
+    }
+    _MASK_ADJUSTMENT_KEYS = ("exposure", "contrast", "saturation", "clarity")
+
+    def _new_mask(self, mask_type: str) -> dict:
+        mask = {"type": mask_type, "invert": False, **self._NEW_MASK_GEOMETRY[mask_type]}
+        mask.update({key: 0.0 for key in self._MASK_ADJUSTMENT_KEYS})
+        return mask
+
+    @staticmethod
+    def _mask_pin(mask: dict) -> tuple:
+        """Where a mask's pin sits: the ellipse centre, or the gradient's
+        midpoint."""
+        if mask.get("type") == "radial":
+            return mask.get("cx", 0.5), mask.get("cy", 0.5)
+        return (
+            (mask.get("x0", 0.0) + mask.get("x1", 1.0)) / 2.0,
+            (mask.get("y0", 0.0) + mask.get("y1", 1.0)) / 2.0,
+        )
+
+    def _show_selected_mask(self) -> None:
+        """Push the working list and the selected mask into the drawer and
+        the overlay (programmatic, no signals)."""
+        mask = self._mask_working[self._mask_selected]
         overlay = self._image_view.get_mask_overlay()
         if overlay is not None:
-            mask = overlay.get_geometry()
-            mask.update(self._mask_toolbar.get_adjustments())
-            self._image_controller.on_mask_changed(mask)
+            overlay.set_mask_type(mask["type"])
+            overlay.set_invert(bool(mask.get("invert", False)))
+            if mask["type"] == "radial":
+                overlay.set_radial_geometry(
+                    mask.get("cx", 0.5), mask.get("cy", 0.5), mask.get("rx", 0.25),
+                    mask.get("ry", 0.25), mask.get("feather", 0.5),
+                )
+            else:
+                overlay.set_linear_geometry(
+                    mask.get("x0", 0.3), mask.get("y0", 0.5),
+                    mask.get("x1", 0.7), mask.get("y1", 0.5),
+                )
+            overlay.set_pins([self._mask_pin(m) for m in self._mask_working], self._mask_selected)
+        self._mask_toolbar.set_masks(
+            [f"Mask {i + 1}  ·  {m['type'].title()}" for i, m in enumerate(self._mask_working)],
+            self._mask_selected,
+        )
+        self._mask_toolbar.set_values(
+            mask["type"], bool(mask.get("invert", False)), mask.get("exposure", 0.0),
+            mask.get("contrast", 0.0), mask.get("saturation", 0.0), mask.get("clarity", 0.0),
+        )
+
+    def _capture_selected_mask(self) -> None:
+        """Store the overlay's geometry and the drawer's sliders into the
+        selected working mask."""
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is None or not self._mask_working:
+            return
+        mask = overlay.get_geometry()
+        mask.update(self._mask_toolbar.get_adjustments())
+        self._mask_working[self._mask_selected] = mask
+
+    def _preview_working_masks(self) -> None:
+        """Display-only render of the working list (never touches history)."""
+        self._image_controller.preview_masks(self._mask_working)
+
+    def _on_mask_selected(self, index: int) -> None:
+        """Select another mask (list row or its pin on the photo)."""
+        if index == self._mask_selected or not 0 <= index < len(self._mask_working):
+            return
+        self._capture_selected_mask()
+        self._mask_selected = index
+        self._show_selected_mask()
+
+    def _on_mask_add(self, mask_type: str) -> None:
+        self._capture_selected_mask()
+        self._mask_working.append(self._new_mask(mask_type))
+        self._mask_selected = len(self._mask_working) - 1
+        self._show_selected_mask()
+        self._preview_working_masks()
+
+    def _apply_mask(self) -> None:
+        """Done: commit the whole mask list as ONE undoable edit. Masks
+        without any adjustment have no effect and are dropped."""
+        before = self._image_controller.get_adjustment_state()
+        self._capture_selected_mask()
+        masks = [
+            mask for mask in self._mask_working
+            if any(mask.get(key, 0.0) != 0.0 for key in self._MASK_ADJUSTMENT_KEYS)
+        ]
+        self._image_controller.on_masks_changed(masks)
         self._image_view.exit_mask_mode()
         self._sync_tool_ui()
-        # Only announce a real change (switching tools also commits).
         if self._image_controller.get_adjustment_state() != before:
-            self._status_bar.showMessage("Mask applied", 2000)
+            self._status_bar.showMessage("Masks applied", 2000)
 
     def _cancel_mask(self) -> None:
-        """Exit mask mode without committing.
-
-        Nothing was ever mutated on the committed engine state while
-        editing (see ``_on_mask_editing_changed``/
-        ``ImageController.preview_mask``), so cancelling only needs to
-        hide the overlay/toolbar and ask the controller to re-display
-        whatever image is still actually current -- there is no stray
-        preview-mode state to roll back.
-        """
+        """Close without committing: nothing was mutated while editing
+        (previews are display-only), so just re-display the committed edit."""
         self._image_view.exit_mask_mode()
         self._sync_tool_ui()
         self._image_controller.refresh_view()
 
     def _remove_mask(self) -> None:
-        """Commit clearing the mask (``on_mask_changed(None)``) and exit."""
-        self._image_controller.on_mask_changed(None)
-        self._image_view.exit_mask_mode()
-        self._sync_tool_ui()
-        self._status_bar.showMessage("Mask removed", 2000)
+        """Delete the selected mask; deleting the last one closes the tool
+        with no masks left."""
+        if len(self._mask_working) <= 1:
+            before = self._image_controller.get_adjustment_state()
+            self._mask_working = []
+            self._image_controller.on_masks_changed([])
+            self._image_view.exit_mask_mode()
+            self._sync_tool_ui()
+            if self._image_controller.get_adjustment_state() != before:
+                self._status_bar.showMessage("Mask removed", 2000)
+            return
+        del self._mask_working[self._mask_selected]
+        self._mask_selected = min(self._mask_selected, len(self._mask_working) - 1)
+        self._show_selected_mask()
+        self._preview_working_masks()
 
     def _on_mask_type_changed(self, mask_type: str) -> None:
         overlay = self._image_view.get_mask_overlay()
@@ -1231,22 +1311,14 @@ class MainWindow(QMainWindow):
         self._on_mask_editing_changed()
 
     def _on_mask_editing_changed(self, *_args) -> None:
-        """Live-preview the CURRENT in-progress mask candidate.
-
-        Assembles geometry (from the overlay) + adjustments (from the
-        toolbar) and hands the result to
-        ``ImageController.preview_mask`` -- a display-only call that never
-        touches history or the committed mask state. See
-        docs/planning/implementation-notes/2026-10-13-mask-tool-ui.md
-        section 3.5 for why this, and not ``on_mask_changed``, is used
-        here.
-        """
-        overlay = self._image_view.get_mask_overlay()
-        if overlay is None:
+        """Live-preview the working list after any drag/slider/toggle."""
+        if not self._mask_working:
             return
-        candidate = overlay.get_geometry()
-        candidate.update(self._mask_toolbar.get_adjustments())
-        self._image_controller.preview_mask(candidate)
+        self._capture_selected_mask()
+        overlay = self._image_view.get_mask_overlay()
+        if overlay is not None:
+            overlay.set_pins([self._mask_pin(m) for m in self._mask_working], self._mask_selected)
+        self._preview_working_masks()
 
     # -- Crop/Mask/Heal three-way mutual exclusion --------------------------
 
@@ -1284,7 +1356,7 @@ class MainWindow(QMainWindow):
         self._tools_panel.set_tool_edits({
             "crop": bool(crop) and crop != {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
             "heal": bool(state.get("heal_spots")),
-            "mask": bool(state.get("mask")),
+            "mask": bool(state.get("masks")),
         })
 
     def _toggle_tool(self, tool: str) -> None:

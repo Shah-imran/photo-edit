@@ -122,12 +122,12 @@ of the tool strip and drawer, with Lightroom desktop's panel names.
 | Area | Lightroom | PhotoEdit today |
 |---|---|---|
 | Tool options | Drawer under the tool strip, in the right panel | **Done (2026-10-17)**: drawer under the strip; photo keeps full height |
-| Mask controls | In the drawer, beside the mask list | **Done**: in the drawer (single mask; no mask list yet) |
+| Mask controls | In the drawer, beside the mask list | **Done**: in the drawer, below the mask list |
 | Tool toggle | Click the active tool again to close it (Done); switching tools commits; Esc cancels | **Done** |
 | Active tool | Highlighted in the strip | **Done** |
 | Edit indicator | Dot under tools with edits | **Done** |
 | Shortcuts | R, Q, Shift+W; Ctrl+Shift+R reset all | **Done**: R, Q, Shift+W, Esc, Ctrl+Shift+R (Ctrl+R kept) |
-| Mask list | Multiple masks listed in the drawer | One mask only |
+| Mask list | Multiple masks listed in the drawer | **Done (2026-10-22)**: list with + Radial / + Linear and Delete; a pin per mask on the photo (click to select); all masks commit as one undo step on Done. Brush and AI masks not yet |
 | Red Eye | In the tool strip | Not implemented |
 | Calibration, Lens Blur | Panels | Not implemented |
 

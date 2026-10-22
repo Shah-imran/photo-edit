@@ -271,7 +271,7 @@ class TestImageController:
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
             "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
-            "mask": None,
+            "masks": [],
             "heal_spots": [],
         }
         controller.cleanup()
@@ -327,7 +327,7 @@ class TestImageController:
             "hsl": default_hsl_params(),
             "color_grading": default_color_grading_params(),
             "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
-            "mask": None,
+            "masks": [],
             "heal_spots": [],
         }
         assert controller.image_model.get_current_image() is not None
@@ -834,7 +834,7 @@ class TestImageController:
 
         assert len(worker.preview_calls) == 1
         assert worker.preview_calls[0]["interactive_preview"] is True
-        assert worker.preview_calls[0]["mask_params"]["type"] == "radial"
+        assert worker.preview_calls[0]["mask_params"]["masks"][0]["type"] == "radial"
         assert 101 in controller._display_only_request_ids
         # The committed mask is untouched.
         assert controller._mask_params == {}
@@ -2148,7 +2148,7 @@ class TestImageControllerMask:
 
     def test_default_mask_is_none(self, qapp):
         controller = ImageController(ImageView(), use_threading=False)
-        assert controller.get_adjustment_state()["mask"] is None
+        assert controller.get_adjustment_state()["masks"] == []
 
     def test_restore_adjustment_state_applies_linear_mask(
         self, qapp, sample_image
@@ -2158,7 +2158,7 @@ class TestImageControllerMask:
 
         controller.restore_adjustment_state({"mask": self._LINEAR_MASK})
 
-        assert controller.get_adjustment_state()["mask"] == self._LINEAR_MASK
+        assert controller.get_adjustment_state()["masks"] == [self._LINEAR_MASK]
 
     def test_restore_adjustment_state_applies_radial_mask(
         self, qapp, sample_image
@@ -2168,7 +2168,7 @@ class TestImageControllerMask:
 
         controller.restore_adjustment_state({"mask": self._RADIAL_MASK})
 
-        assert controller.get_adjustment_state()["mask"] == self._RADIAL_MASK
+        assert controller.get_adjustment_state()["masks"] == [self._RADIAL_MASK]
 
     def test_missing_mask_key_defaults_to_none(self, qapp, sample_image):
         """Backward compatibility: an old catalog/preset payload that
@@ -2179,7 +2179,7 @@ class TestImageControllerMask:
 
         controller.restore_adjustment_state({"exposure": 1.0})
 
-        assert controller.get_adjustment_state()["mask"] is None
+        assert controller.get_adjustment_state()["masks"] == []
 
     def test_restore_adjustment_state_tolerates_malformed_mask(
         self, qapp, sample_image
@@ -2189,7 +2189,7 @@ class TestImageControllerMask:
 
         controller.restore_adjustment_state({"mask": "not a dict"})
 
-        assert controller.get_adjustment_state()["mask"] is None
+        assert controller.get_adjustment_state()["masks"] == []
 
     def test_restore_adjustment_state_tolerates_unrecognized_type(
         self, qapp, sample_image
@@ -2201,7 +2201,7 @@ class TestImageControllerMask:
             {"mask": {"type": "brush", "exposure": 2.0}}
         )
 
-        assert controller.get_adjustment_state()["mask"] is None
+        assert controller.get_adjustment_state()["masks"] == []
 
     def test_restore_adjustment_state_clamps_out_of_range_mask(
         self, qapp, sample_image
@@ -2225,7 +2225,7 @@ class TestImageControllerMask:
             }
         )
 
-        state = controller.get_adjustment_state()["mask"]
+        state = controller.get_adjustment_state()["masks"][0]
         assert state["x0"] == 0.0
         assert state["y0"] == 1.0
         assert state["x1"] == 1.0
@@ -2255,7 +2255,7 @@ class TestImageControllerMask:
 
         controller.on_mask_changed(self._LINEAR_MASK)
 
-        assert controller.get_adjustment_state()["mask"] == self._LINEAR_MASK
+        assert controller.get_adjustment_state()["masks"] == [self._LINEAR_MASK]
         assert controller.can_undo() is True
 
     def test_on_mask_changed_none_clears_a_previously_set_mask(
@@ -2264,11 +2264,11 @@ class TestImageControllerMask:
         controller = ImageController(ImageView(), use_threading=False)
         controller._apply_loaded_image("sample.jpg", pil_to_linear(sample_image))
         controller.on_mask_changed(self._LINEAR_MASK)
-        assert controller.get_adjustment_state()["mask"] is not None
+        assert controller.get_adjustment_state()["masks"] != []
 
         controller.on_mask_changed(None)
 
-        assert controller.get_adjustment_state()["mask"] is None
+        assert controller.get_adjustment_state()["masks"] == []
 
     def test_on_mask_changed_normalizes_defensively(self, qapp, sample_image):
         controller = ImageController(ImageView(), use_threading=False)
@@ -2276,7 +2276,7 @@ class TestImageControllerMask:
 
         controller.on_mask_changed({"type": "radial", "rx": -5.0, "ry": 5.0})
 
-        state = controller.get_adjustment_state()["mask"]
+        state = controller.get_adjustment_state()["masks"][0]
         assert state["type"] == "radial"
         assert 0.0 < state["rx"] <= 1.0
         assert 0.0 < state["ry"] <= 1.0
@@ -2292,11 +2292,11 @@ class TestImageControllerMask:
         controller.on_mask_changed(self._LINEAR_MASK)
         controller.on_mask_changed(self._RADIAL_MASK)
 
-        assert controller.get_adjustment_state()["mask"] == self._RADIAL_MASK
+        assert controller.get_adjustment_state()["masks"] == [self._RADIAL_MASK]
 
         assert controller.undo() is True
 
-        assert controller.get_adjustment_state()["mask"] == self._LINEAR_MASK
+        assert controller.get_adjustment_state()["masks"] == [self._LINEAR_MASK]
 
     def test_reset_to_original_clears_mask(self, qapp, sample_image):
         controller = ImageController(ImageView(), use_threading=False)
@@ -2305,7 +2305,7 @@ class TestImageControllerMask:
 
         controller.reset_to_original()
 
-        assert controller.get_adjustment_state()["mask"] is None
+        assert controller.get_adjustment_state()["masks"] == []
 
     def test_loading_a_different_image_clears_mask(self, qapp, sample_image):
         controller = ImageController(ImageView(), use_threading=False)
@@ -2314,7 +2314,7 @@ class TestImageControllerMask:
 
         controller._apply_loaded_image("other.jpg", pil_to_linear(sample_image))
 
-        assert controller.get_adjustment_state()["mask"] is None
+        assert controller.get_adjustment_state()["masks"] == []
 
     def test_mask_applies_before_crop_not_after(self, qapp, sample_image):
         """Pipeline-order regression: mask geometry is expressed in the

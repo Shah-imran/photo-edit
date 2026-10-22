@@ -35,6 +35,16 @@ _PARAM_ORDER = (
 )
 
 
+def _freeze(value):
+    """Hashable form of a params value (dicts and lists, e.g. the masks
+    list, become sorted tuples) for cache keys and signatures."""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
 def _elapsed_ms(start: float) -> float:
     return (perf_counter() - start) * 1000.0
 
@@ -609,27 +619,27 @@ class ProcessingWorker(QObject):
         return (
             bool(request.interactive_preview),
             tuple(source.shape),
-            tuple(sorted(request.exposure_params.items())),
-            tuple(sorted(request.tonal_params.items())),
-            tuple(sorted(request.color_params.items())),
-            tuple(sorted(request.curve_params.items())),
-            tuple(sorted(request.wb_params.items())),
-            tuple(sorted(request.hsl_params.items())),
-            tuple(sorted(request.color_grading_params.items())),
-            tuple(sorted(request.texture_params.items())),
-            tuple(sorted(request.clarity_params.items())),
-            tuple(sorted(request.dehaze_params.items())),
-            tuple(sorted(request.vignette_params.items())),
-            tuple(sorted(request.grain_params.items())),
-            tuple(sorted(request.sharpening_params.items())),
-            tuple(sorted(request.luminance_nr_params.items())),
-            tuple(sorted(request.color_nr_params.items())),
-            tuple(sorted(request.remove_ca_params.items())),
-            tuple(sorted(request.defringe_params.items())),
-            tuple(sorted(request.geometry_params.items())),
-            tuple(sorted(request.straighten_params.items())),
-            tuple(sorted(request.crop_params.items())),
-            tuple(sorted(request.mask_params.items())),
+            _freeze(request.exposure_params),
+            _freeze(request.tonal_params),
+            _freeze(request.color_params),
+            _freeze(request.curve_params),
+            _freeze(request.wb_params),
+            _freeze(request.hsl_params),
+            _freeze(request.color_grading_params),
+            _freeze(request.texture_params),
+            _freeze(request.clarity_params),
+            _freeze(request.dehaze_params),
+            _freeze(request.vignette_params),
+            _freeze(request.grain_params),
+            _freeze(request.sharpening_params),
+            _freeze(request.luminance_nr_params),
+            _freeze(request.color_nr_params),
+            _freeze(request.remove_ca_params),
+            _freeze(request.defringe_params),
+            _freeze(request.geometry_params),
+            _freeze(request.straighten_params),
+            _freeze(request.crop_params),
+            _freeze(request.mask_params),
             self._hashable_heal_spots(request.healing_params),
         )
 
@@ -655,27 +665,27 @@ class ProcessingWorker(QObject):
     def _adjustment_signature(request: ProcessingRequest) -> Tuple:
         """Return a stable signature for request parameters."""
         return (
-            tuple(sorted(request.exposure_params.items())),
-            tuple(sorted(request.tonal_params.items())),
-            tuple(sorted(request.color_params.items())),
-            tuple(sorted(request.curve_params.items())),
-            tuple(sorted(request.wb_params.items())),
-            tuple(sorted(request.hsl_params.items())),
-            tuple(sorted(request.color_grading_params.items())),
-            tuple(sorted(request.texture_params.items())),
-            tuple(sorted(request.clarity_params.items())),
-            tuple(sorted(request.dehaze_params.items())),
-            tuple(sorted(request.vignette_params.items())),
-            tuple(sorted(request.grain_params.items())),
-            tuple(sorted(request.sharpening_params.items())),
-            tuple(sorted(request.luminance_nr_params.items())),
-            tuple(sorted(request.color_nr_params.items())),
-            tuple(sorted(request.remove_ca_params.items())),
-            tuple(sorted(request.defringe_params.items())),
-            tuple(sorted(request.geometry_params.items())),
-            tuple(sorted(request.straighten_params.items())),
-            tuple(sorted(request.crop_params.items())),
-            tuple(sorted(request.mask_params.items())),
+            _freeze(request.exposure_params),
+            _freeze(request.tonal_params),
+            _freeze(request.color_params),
+            _freeze(request.curve_params),
+            _freeze(request.wb_params),
+            _freeze(request.hsl_params),
+            _freeze(request.color_grading_params),
+            _freeze(request.texture_params),
+            _freeze(request.clarity_params),
+            _freeze(request.dehaze_params),
+            _freeze(request.vignette_params),
+            _freeze(request.grain_params),
+            _freeze(request.sharpening_params),
+            _freeze(request.luminance_nr_params),
+            _freeze(request.color_nr_params),
+            _freeze(request.remove_ca_params),
+            _freeze(request.defringe_params),
+            _freeze(request.geometry_params),
+            _freeze(request.straighten_params),
+            _freeze(request.crop_params),
+            _freeze(request.mask_params),
             ProcessingWorker._hashable_heal_spots(request.healing_params),
         )
 

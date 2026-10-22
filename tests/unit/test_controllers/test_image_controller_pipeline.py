@@ -133,7 +133,7 @@ def test_mask_preview_changes_the_screen_but_not_the_edit(qtbot, setup):
     controller.preview_mask({"type": "radial", "cx": 0.5, "cy": 0.5, "rx": 0.4, "ry": 0.4, "exposure": 2.0})
     _settle(qtbot, controller)
     assert _shown_mean(view) > committed + 5
-    assert controller.get_adjustment_state()["mask"] in (None, {})
+    assert controller.get_adjustment_state()["masks"] == []
 
     controller.refresh_view()  # what Cancel does
     _settle(qtbot, controller)

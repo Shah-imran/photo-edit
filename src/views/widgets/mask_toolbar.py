@@ -1,5 +1,6 @@
-"""Compact toolbar for mask-mode type/invert controls, the 4 local
-adjustment sliders, and Remove/Cancel/Apply.
+"""The Masking drawer page: the mask list (add Radial/Linear, delete),
+the selected mask's type/invert and 4 local adjustment sliders, and
+Cancel/Done -- Lightroom's mask panel, in the tool drawer.
 
 Mirrors ``CropToolbar``'s ``QFrame`` structure and dark-chrome styling
 (``#202020`` background, ``#343434`` border) so the two toolbars read as
@@ -19,7 +20,10 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
     QHBoxLayout,
+    QLabel,
+    QListWidget,
     QPushButton,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -54,13 +58,19 @@ class MaskToolbar(QFrame):
         adjustments_changed: Emitted with
             ``{"exposure", "contrast", "saturation", "clarity"}`` whenever
             any of the 4 sliders changes (for live-preview wiring).
-        remove_requested / apply_requested / cancel_requested: Emitted
-            when the corresponding button is clicked.
+        add_requested: Emitted with ``"radial"``/``"linear"`` when a new
+            mask of that type is requested.
+        selection_changed: Emitted with the row index when the user picks
+            another mask in the list.
+        remove_requested: Delete the selected mask.
+        apply_requested / cancel_requested: Done / Cancel.
     """
 
     mask_type_changed = pyqtSignal(str)
     invert_changed = pyqtSignal(bool)
     adjustments_changed = pyqtSignal(dict)
+    add_requested = pyqtSignal(str)
+    selection_changed = pyqtSignal(int)
     remove_requested = pyqtSignal()
     apply_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
@@ -76,13 +86,49 @@ class MaskToolbar(QFrame):
         outer.setContentsMargins(12, 8, 12, 10)
         outer.setSpacing(6)
 
+        # Mask list, as in Lightroom's masks panel.
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        title = QLabel("Masks")
+        title.setStyleSheet("font-weight: 600;")
+        header.addWidget(title)
+        header.addStretch(1)
+        self._add_radial_button = QToolButton()
+        self._add_radial_button.setText("+ Radial")
+        self._add_radial_button.setToolTip("New radial gradient mask")
+        self._add_linear_button = QToolButton()
+        self._add_linear_button.setText("+ Linear")
+        self._add_linear_button.setToolTip("New linear gradient mask")
+        for button in (self._add_radial_button, self._add_linear_button):
+            button.setStyleSheet(
+                "QToolButton { color: #cbd3dc; padding: 2px 6px; border: 1px solid #3a424b;"
+                " border-radius: 3px; } QToolButton:hover { background: #2d343c; }"
+            )
+            header.addWidget(button)
+        outer.addLayout(header)
+
+        self._mask_list = QListWidget()
+        self._mask_list.setFixedHeight(92)
+        self._mask_list.setStyleSheet(
+            "QListWidget { background: #161a1e; border: 1px solid #343a42; color: #cbd3dc; }"
+            " QListWidget::item { padding: 3px 6px; }"
+            " QListWidget::item:selected { background: #2b4a66; color: #ffffff; }"
+        )
+        outer.addWidget(self._mask_list)
+
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
         self._type_combo = QComboBox()
         self._type_combo.addItem(_LINEAR_LABEL)
         self._type_combo.addItem(_RADIAL_LABEL)
-        top_row.addWidget(self._type_combo, 1)
+        # A mask's type is chosen when it is added (+ Radial / + Linear) and,
+        # as in Lightroom, not changed afterwards; the list row shows it. The
+        # combo stays as the selected mask's type model, hidden.
+        self._type_combo.setVisible(False)
+        top_row.addWidget(self._type_combo)
+        top_row.addStretch(1)
         self._invert_checkbox = QCheckBox("Invert")
+        self._invert_checkbox.setToolTip("Apply the adjustments outside the mask instead")
         top_row.addWidget(self._invert_checkbox)
         outer.addLayout(top_row)
 
@@ -110,7 +156,8 @@ class MaskToolbar(QFrame):
         ):
             outer.addWidget(slider)
 
-        self._remove_button = QPushButton("Remove Mask")
+        self._remove_button = QPushButton("Delete")
+        self._remove_button.setToolTip("Delete the selected mask")
         self._cancel_button, self._apply_button, buttons = drawer_buttons()
         buttons.insertWidget(0, self._remove_button)
         outer.addLayout(buttons)
@@ -122,6 +169,9 @@ class MaskToolbar(QFrame):
         self._saturation_slider.value_changed.connect(self._on_adjustment_changed)
         self._clarity_slider.value_changed.connect(self._on_adjustment_changed)
         self._remove_button.clicked.connect(self.remove_requested)
+        self._add_radial_button.clicked.connect(lambda: self.add_requested.emit("radial"))
+        self._add_linear_button.clicked.connect(lambda: self.add_requested.emit("linear"))
+        self._mask_list.currentRowChanged.connect(self._on_row_changed)
         self._cancel_button.clicked.connect(self.cancel_requested)
         self._apply_button.clicked.connect(self.apply_requested)
 
@@ -147,6 +197,20 @@ class MaskToolbar(QFrame):
             self._clarity_slider.set_value(clarity)
         finally:
             self._suppress_signals = False
+
+    def set_masks(self, labels: list, selected: int) -> None:
+        """Show the mask list and select row ``selected``. No signals."""
+        self._suppress_signals = True
+        try:
+            self._mask_list.clear()
+            self._mask_list.addItems(list(labels))
+            if 0 <= selected < len(labels):
+                self._mask_list.setCurrentRow(selected)
+        finally:
+            self._suppress_signals = False
+
+    def selected_index(self) -> int:
+        return self._mask_list.currentRow()
 
     def get_adjustments(self) -> dict:
         return {
@@ -178,3 +242,8 @@ class MaskToolbar(QFrame):
         if self._suppress_signals:
             return
         self.adjustments_changed.emit(self.get_adjustments())
+
+    def _on_row_changed(self, row: int) -> None:
+        if self._suppress_signals or row < 0:
+            return
+        self.selection_changed.emit(row)

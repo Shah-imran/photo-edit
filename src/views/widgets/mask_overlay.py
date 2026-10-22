@@ -37,6 +37,8 @@ from PyQt6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen
 from PyQt6.QtWidgets import QWidget
 
 _HANDLE_SIZE_PX = 9.0
+_PIN_RADIUS_PX = 6.0
+_PIN_HIT_PX = 10.0
 _HANDLE_HIT_RADIUS_PX = 10.0
 _LINE_HIT_TOLERANCE_PX = 8.0
 
@@ -64,6 +66,8 @@ class MaskOverlay(QWidget):
     """
 
     geometry_changed = pyqtSignal(dict)
+    # Index of another mask's pin the user clicked (to select that mask).
+    pin_clicked = pyqtSignal(int)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -80,6 +84,10 @@ class MaskOverlay(QWidget):
 
         self._active_handle: Optional[str] = None
         self._drag_anchor: Optional[tuple] = None
+        # One pin per mask (fractional x, y), as Lightroom shows; the
+        # selected mask also shows its handles.
+        self._pins: list = []
+        self._selected_pin = -1
 
     # -- Public API -----------------------------------------------------
 
@@ -105,6 +113,23 @@ class MaskOverlay(QWidget):
             cx, cy, rx, ry, feather
         )
         self.update()
+
+    def set_pins(self, points: list, selected: int) -> None:
+        """Pin positions (fractions of the frame) for every mask, and which
+        one is selected. No signal."""
+        self._pins = [(float(x), float(y)) for x, y in points]
+        self._selected_pin = int(selected)
+        self.update()
+
+    def _pin_at(self, pos) -> int:
+        """Index of an unselected pin under ``pos`` (pixels), or -1."""
+        w, h = max(1, self.width()), max(1, self.height())
+        for index, (fx, fy) in enumerate(self._pins):
+            if index == self._selected_pin:
+                continue
+            if math.hypot(pos.x() - fx * w, pos.y() - fy * h) <= _PIN_HIT_PX:
+                return index
+        return -1
 
     def set_invert(self, invert: bool) -> None:
         self._invert = bool(invert)
@@ -316,8 +341,18 @@ class MaskOverlay(QWidget):
             self._paint_linear(painter)
         else:
             self._paint_radial(painter)
+        self._paint_pins(painter)
 
         painter.end()
+
+    def _paint_pins(self, painter: QPainter) -> None:
+        w, h = max(1, self.width()), max(1, self.height())
+        for index, (fx, fy) in enumerate(self._pins):
+            center = QPointF(fx * w, fy * h)
+            selected = index == self._selected_pin
+            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.setBrush(QColor("#0078d4") if selected else QColor(30, 34, 40, 220))
+            painter.drawEllipse(center, _PIN_RADIUS_PX, _PIN_RADIUS_PX)
 
     def _paint_linear(self, painter: QPainter) -> None:
         x0, y0, x1, y1 = self._line_px()
@@ -382,6 +417,11 @@ class MaskOverlay(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position()
+        pin = self._pin_at(pos)
+        if pin >= 0:
+            self.pin_clicked.emit(pin)
+            event.accept()
+            return
         handle = self._hit_test(pos)
         if handle is None:
             return

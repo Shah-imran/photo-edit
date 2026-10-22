@@ -52,6 +52,16 @@ _GEOMETRY_IDENTITY = {
 }
 
 
+def mask_list(params) -> List[Dict[str, Any]]:
+    """The masks in a ``mask_params`` value: ``{"masks": [...]}``, or a
+    single mask dict (older callers and saved edits)."""
+    if not params:
+        return []
+    if "masks" in params:
+        return [m for m in params["masks"] if m]
+    return [params] if params.get("type") else []
+
+
 def _any_nonzero(params) -> bool:
     return bool(params) and any(v != 0 for v in params.values())
 
@@ -93,7 +103,7 @@ class DevelopPipeline:
         ("defringe", "defringe_params", _key_nonzero("defringe"), "kwargs"),
         ("geometry", "geometry_params", _geometry_active, "kwargs"),
         ("straighten", "straighten_params", _key_nonzero("straighten"), "kwargs"),
-        ("mask", "mask_params", bool, "mask"),
+        ("mask", "mask_params", lambda p: bool(mask_list(p)), "masks"),
         ("crop", "crop_params", bool, "kwargs"),
     ]
 
@@ -150,8 +160,9 @@ class DevelopPipeline:
                 continue
             start = perf_counter()
             processor = self.processors[name]
-            if style == "mask":
-                result = processor.process(result, mask=stage_params)
+            if style == "masks":
+                for mask in mask_list(stage_params):
+                    result = processor.process(result, mask=mask)
             elif style == "pixel":
                 result = processor.process(result, pixel_scale=pixel_scale, **stage_params)
             else:

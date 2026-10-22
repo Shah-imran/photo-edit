@@ -124,4 +124,4 @@ def test_mask_preview_stays_off_the_ui_thread(qtbot, controller, big_image):
     preview_ms = max(_timed_ms(controller.preview_mask, mask) for _ in range(5))
     _wait_for_frame(qtbot, controller, controller._latest_request_id)
     assert preview_ms < UI_CALL_BUDGET_MS, f"mask preview blocked the UI for {preview_ms:.0f} ms"
-    assert controller.get_adjustment_state()["mask"] in (None, {})
+    assert controller.get_adjustment_state()["masks"] == []

@@ -175,6 +175,13 @@ Updated as phases land; see git history for detail.
   responsive. Writing the file also runs in the background, and Export
   with Previous runs entirely in the background with a status-bar
   message. Real CR3 with 11 adjustments: 4.3 s end to end, no UI freeze.
+- **2026-10-22 Masks** - several masks per photo (Lightroom's mask
+  list), applied in order; saved edits with a single "mask" still load.
+  One fused Numba pass per mask (weight, local exposure / contrast /
+  saturation and blend): 1400 px 79 -> 4.5 ms, 24 MP 1.3 s -> 73 ms
+  (radial + local clarity 25 ms / 256 ms); budgeted in
+  test_stage_budgets.py. Real CR3, two masks: every slider/drag/add shows
+  a new frame in 10-20 ms, UI calls under 1 ms, no UI stalls.
 - **2026-10-17 Phase 7 (part 1)** - Crop/Heal/Mask options moved from
   toolbars under the photo into a Lightroom-style drawer under the tool
   strip; click the active tool again = Done, switching tools commits,

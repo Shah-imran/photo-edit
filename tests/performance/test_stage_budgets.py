@@ -23,7 +23,8 @@ from src.processing.processing_worker import ProcessingWorker
 pytestmark = pytest.mark.perf
 
 
-# stage name -> (worker processor attribute suffix, params, kind)
+# stage name -> (params, kind). The worker processor is
+# ``_<name>_processor`` (the part before any ":" variant suffix).
 # kind "point" = per-pixel operation, "spatial" = needs neighbourhoods.
 STAGES = {
     "exposure": (dict(exposure=0.5, contrast=20), "point"),
@@ -45,6 +46,13 @@ STAGES = {
     "defringe": (dict(defringe=40), "spatial"),
     "geometry": (dict(distortion=20, vertical=10), "spatial"),
     "straighten": (dict(straighten=3), "spatial"),
+    # One local-adjustment mask (the masks list applies these in turn).
+    "mask": (dict(mask=dict(type="radial", cx=0.5, cy=0.5, rx=0.3, ry=0.25, feather=0.5,
+                            exposure=0.7, contrast=15, saturation=20)), "point"),
+    "mask:linear": (dict(mask=dict(type="linear", x0=0.5, y0=0.2, x1=0.5, y1=0.8,
+                                   exposure=-0.5, saturation=-20)), "point"),
+    "mask:clarity": (dict(mask=dict(type="radial", cx=0.5, cy=0.5, rx=0.3, ry=0.25,
+                                    feather=0.5, exposure=0.5, clarity=30)), "spatial"),
 }
 
 # tier -> (width, height, {kind: budget_ms})
@@ -101,7 +109,7 @@ def _params_for_marks():
 def test_stage_within_budget(worker, tier, stage):
     width, height, budgets = TIERS[tier]
     params, kind = STAGES[stage]
-    processor = getattr(worker, f"_{stage}_processor")
+    processor = getattr(worker, f"_{stage.split(':')[0]}_processor")
     elapsed = _best_ms(processor.process, _image(width, height), params)
     budget = budgets[kind]
     assert elapsed <= budget, (
@@ -118,7 +126,7 @@ def test_stage_within_budget(worker, tier, stage):
 def test_stage_full_resolution_budget(worker, stage):
     width, height, budgets = FULL_TIER
     params, kind = STAGES[stage]
-    processor = getattr(worker, f"_{stage}_processor")
+    processor = getattr(worker, f"_{stage.split(':')[0]}_processor")
     image = _image(width, height)
     start = perf_counter()
     processor.process(image, **params)

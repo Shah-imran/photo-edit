@@ -789,7 +789,9 @@ class ImageController(QObject):
                 {"heal_spots": heal_spots_override} if heal_spots_override else {}
             )
         if mask_override is not _UNSET:
-            overrides["mask_params"] = mask_override
+            overrides["mask_params"] = (
+                {"masks": [mask_override]} if mask_override else {}
+            )
         if not apply_crop:
             overrides["crop_params"] = {}
         return self._pipeline.render(original, **self._render_kwargs(**overrides))
@@ -899,7 +901,10 @@ class ImageController(QObject):
         state.update(self._geometry_params)
         state.update(self._straighten_params)
         state["crop"] = {**self._CROP_DEFAULTS, **self._crop_params}
-        state["mask"] = self._mask_params.copy() if self._mask_params else None
+        # Local-adjustment masks, applied in list order (Lightroom's mask
+        # list). Saved edits from before multiple masks carried a single
+        # "mask"; _apply_state_params still reads that.
+        state["masks"] = [dict(mask) for mask in self._mask_params.get("masks", [])]
         state["heal_spots"] = [
             dict(spot) for spot in self._healing_params.get("heal_spots", [])
         ]
@@ -947,8 +952,9 @@ class ImageController(QObject):
         crop_values = self._normalize_crop_state(
             adjustments.get("crop") if adjustments else None
         )
-        mask_values = self._normalize_mask_state(
-            adjustments.get("mask") if adjustments else None
+        mask_values = self._normalize_masks_state(
+            (adjustments or {}).get("masks"),
+            legacy_mask=(adjustments or {}).get("mask"),
         )
         heal_spots_values = self._normalize_heal_spots_state(
             adjustments.get("heal_spots") if adjustments else None
@@ -1007,7 +1013,7 @@ class ImageController(QObject):
         self._crop_params = (
             {} if self._is_identity_crop(crop_values) else crop_values
         )
-        self._mask_params = mask_values
+        self._mask_params = {"masks": mask_values} if mask_values else {}
         self._healing_params = (
             {"heal_spots": heal_spots_values} if heal_spots_values else {}
         )
@@ -1692,41 +1698,22 @@ class ImageController(QObject):
         self.apply_adjustments(crop_params=crop_params, add_to_history=True)
 
     def on_mask_changed(self, mask: Optional[Dict[str, Any]]) -> None:
-        """Set (or clear, with ``None``) the single active local-adjustment
-        mask.
+        """Replace all masks with ``mask`` (or remove them for None) as one
+        undoable step. Single-mask convenience over :meth:`on_masks_changed`."""
+        self.on_masks_changed([mask] if mask else [])
 
-        Set programmatically for now -- a later, separate slice wires
-        this to interactive drag UI (a draggable gradient line for
-        linear, a draggable ellipse for radial, reusing ``CropOverlay``'s
-        established coordinate-math approach) plus a small panel of the
-        mask's own Exposure/Contrast/Saturation/Clarity sliders. Mirrors
-        :meth:`on_crop_changed`'s pattern exactly: captures the
-        pre-gesture state via :meth:`_capture_pending_history_state`,
-        normalizes/validates the incoming dict defensively (never
-        trusting the caller -- the dict may come from an old catalog
-        entry, a malformed imported preset, or interactive UI input in
-        the later slice), and commits via
-        ``apply_adjustments(..., add_to_history=True)`` as a single
-        discrete step, participating fully in the state-aware undo/redo
-        system (see docs/planning/implementation-notes/
-        2026-10-13-state-aware-undo-redo.md).
-
-        Args:
-            mask: ``None`` to clear the active mask, or a dict shaped per
-                the module-level state contract (see
-                docs/planning/implementation-notes/
-                2026-10-13-mask-processor.md section 4). An unrecognized
-                ``"type"`` (or a missing one) is treated the same as
-                ``None``.
-        """
+    def on_masks_changed(self, masks: List[Dict[str, Any]]) -> None:
+        """Commit the full mask list (the mask tool's Done) as one undoable
+        step. Each mask is normalized defensively (it may come from an old
+        catalog entry, a preset or the overlay)."""
         if not self.has_image():
             return
-
         self._capture_pending_history_state()
-
-        normalized = self._normalize_mask_state(mask)
-
-        self.apply_adjustments(mask_params=normalized, add_to_history=True)
+        normalized = self._normalize_masks_state(masks)
+        self.apply_adjustments(
+            mask_params={"masks": normalized} if normalized else {},
+            add_to_history=True,
+        )
 
     def on_heal_spots_changed(self, heal_spots: list) -> None:
         """Set the complete list of heal spots (replaces, not appends).
@@ -1772,44 +1759,21 @@ class ImageController(QObject):
         self.apply_adjustments(healing_params=healing_params, add_to_history=True)
 
     def preview_mask(self, mask: Optional[Dict[str, Any]]) -> None:
-        """Display an in-progress, UNCOMMITTED mask candidate, live.
+        """Show ``mask`` as the only mask, uncommitted (display only).
+        Single-mask convenience over :meth:`preview_masks`."""
+        self.preview_masks([mask] if mask else [])
 
-        This is the mask-tool-UI slice's live-preview mechanism, used
-        while a mask's geometry is being dragged or its 4 local-adjustment
-        sliders are being moved, BEFORE the user clicks Apply. See
-        docs/planning/implementation-notes/2026-10-13-mask-tool-ui.md
-        section 3.5 for the full design rationale (reusing
-        ``get_export_image``'s own ``mask_override`` parameter rather than
-        ``on_mask_changed``/``apply_adjustments``) -- in short:
-
-        - It recomputes a FULL preview image, correctly, via
-          ``get_export_image(mask_override=normalized)``, the same
-          always-synchronous-and-correct recompute path export already
-          uses (unaffected by ``self._use_threading`` or the documented
-          gap where the non-threaded ``apply_adjustments`` live-preview
-          fallback branch skips the mask processor entirely).
-        - It does NOT touch ``self._mask_params`` (the committed mask),
-          ``self._image_model.current_image``, or the history stack in
-          any way -- a call here can never be mistaken for, or leave a
-          stray trace in, a real edit. Calling this any number of times
-          (every drag frame, every slider tick) is always safe.
-        - It displays the result via ``ImageView.set_image`` directly
-          (mirroring ``_enter_crop_mode``'s own use of that call for a
-          non-"current adjustment state" preview image).
-
-        Args:
-            mask: ``None``, or a (possibly still-rough/mid-drag) mask dict
-                shaped per the module-level state contract. Defensively
-                normalized/clamped exactly like ``on_mask_changed`` does,
-                so a mid-drag geometry value briefly outside ``[0, 1]``
-                can never reach the processor un-clamped.
-        """
+    def preview_masks(self, masks: List[Dict[str, Any]]) -> None:
+        """Show an in-progress, UNCOMMITTED mask list while the mask tool
+        is being used: cheap interactive frames while dragging, a quality
+        frame once input settles, rendered by the worker (never on the UI
+        thread). The committed masks and history are untouched."""
         if not self.has_image():
             return
-        normalized = self._normalize_mask_state(mask)
-        # Off the UI thread when threaded, on the preview proxy: a
-        # synchronous 24 MP render per mouse move made mask dragging unusable.
-        self._preview_tool_candidate(mask_params=normalized)
+        normalized = self._normalize_masks_state(masks)
+        self._preview_tool_candidate(
+            mask_params={"masks": normalized} if normalized else {}
+        )
 
     def preview_heal_spots(self, heal_spots: list) -> None:
         """Display an in-progress, UNCOMMITTED heal-spot list, live.
@@ -2439,6 +2403,18 @@ class ImageController(QObject):
             result[key] = max(low, min(high, value))
 
         return result
+
+    _MAX_MASKS = 32
+
+    def _normalize_masks_state(self, raw_masks, legacy_mask=None) -> List[Dict[str, Any]]:
+        """Normalized list of masks; malformed entries are dropped. A saved
+        edit from before multiple masks has a single ``"mask"`` instead."""
+        if raw_masks is None and legacy_mask:
+            raw_masks = [legacy_mask]
+        if not isinstance(raw_masks, (list, tuple)):
+            return []
+        masks = [self._normalize_mask_state(mask) for mask in raw_masks]
+        return [mask for mask in masks if mask][: self._MAX_MASKS]
 
     def _normalize_heal_spots_state(
         self,

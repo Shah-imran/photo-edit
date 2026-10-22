@@ -55,7 +55,7 @@ def sample_image():
     return np.full((20, 10, 3), 0.5, dtype=np.float32)
 
 
-def _make_has_image(main_window, sample_image, mask=None):
+def _make_has_image(main_window, sample_image, mask=None, masks=None):
     main_window._image_controller.has_image = MagicMock(return_value=True)
     main_window._image_controller.get_export_image = MagicMock(return_value=sample_image)
     main_window._image_controller.preview_uncropped = MagicMock(
@@ -65,11 +65,20 @@ def _make_has_image(main_window, sample_image, mask=None):
     main_window._image_controller.get_adjustment_state = MagicMock(
         return_value={
             "crop": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0},
-            "mask": mask,
+            "masks": list(masks) if masks is not None else ([mask] if mask else []),
         }
     )
     main_window._image_controller.on_crop_changed = MagicMock()
-    main_window._image_controller.on_mask_changed = MagicMock()
+    main_window._image_controller.on_masks_changed = MagicMock()
+    main_window._image_controller.preview_masks = MagicMock()
+
+
+def _radial(**values):
+    mask = {"type": "radial", "invert": False, "cx": 0.5, "cy": 0.5, "rx": 0.2,
+            "ry": 0.2, "feather": 0.5, "exposure": 0.0, "contrast": 0.0,
+            "saturation": 0.0, "clarity": 0.0}
+    mask.update(values)
+    return mask
 
 
 @pytest.fixture
@@ -164,8 +173,8 @@ class TestApplyMask:
 
         main_window._apply_mask()
 
-        main_window._image_controller.on_mask_changed.assert_called_once()
-        committed = main_window._image_controller.on_mask_changed.call_args[0][0]
+        main_window._image_controller.on_masks_changed.assert_called_once()
+        (committed,) = main_window._image_controller.on_masks_changed.call_args[0][0]
         assert committed["type"] == "linear"
         assert committed["invert"] is False
         assert committed["x0"] == pytest.approx(0.2)
@@ -179,13 +188,13 @@ class TestApplyMask:
 
 
 class TestRemoveMask:
-    def test_commits_none_and_exits(self, main_window, sample_image):
+    def test_deleting_the_only_mask_commits_none_and_exits(self, main_window, sample_image):
         _make_has_image(main_window, sample_image, mask=None)
         main_window._enter_mask_mode()
 
         main_window._remove_mask()
 
-        main_window._image_controller.on_mask_changed.assert_called_once_with(None)
+        main_window._image_controller.on_masks_changed.assert_called_once_with([])
         assert not main_window._image_view.is_in_mask_mode()
         assert not main_window._mask_toolbar.isVisible()
         assert main_window._image_toolbar.isVisible()
@@ -252,7 +261,7 @@ class TestCancelMaskNoNetChange:
             main_window._image_controller.adjustment_state_restored, timeout=2000
         ):
             main_window._image_controller.on_mask_changed(committed_mask)
-        before = main_window._image_controller.get_adjustment_state()["mask"]
+        before = main_window._image_controller.get_adjustment_state()["masks"]
         assert before is not None
 
         main_window._enter_mask_mode()
@@ -267,7 +276,7 @@ class TestCancelMaskNoNetChange:
 
         main_window._cancel_mask()
 
-        after = main_window._image_controller.get_adjustment_state()["mask"]
+        after = main_window._image_controller.get_adjustment_state()["masks"]
         assert after == before
         assert not main_window._image_view.is_in_mask_mode()
 
@@ -282,8 +291,8 @@ class TestLivePreviewWhileEditing:
         main_window._enter_mask_mode()
         assert main_window._image_view.is_in_mask_mode()
 
-        before_mask_state = main_window._image_controller.get_adjustment_state()["mask"]
-        assert before_mask_state is None  # No mask ever committed.
+        before_mask_state = main_window._image_controller.get_adjustment_state()["masks"]
+        assert before_mask_state == []  # No mask ever committed.
         before_image = main_window._image_view._pixmap.toImage().copy()
 
         main_window._mask_toolbar._exposure_slider.set_value(4.0)
@@ -293,5 +302,120 @@ class TestLivePreviewWhileEditing:
         assert after_image != before_image
 
         # Still fully uncommitted -- the real adjustment state is untouched.
-        after_mask_state = main_window._image_controller.get_adjustment_state()["mask"]
+        after_mask_state = main_window._image_controller.get_adjustment_state()["masks"]
         assert after_mask_state == before_mask_state
+
+
+class TestMaskList:
+    """Several masks, as in Lightroom's mask panel: a row and a pin per
+    mask, one selected for editing, all committed together on Done."""
+
+    def test_existing_masks_are_listed_with_a_pin_each_and_the_last_selected(
+        self, main_window, sample_image
+    ):
+        masks = [_radial(cx=0.3, exposure=1.0), _radial(cx=0.7, saturation=20.0)]
+        _make_has_image(main_window, sample_image, masks=masks)
+
+        main_window._enter_mask_mode()
+
+        toolbar = main_window._mask_toolbar
+        assert toolbar._mask_list.count() == 2
+        assert toolbar.selected_index() == 1
+        assert toolbar.get_adjustments()["saturation"] == pytest.approx(20.0)
+        overlay = main_window._image_view.get_mask_overlay()
+        assert overlay._pins == [(pytest.approx(0.3), 0.5), (pytest.approx(0.7), 0.5)]
+        assert overlay._selected_pin == 1
+
+    def test_selecting_another_mask_keeps_the_edits_of_the_first(
+        self, main_window, sample_image
+    ):
+        masks = [_radial(cx=0.3, exposure=1.0), _radial(cx=0.7)]
+        _make_has_image(main_window, sample_image, masks=masks)
+        main_window._enter_mask_mode()
+        main_window._mask_toolbar._contrast_slider.set_value(25.0)
+
+        main_window._mask_toolbar._mask_list.setCurrentRow(0)
+
+        assert main_window._mask_selected == 0
+        assert main_window._mask_toolbar.get_adjustments()["exposure"] == pytest.approx(1.0)
+        assert main_window._mask_working[1]["contrast"] == pytest.approx(25.0)
+        overlay = main_window._image_view.get_mask_overlay()
+        assert overlay.get_geometry()["cx"] == pytest.approx(0.3)
+
+    def test_clicking_a_pin_selects_its_mask(self, main_window, sample_image):
+        masks = [_radial(cx=0.3, exposure=1.0), _radial(cx=0.7, exposure=2.0)]
+        _make_has_image(main_window, sample_image, masks=masks)
+        main_window._enter_mask_mode()
+
+        main_window._image_view.get_mask_overlay().pin_clicked.emit(0)
+
+        assert main_window._mask_toolbar.selected_index() == 0
+        assert main_window._mask_toolbar.get_adjustments()["exposure"] == pytest.approx(1.0)
+
+    def test_add_creates_and_selects_a_new_mask_of_that_type(
+        self, main_window, sample_image
+    ):
+        _make_has_image(main_window, sample_image, masks=[_radial(exposure=1.0)])
+        main_window._enter_mask_mode()
+
+        main_window._mask_toolbar._add_linear_button.click()
+
+        assert len(main_window._mask_working) == 2
+        assert main_window._mask_toolbar.selected_index() == 1
+        assert main_window._mask_toolbar.get_mask_type() == "linear"
+        assert main_window._image_view.get_mask_overlay().get_mask_type() == "linear"
+        assert main_window._mask_toolbar.get_adjustments()["exposure"] == 0.0
+        main_window._image_controller.preview_masks.assert_called()
+
+    def test_delete_removes_only_the_selected_mask_and_stays_open(
+        self, main_window, sample_image
+    ):
+        masks = [_radial(cx=0.3, exposure=1.0), _radial(cx=0.7, exposure=2.0)]
+        _make_has_image(main_window, sample_image, masks=masks)
+        main_window._enter_mask_mode()
+
+        main_window._remove_mask()
+
+        assert main_window._image_view.is_in_mask_mode()
+        assert [m["exposure"] for m in main_window._mask_working] == [1.0]
+        assert main_window._mask_toolbar._mask_list.count() == 1
+        main_window._image_controller.on_masks_changed.assert_not_called()
+
+    def test_done_commits_every_mask_once_and_drops_empty_ones(
+        self, main_window, sample_image
+    ):
+        _make_has_image(main_window, sample_image, masks=[_radial(cx=0.3, exposure=1.0)])
+        main_window._enter_mask_mode()
+        main_window._mask_toolbar._add_radial_button.click()
+        main_window._mask_toolbar._add_linear_button.click()
+        main_window._mask_toolbar._saturation_slider.set_value(-30.0)
+
+        main_window._apply_mask()
+
+        main_window._image_controller.on_masks_changed.assert_called_once()
+        committed = main_window._image_controller.on_masks_changed.call_args[0][0]
+        assert [(m["type"], m["exposure"], m["saturation"]) for m in committed] == [
+            ("radial", 1.0, 0.0),
+            ("linear", 0.0, pytest.approx(-30.0)),
+        ]
+
+    def test_two_masks_render_and_undo_as_one_step(
+        self, main_window, sample_image_file, qtbot
+    ):
+        controller = main_window._image_controller
+        controller.load_image(sample_image_file)
+        qtbot.wait(100)
+        main_window._enter_mask_mode()
+        main_window._mask_toolbar._exposure_slider.set_value(1.0)
+        main_window._mask_toolbar._add_radial_button.click()
+        main_window._mask_toolbar._saturation_slider.set_value(40.0)
+
+        with qtbot.waitSignal(controller.adjustment_state_restored, timeout=2000):
+            main_window._apply_mask()
+
+        masks = controller.get_adjustment_state()["masks"]
+        assert [m["type"] for m in masks] == ["linear", "radial"]
+        controller.undo()
+        assert controller.get_adjustment_state()["masks"] == []
+        controller.redo()
+        assert len(controller.get_adjustment_state()["masks"]) == 2

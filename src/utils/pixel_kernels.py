@@ -723,6 +723,177 @@ def chroma_merge(luminance, chroma, smoothed, t, weights):
     return out
 
 
+
+if HAVE_NUMBA:
+    # Local-adjustment masks: the mask weight (linear or radial gradient),
+    # the local exposure/contrast/saturation and the blend in one pass.
+    # Mirrors MaskProcessor._process_numpy (ExposureProcessor's LUT
+    # contrast, ColorProcessor's HSV saturation).
+
+    @njit(cache=True, inline="always")
+    def _mask_alpha(x, y, width, height, mtype, geom, invert):  # pragma: no cover
+        if mtype == 0:  # linear: 0 at (x0, y0) rising to 1 at (x1, y1)
+            x0 = geom[0] * width
+            y0 = geom[1] * height
+            dx = geom[2] * width - x0
+            dy = geom[3] * height - y0
+            length_sq = dx * dx + dy * dy
+            if length_sq < 1e-9:
+                alpha = 1.0
+            else:
+                t = ((x + 0.5 - x0) * dx + (y + 0.5 - y0) * dy) / length_sq
+                alpha = min(max(t, 0.0), 1.0)
+        else:  # radial ellipse with a smoothstep feather
+            px = (x + 0.5) / max(width, 1.0)
+            py = (y + 0.5) / max(height, 1.0)
+            ddx = (px - geom[0]) / geom[2]
+            ddy = (py - geom[1]) / geom[3]
+            dist = np.sqrt(ddx * ddx + ddy * ddy)
+            feather = geom[4]
+            inner = max(1.0 - feather, 0.0)
+            span = max(feather, 1e-6)
+            t = min(max((dist - inner) / span, 0.0), 1.0)
+            alpha = 1.0 - t * t * (3.0 - 2.0 * t)
+            alpha = min(max(alpha, 0.0), 1.0)
+        a = np.float32(alpha)
+        if invert:
+            a = np.float32(1.0) - a
+        return a
+
+    @njit(cache=True, inline="always")
+    def _mask_tone(  # pragma: no cover
+        v, exposure_mul, do_exposure, contrast_factor, do_contrast,
+        lin_to_srgb, srgb_to_lin, srgb_min, srgb_max, srgb_scale,
+    ):
+        if do_exposure:
+            v = v * exposure_mul
+        if do_contrast:
+            t = v
+            if not (t >= 0.0):
+                t = np.float32(0.0)
+            elif t > 1.0:
+                t = np.float32(1.0)
+            sv = lin_to_srgb[int(t * np.float32(lin_to_srgb.shape[0] - 1))]
+            a = (sv - np.float32(0.5)) * contrast_factor + np.float32(0.5)
+            if a < srgb_min:
+                a = srgb_min
+            elif a > srgb_max:
+                a = srgb_max
+            v = srgb_to_lin[int((a - srgb_min) * srgb_scale)]
+        return v
+
+    @njit(cache=True, inline="always")
+    def _mask_local_pixel(  # pragma: no cover
+        r, g, b, exposure_mul, do_exposure, contrast_factor, do_contrast,
+        lin_to_srgb, srgb_to_lin, srgb_min, srgb_max, srgb_scale, sat_factor, do_sat,
+    ):
+        # Scalars only: a per-pixel tuple/list here is a heap allocation.
+        r = _mask_tone(r, exposure_mul, do_exposure, contrast_factor, do_contrast,
+                       lin_to_srgb, srgb_to_lin, srgb_min, srgb_max, srgb_scale)
+        g = _mask_tone(g, exposure_mul, do_exposure, contrast_factor, do_contrast,
+                       lin_to_srgb, srgb_to_lin, srgb_min, srgb_max, srgb_scale)
+        b = _mask_tone(b, exposure_mul, do_exposure, contrast_factor, do_contrast,
+                       lin_to_srgb, srgb_to_lin, srgb_min, srgb_max, srgb_scale)
+        if do_sat:
+            h, sv, vv = _rgb_to_hsv(_clip01(r), _clip01(g), _clip01(b))
+            sv = _clip01(sv * sat_factor)
+            r, g, b = _hsv_to_rgb(h, sv, vv)
+        return r, g, b
+
+    @njit(parallel=True, cache=True)
+    def _mask_local_kernel(  # pragma: no cover
+        source, out, exposure_mul, do_exposure, contrast_factor, do_contrast,
+        lin_to_srgb, srgb_to_lin, srgb_min, srgb_max, srgb_scale, sat_factor, do_sat,
+    ):
+        height, width = source.shape[0], source.shape[1]
+        for y in prange(height):
+            for x in range(width):
+                r, g, b = _mask_local_pixel(
+                    source[y, x, 0], source[y, x, 1], source[y, x, 2],
+                    exposure_mul, do_exposure, contrast_factor, do_contrast,
+                    lin_to_srgb, srgb_to_lin, srgb_min, srgb_max, srgb_scale,
+                    sat_factor, do_sat,
+                )
+                out[y, x, 0] = r
+                out[y, x, 1] = g
+                out[y, x, 2] = b
+
+    @njit(parallel=True, cache=True)
+    def _mask_blend_kernel(  # pragma: no cover
+        source, local, use_local, out, mtype, geom, invert,
+        exposure_mul, do_exposure, contrast_factor, do_contrast,
+        lin_to_srgb, srgb_to_lin, srgb_min, srgb_max, srgb_scale, sat_factor, do_sat,
+    ):
+        height, width, channels = source.shape
+        one = np.float32(1.0)
+        for y in prange(height):
+            for x in range(width):
+                a = _mask_alpha(float(x), float(y), float(width), float(height), mtype, geom, invert)
+                if a == 0.0:
+                    for c in range(channels):
+                        out[y, x, c] = source[y, x, c]
+                    continue
+                if use_local:
+                    lr = local[y, x, 0]
+                    lg = local[y, x, 1]
+                    lb = local[y, x, 2]
+                else:
+                    lr, lg, lb = _mask_local_pixel(
+                        source[y, x, 0], source[y, x, 1], source[y, x, 2],
+                        exposure_mul, do_exposure, contrast_factor, do_contrast,
+                        lin_to_srgb, srgb_to_lin, srgb_min, srgb_max, srgb_scale,
+                        sat_factor, do_sat,
+                    )
+                keep = one - a
+                out[y, x, 0] = source[y, x, 0] * keep + lr * a
+                out[y, x, 1] = source[y, x, 1] * keep + lg * a
+                out[y, x, 2] = source[y, x, 2] * keep + lb * a
+                for c in range(3, channels):
+                    out[y, x, c] = source[y, x, c]
+
+
+def _mask_point_args(exposure_mul, contrast_factor, sat_factor, luts):
+    lin_to_srgb, srgb_to_lin, srgb_min, srgb_max = luts
+    f32 = np.float32
+    return (
+        f32(1.0 if exposure_mul is None else exposure_mul), exposure_mul is not None,
+        f32(1.0 if contrast_factor is None else contrast_factor), contrast_factor is not None,
+        lin_to_srgb, srgb_to_lin, f32(srgb_min), f32(srgb_max),
+        f32((lin_to_srgb.shape[0] - 1) / (srgb_max - srgb_min)),
+        f32(1.0 if sat_factor is None else sat_factor), sat_factor is not None,
+    )
+
+
+def mask_local(source, exposure_mul, contrast_factor, sat_factor, luts):
+    """The mask's local exposure/contrast/saturation over every pixel, or
+    None without Numba. ``None`` multipliers/factors mean "off"."""
+    if not HAVE_NUMBA:
+        return None
+    source = np.ascontiguousarray(source, dtype=np.float32)
+    out = np.empty(source.shape[:2] + (3,), dtype=np.float32)
+    _run(_mask_local_kernel, source, out,
+         *_mask_point_args(exposure_mul, contrast_factor, sat_factor, luts))
+    return out
+
+
+def mask_blend(source, local, mtype, geom, invert, exposure_mul, contrast_factor,
+               sat_factor, luts):
+    """Blend the mask's local adjustment into ``source`` by its weight, or
+    None without Numba. ``local`` is a precomputed local image (used when
+    local clarity needs a blur) or None to compute it per pixel."""
+    if not HAVE_NUMBA:
+        return None
+    source = np.ascontiguousarray(source, dtype=np.float32)
+    out = np.empty_like(source)
+    use_local = local is not None
+    local_arr = (np.ascontiguousarray(local, dtype=np.float32) if use_local
+                 else np.zeros((1, 1, 3), dtype=np.float32))
+    _run(_mask_blend_kernel, source, local_arr, use_local, out, int(mtype),
+         np.asarray(geom, dtype=np.float64), bool(invert),
+         *_mask_point_args(exposure_mul, contrast_factor, sat_factor, luts))
+    return out
+
+
 def warm_up() -> None:
     """Compile (or load from the on-disk cache) every kernel once.
 
@@ -750,4 +921,8 @@ def warm_up() -> None:
     dehaze_combine(tiny, dark_channel(tiny), 0.5, 0.6)
     lum, chroma = chroma_split(tiny, (0.2, 0.7, 0.1))
     chroma_merge(lum, chroma, chroma, 0.5, (0.2, 0.7, 0.1))
+    luts = (np.zeros(8, np.float32), np.zeros(8, np.float32), -0.5, 1.5)
+    mask_blend(tiny, None, 1, (0.5, 0.5, 0.3, 0.3, 0.5), False, 2.0, 1.2, 1.1, luts)
+    mask_blend(tiny, mask_local(tiny, 2.0, 1.2, 1.1, luts), 0, (0.1, 0.1, 0.9, 0.9, 0.0),
+               True, 2.0, 1.2, 1.1, luts)
     logger.info("PERF kernels.warm_up numba ms=%.0f", (perf_counter() - start) * 1000)

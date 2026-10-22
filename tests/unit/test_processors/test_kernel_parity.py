@@ -191,3 +191,25 @@ def test_color_nr_matches_reference(rgb, monkeypatch, value):
     _numpy_only(monkeypatch, "chroma_split", "chroma_merge")
     reference = ColorNoiseReductionProcessor().process(rgb, color_nr=value)
     np.testing.assert_allclose(fast, reference, atol=ATOL)
+
+
+from src.processors.mask_processor import MaskProcessor  # noqa: E402
+
+_RADIAL = dict(type="radial", cx=0.45, cy=0.55, rx=0.3, ry=0.2, feather=0.6, invert=False)
+_LINEAR = dict(type="linear", x0=0.2, y0=0.1, x1=0.8, y1=0.7, invert=False)
+
+
+@pytest.mark.parametrize("geometry", [_RADIAL, _LINEAR, {**_RADIAL, "invert": True},
+                                      {**_LINEAR, "feather": 0.0, "invert": True}])
+@pytest.mark.parametrize("adjust", [
+    dict(exposure=1.2, contrast=0.0, saturation=0.0, clarity=0.0),
+    dict(exposure=-0.7, contrast=40.0, saturation=-30.0, clarity=0.0),
+    dict(exposure=0.0, contrast=-100.0, saturation=100.0, clarity=0.0),
+    dict(exposure=0.5, contrast=20.0, saturation=20.0, clarity=60.0),
+])
+def test_mask_matches_reference(rgb, geometry, adjust):
+    processor = MaskProcessor()
+    mask = {**geometry, **adjust}
+    fast = processor.process(rgb, mask=mask)
+    reference = processor._process_numpy(np.asarray(rgb, dtype=np.float32), mask)
+    np.testing.assert_allclose(fast, reference, atol=HSV_ATOL)

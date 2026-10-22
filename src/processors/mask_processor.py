@@ -56,6 +56,13 @@ from src.processors.base_processor import BaseProcessor
 from src.processors.clarity_processor import ClarityProcessor
 from src.processors.color_processor import ColorProcessor
 from src.processors.exposure_processor import ExposureProcessor
+from src.processors.exposure_processor import (
+    _SRGB_TO_LINEAR_MAX,
+    _SRGB_TO_LINEAR_MIN,
+    _linear_to_srgb_lut,
+    _srgb_to_linear_lut,
+)
+from src.utils import pixel_kernels
 from src.utils.color_pipeline import LinearImage
 
 _MASK_TYPES = ("linear", "radial")
@@ -106,7 +113,54 @@ class MaskProcessor(BaseProcessor):
         source = np.asarray(image, dtype=np.float32)
         if not mask or mask.get("type") not in _MASK_TYPES:
             return source.copy()
+        fused = self._process_fused(source, mask)
+        if fused is not None:
+            return fused
+        return self._process_numpy(source, mask)
 
+    def _process_fused(self, source: LinearImage, mask: Dict[str, Any]):
+        """Weight, local adjustment and blend in one compiled pass (local
+        clarity adds a blur of the locally adjusted image). None without
+        Numba."""
+        exposure = float(mask.get("exposure", 0.0))
+        contrast = float(mask.get("contrast", 0.0))
+        saturation = float(mask.get("saturation", 0.0))
+        clarity = float(mask.get("clarity", 0.0))
+        exposure_mul = 2.0 ** exposure if exposure != 0.0 else None
+        contrast_factor = (
+            float(np.clip(1.0 + contrast / 100.0, 0.0, 2.0)) if contrast != 0.0 else None
+        )
+        sat_factor = (
+            float(np.clip(1.0 + saturation / 100.0, 0.0, 2.0)) if saturation != 0.0 else None
+        )
+        if mask.get("type") == "linear":
+            mtype = 0
+            geom = (
+                float(mask.get("x0", 0.0)), float(mask.get("y0", 0.0)),
+                float(mask.get("x1", 1.0)), float(mask.get("y1", 1.0)), 0.0,
+            )
+        else:
+            mtype = 1
+            geom = (
+                float(mask.get("cx", 0.5)), float(mask.get("cy", 0.5)),
+                max(float(mask.get("rx", 0.25)), 1e-4), max(float(mask.get("ry", 0.25)), 1e-4),
+                float(np.clip(mask.get("feather", 0.5), 0.0, 1.0)),
+            )
+        luts = (_linear_to_srgb_lut(), _srgb_to_linear_lut(),
+                _SRGB_TO_LINEAR_MIN, _SRGB_TO_LINEAR_MAX)
+        local = None
+        if clarity != 0.0:
+            local = pixel_kernels.mask_local(source, exposure_mul, contrast_factor, sat_factor, luts)
+            if local is None:
+                return None
+            local = self._clarity_processor.process(local, clarity=clarity)
+        return pixel_kernels.mask_blend(
+            source, local, mtype, geom, bool(mask.get("invert", False)),
+            exposure_mul, contrast_factor, sat_factor, luts,
+        )
+
+    def _process_numpy(self, source: LinearImage, mask: Dict[str, Any]) -> LinearImage:
+        """Reference implementation (and fallback without Numba)."""
         height, width = source.shape[0], source.shape[1]
         alpha = self._compute_alpha(height, width, mask)
         if bool(mask.get("invert", False)):
