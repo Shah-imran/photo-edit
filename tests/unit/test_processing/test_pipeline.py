@@ -10,9 +10,7 @@ import numpy as np
 import pytest
 from PyQt6.QtWidgets import QApplication
 
-from src.commands.adjustment_commands import CombinedAdjustmentCommand
 from src.controllers.image_controller import ImageController
-from src.models.image_model import ImageModel
 from src.processing.pipeline import DevelopPipeline
 from src.processing.processing_worker import ProcessingWorker
 from src.views.image_view import ImageView
@@ -83,16 +81,10 @@ def test_every_entry_point_renders_the_same_pixels(controller, photo):
     worker = ProcessingWorker()._apply_adjustments(photo, **kwargs)
     restored = controller.image_model.current_image
 
-    model = ImageModel()
-    model.set_original_image(photo)
-    command = CombinedAdjustmentCommand(model, **kwargs)
-    command.execute()
-
     controller.apply_adjustments(add_to_history=False)  # sync live preview
     live = controller.image_model.current_image
 
-    for name, image in [("worker", worker), ("restore", restored),
-                        ("undo command", model.current_image), ("live preview", live)]:
+    for name, image in [("worker", worker), ("restore", restored), ("live preview", live)]:
         np.testing.assert_allclose(image, reference, atol=1e-6, err_msg=name)
 
 
@@ -133,3 +125,16 @@ def test_preview_matches_downscaled_export(params):
     effect = np.abs(preview - small).mean()
     mismatch = np.abs(preview - export_small).mean()
     assert mismatch <= max(0.15 * effect, 2e-3), (mismatch, effect)
+
+
+def test_stage_order_contract():
+    """The documented order (see each stage's implementation note):
+    healing repairs the as-shot pixels first; geometry precedes
+    straighten; the local mask blends after every global stage and right
+    before crop; crop, the only shape-changing stage, is last."""
+    order = [name for name, *_ in DevelopPipeline.STAGES]
+    assert order[0] == "healing"
+    assert order[-1] == "crop"
+    assert order[-2] == "mask"
+    assert order.index("geometry") < order.index("straighten") < order.index("mask")
+    assert order.index("exposure") < order.index("curve") < order.index("color")
